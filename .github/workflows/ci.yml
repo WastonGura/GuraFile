@@ -59,15 +59,18 @@ jobs:
           git diff --check "$env:BASE_SHA..$env:HEAD_SHA"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build and test
+      - name: Restore
         shell: pwsh
-        run: |
-          $solutions = @(Get-ChildItem -Path . -Recurse -File | Where-Object Extension -In '.sln', '.slnx')
-          if ($solutions.Count -eq 0) {
-            Write-Host 'No solution yet; repository checks passed.'
-            exit 0
-          }
-          foreach ($solution in $solutions) {
-            dotnet test $solution.FullName --configuration Release
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+        run: dotnet restore .\GuraFile.slnx
+
+      - name: Build
+        shell: pwsh
+        run: dotnet build .\GuraFile.slnx --configuration Release --no-restore
+
+      - name: Test
+        shell: pwsh
+        run: dotnet test .\tests\GuraFile.Tests\GuraFile.Tests.csproj --configuration Release --no-build
+
+      - name: Launch smoke
+        shell: pwsh
+        run: .\tests\LaunchSmoke.ps1 -Configuration Release -RuntimeIdentifier win-x64
