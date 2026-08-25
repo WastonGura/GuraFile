@@ -16,6 +16,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -24,11 +26,37 @@ jobs:
       - name: Check repository hygiene
         shell: pwsh
         run: |
-          git diff --check
-          $privateFiles = @(git ls-files agent_memory docs/begin)
+          $privateFiles = @(git ls-files AGENTS.md agent_memory docs/begin)
           if ($privateFiles.Count -gt 0) {
             throw "Local-only files are tracked: $($privateFiles -join ', ')"
           }
+
+      - name: Check branch and commit naming
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          $branchPattern = '^(feat|fix|docs|test|refactor|perf|build|ci|chore|revert)/[a-z0-9]+(?:-[a-z0-9]+)*$'
+          $subjectPattern = '^(feat|fix|docs|test|refactor|perf|build|ci|chore|revert)(\([a-z0-9-]+\))?!?: .+$'
+
+          if ($env:HEAD_BRANCH -notmatch $branchPattern) {
+            throw "Invalid branch name: $env:HEAD_BRANCH"
+          }
+          if ($env:PR_TITLE -notmatch $subjectPattern) {
+            throw "Invalid PR title: $env:PR_TITLE"
+          }
+
+          $subjects = @(git log --format=%s "$env:BASE_SHA..HEAD")
+          $invalidSubjects = @($subjects | Where-Object { $_ -notmatch $subjectPattern })
+          if ($invalidSubjects.Count -gt 0) {
+            throw "Invalid commit subjects: $($invalidSubjects -join '; ')"
+          }
+
+          git diff --check "$env:BASE_SHA..HEAD"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build and test
         shell: pwsh
