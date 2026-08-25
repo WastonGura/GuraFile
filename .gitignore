@@ -1,0 +1,12 @@
+# Local agent handoff and private planning documents
+/agent_memory/
+/docs/begin/
+
+# .NET and Visual Studio
+/.vs/
+**/bin/
+**/obj/
+*.suo
+*.user
+/artifacts/
+/TestResults/

@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Check repository hygiene
+        shell: pwsh
+        run: |
+          git diff --check
+          $privateFiles = @(git ls-files agent_memory docs/begin)
+          if ($privateFiles.Count -gt 0) {
+            throw "Local-only files are tracked: $($privateFiles -join ', ')"
+          }
+
+      - name: Build and test
+        shell: pwsh
+        run: |
+          $solutions = @(Get-ChildItem -Path . -Recurse -File | Where-Object Extension -In '.sln', '.slnx')
+          if ($solutions.Count -eq 0) {
+            Write-Host 'No solution yet; repository checks passed.'
+            exit 0
+          }
+          foreach ($solution in $solutions) {
+            dotnet test $solution.FullName --configuration Release
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
