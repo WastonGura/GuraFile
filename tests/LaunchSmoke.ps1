@@ -11,6 +11,23 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not ('GuraFile.Tests.NativeMethods' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace GuraFile.Tests
+{
+    public static class NativeMethods
+    {
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsWindowVisible(IntPtr windowHandle);
+    }
+}
+'@
+}
+
 $targetFramework = 'net10.0-windows10.0.26100.0'
 $executable = [System.IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot "..\src\GuraFile\bin\$Configuration\$targetFramework\$RuntimeIdentifier\GuraFile.exe"))
@@ -21,7 +38,7 @@ if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
 
 $process = $null
 try {
-    $process = Start-Process -FilePath $executable -PassThru -WindowStyle Hidden
+    $process = Start-Process -FilePath $executable -PassThru
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 
     do {
@@ -32,13 +49,15 @@ try {
             throw "GuraFile exited before its window appeared. Exit code: $($process.ExitCode)."
         }
 
-        if ($process.MainWindowTitle -eq 'GuraFile' -and $process.Responding) {
-            Write-Host "Launch smoke passed: GuraFile window is responding."
+        $handle = $process.MainWindowHandle
+        $visible = $handle -ne [IntPtr]::Zero -and [GuraFile.Tests.NativeMethods]::IsWindowVisible($handle)
+        if ($handle -ne [IntPtr]::Zero -and $process.MainWindowTitle -eq 'GuraFile' -and $process.Responding -and $visible) {
+            Write-Host "Launch smoke passed: GuraFile window is visible and responding."
             return
         }
     } while ([DateTime]::UtcNow -lt $deadline)
 
-    throw "Timed out after $TimeoutSeconds seconds waiting for a responding window titled 'GuraFile'. Last title: '$($process.MainWindowTitle)'."
+    throw "Timed out after $TimeoutSeconds seconds waiting for a visible, responding window titled 'GuraFile'. Handle: $handle. Last title: '$($process.MainWindowTitle)'. Responding: $($process.Responding). Visible: $visible."
 }
 finally {
     if ($null -ne $process) {
