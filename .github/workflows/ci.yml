@@ -70,3 +70,7 @@ jobs:
       - name: Test
         shell: pwsh
         run: dotnet test .\tests\GuraFile.Tests\GuraFile.Tests.csproj --configuration Release --no-build
+
+      - name: Launch smoke
+        shell: pwsh
+        run: .\tests\LaunchSmoke.ps1 -Configuration Release -RuntimeIdentifier win-x64

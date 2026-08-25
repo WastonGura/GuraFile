@@ -1,7 +1,5 @@
 using System.Xml.Linq;
 
-[assembly: DoNotParallelize]
-
 namespace GuraFile.Tests;
 
 [TestClass]
