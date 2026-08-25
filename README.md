@@ -16,4 +16,30 @@ GuraFile 是一个 Windows 优先的标签式文件管理器。它保留真实�
 
 ## 开发
 
-开发以 GitHub Issue 为交付单位，使用独立 worktree、测试先行、独立代码审查和受保护的 `main` 分支。当前应用技术栈将在 `v0.1.0` 的项目骨架 Issue 中落地。
+开发以 GitHub Issue 为交付单位，使用独立 worktree、测试先行、独立代码审查和受保护的 `main` 分支。
+
+### 前置条件
+
+- Windows 10 版本 1809（build 17763）或更高版本；
+- .NET SDK 10.0.400 或更高版本；
+- 可访问 NuGet.org 以还原项目依赖。
+
+应用使用 Windows App SDK 2.4.0，并以 unpackaged、自包含方式运行；不需要全局安装 WinUI 项目模板或 Windows App Runtime。
+
+### 还原、构建与测试
+
+在干净 clone 的仓库根目录使用 PowerShell 7：
+
+```powershell
+dotnet restore .\GuraFile.slnx
+dotnet build .\GuraFile.slnx --configuration Debug --no-restore
+dotnet test .\tests\GuraFile.Tests\GuraFile.Tests.csproj --configuration Debug --no-build
+```
+
+### 运行
+
+```powershell
+dotnet run --project .\src\GuraFile\GuraFile.csproj
+```
+
+应用启动后应显示标题为 `GuraFile` 的最小主窗口。该 UI 启动步骤需要在交互式 Windows 桌面手动确认；自动化 smoke test 不创建窗口。
