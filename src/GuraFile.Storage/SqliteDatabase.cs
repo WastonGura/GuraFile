@@ -4,7 +4,7 @@ namespace GuraFile.Storage;
 
 public static class SqliteDatabase
 {
-    public const int CurrentVersion = 4;
+    public const int CurrentVersion = 5;
 
     private static readonly string[] Migrations =
     [
@@ -157,6 +157,12 @@ public static class SqliteDatabase
         DROP TABLE tags;
         ALTER TABLE tags_v4 RENAME TO tags;
         ALTER TABLE file_tags_v4 RENAME TO file_tags;
+        """,
+        """
+        ALTER TABLE roots ADD COLUMN status TEXT NOT NULL DEFAULT 'online'
+            CHECK (status IN ('online', 'offline', 'recovering'));
+        ALTER TABLE roots ADD COLUMN last_error TEXT;
+        ALTER TABLE roots ADD COLUMN last_checked_utc TEXT;
         """
     ];
 

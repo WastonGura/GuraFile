@@ -38,7 +38,8 @@ public sealed partial class MainWindow : Window
         _fileChanges = new(
             _scanner,
             result => DispatcherQueue.TryEnqueue(() => _ = ShowRealtimeResultAsync(result)),
-            exception => DispatcherQueue.TryEnqueue(() => ShowRealtimeError(exception)));
+            exception => DispatcherQueue.TryEnqueue(() => ShowRealtimeError(exception)),
+            onRootChanged: () => DispatcherQueue.TryEnqueue(RefreshRoots));
         _fileQuery = new(databasePath);
         _tags = new(databasePath);
         _tagBackup = new(databasePath);
@@ -53,7 +54,7 @@ public sealed partial class MainWindow : Window
         RefreshRoots();
         foreach (var root in _scanner.ListRoots())
         {
-            _fileChanges.Watch(root);
+            _fileChanges.Start(root);
         }
         _ = RefreshTagsAsync();
         _ = RefreshAutomaticTagsAsync();
@@ -74,7 +75,7 @@ public sealed partial class MainWindow : Window
         try
         {
             var root = await Task.Run(() => _scanner.AddRoot(folder.Path));
-            _fileChanges.Watch(root);
+            _fileChanges.Start(root);
             RefreshRoots();
             RootsList.SelectedItem = RootsList.Items.Cast<ManagedRoot>().FirstOrDefault(item => item.Id == root.Id);
             await RefreshFilesAsync();
@@ -146,6 +147,7 @@ public sealed partial class MainWindow : Window
         {
             _scanCancellation = null;
             SetScanning(false);
+            RefreshRoots();
             await RefreshAutomaticTagsAsync();
             await RefreshFilesAsync();
         }
@@ -155,6 +157,7 @@ public sealed partial class MainWindow : Window
 
     private async Task ShowRealtimeResultAsync(ScanResult result)
     {
+        RefreshRoots();
         ProgressText.Text =
             $"实时更新；新增 {result.AddedFiles}，更新 {result.UpdatedFiles}，缺失 {result.MissingFiles}，失败 {result.Failures.Count}";
         FailureList.ItemsSource = result.Failures.Select(failure => $"{failure.Path}: {failure.Error}").ToList();
@@ -164,6 +167,7 @@ public sealed partial class MainWindow : Window
 
     private void ShowRealtimeError(Exception exception)
     {
+        RefreshRoots();
         ProgressText.Text = "实时更新失败";
         FailureList.ItemsSource = new[] { exception.Message };
     }
@@ -726,8 +730,10 @@ public sealed partial class MainWindow : Window
 
     private void RefreshRoots()
     {
-        RootsList.ItemsSource = _scanner.ListRoots();
-        RootsList.SelectedIndex = RootsList.Items.Count > 0 ? 0 : -1;
+        var selectedId = (RootsList.SelectedItem as ManagedRoot)?.Id;
+        var roots = _scanner.ListRoots();
+        RootsList.ItemsSource = roots;
+        RootsList.SelectedItem = roots.FirstOrDefault(root => root.Id == selectedId) ?? roots.FirstOrDefault();
     }
 
     private void ShowProgress(ScanProgress progress) =>

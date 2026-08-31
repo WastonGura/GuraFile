@@ -41,6 +41,9 @@ public sealed class MainWindowSmokeTests
         StringAssert.Contains(source, "FileChangeCoordinator");
         StringAssert.Contains(source, "await Task.Run(() => _scanner.AddRoot(folder.Path))");
         StringAssert.Contains(source, "await Task.Run(() => _scanner.RemoveRoot(root.Id))");
+        StringAssert.Contains(source, "_fileChanges.Start(root)");
+        var roots = document.Descendants().Single(element => element.Attribute(x + "Name")?.Value == "RootsList");
+        Assert.AreEqual("DisplayName", roots.Attribute("DisplayMemberPath")?.Value);
     }
 
     [TestMethod]
