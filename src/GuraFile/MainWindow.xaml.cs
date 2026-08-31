@@ -1,6 +1,8 @@
 using GuraFile.Storage;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Windows.Storage.Pickers;
 using WinRT.Interop;
 
@@ -11,6 +13,7 @@ public sealed partial class MainWindow : Window
     private readonly ManagedRootScanner _scanner;
     private readonly FileQueryService _fileQuery;
     private readonly TagService _tags;
+    private readonly ShellFileActions _shell = new();
     private CancellationTokenSource? _scanCancellation;
     private CancellationTokenSource? _fileQueryCancellation;
     private CancellationTokenSource? _detailCancellation;
@@ -152,6 +155,10 @@ public sealed partial class MainWindow : Window
     {
         _detailCancellation?.Cancel();
         var selected = FilesList.SelectedItems.OfType<IndexedFile>().ToList();
+        var hasSingleFile = selected.Count == 1;
+        OpenFileButton.IsEnabled = hasSingleFile;
+        RevealFileButton.IsEnabled = hasSingleFile;
+        FileActionStatusText.Text = "";
         if (selected.Count != 1)
         {
             DetailsText.Text = selected.Count == 0 ? "未选择文件" : $"已选择 {selected.Count} 个文件";
@@ -190,6 +197,60 @@ public sealed partial class MainWindow : Window
 
             cancellation.Dispose();
         }
+    }
+
+    private void FilesList_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (FindListViewItem(e.OriginalSource as DependencyObject)?.Content is not IndexedFile file)
+        {
+            return;
+        }
+
+        RunFileAction(file, _shell.Open, "已交给系统默认应用打开。");
+    }
+
+    private void OpenFileButton_Click(object sender, RoutedEventArgs e) =>
+        RunSelectedFileAction(_shell.Open, "已交给系统默认应用打开。");
+
+    private void RevealFileButton_Click(object sender, RoutedEventArgs e) =>
+        RunSelectedFileAction(_shell.RevealInExplorer, "已在资源管理器中定位文件。");
+
+    private void RunSelectedFileAction(Action<string> action, string successMessage)
+    {
+        if (FilesList.SelectedItems.OfType<IndexedFile>().ToList() is not [var file])
+        {
+            return;
+        }
+
+        RunFileAction(file, action, successMessage);
+    }
+
+    private void RunFileAction(IndexedFile file, Action<string> action, string successMessage)
+    {
+        try
+        {
+            action(file.Path);
+            FileActionStatusText.Text = successMessage;
+        }
+        catch (Exception exception)
+        {
+            FileActionStatusText.Text = exception.Message;
+        }
+    }
+
+    private static ListViewItem? FindListViewItem(DependencyObject? source)
+    {
+        while (source is not null)
+        {
+            if (source is ListViewItem item)
+            {
+                return item;
+            }
+
+            source = VisualTreeHelper.GetParent(source);
+        }
+
+        return null;
     }
 
     private async void TagsList_SelectionChanged(object sender, SelectionChangedEventArgs e)

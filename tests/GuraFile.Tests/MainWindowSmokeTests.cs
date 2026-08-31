@@ -84,6 +84,37 @@ public sealed class MainWindowSmokeTests
     }
 
     [TestMethod]
+    public void MainWindowExposesStructuredShellActions()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "GuraFile", "MainWindow.xaml"));
+        var document = XDocument.Load(path);
+        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var names = document.Descendants()
+            .Select(element => element.Attribute(x + "Name")?.Value)
+            .Where(name => name is not null)
+            .ToHashSet();
+
+        CollectionAssert.IsSubsetOf(
+            new[] { "OpenFileButton", "RevealFileButton", "FileActionStatusText" },
+            names.ToArray());
+        var filesList = document.Descendants()
+            .Single(element => element.Attribute(x + "Name")?.Value == "FilesList");
+        Assert.AreEqual("FilesList_DoubleTapped", filesList.Attribute("DoubleTapped")?.Value);
+
+        var source = File.ReadAllText(Path.ChangeExtension(path, ".xaml.cs"));
+        var handlerStart = source.IndexOf("private void FilesList_DoubleTapped", StringComparison.Ordinal);
+        var handlerEnd = source.IndexOf("private void OpenFileButton_Click", handlerStart, StringComparison.Ordinal);
+        var handler = source[handlerStart..handlerEnd];
+        StringAssert.Contains(handler, "FindListViewItem(e.OriginalSource as DependencyObject)?.Content is not IndexedFile file");
+        StringAssert.Contains(handler, "return;");
+        StringAssert.Contains(handler, "RunFileAction(file, _shell.Open");
+        Assert.AreEqual(1, handler.Split("RunFileAction", StringSplitOptions.None).Length - 1);
+        Assert.IsFalse(handler.Contains("RunSelectedFileAction", StringComparison.Ordinal));
+        StringAssert.Contains(source, "VisualTreeHelper.GetParent(source)");
+    }
+
+    [TestMethod]
     public void AddRootHandlerReportsFailuresAtTheUiBoundary()
     {
         var path = Path.GetFullPath(
