@@ -10,11 +10,15 @@ public sealed partial class MainWindow : Window
 {
     private readonly ManagedRootScanner _scanner;
     private readonly FileQueryService _fileQuery;
+    private readonly TagService _tags;
     private CancellationTokenSource? _scanCancellation;
     private CancellationTokenSource? _fileQueryCancellation;
+    private CancellationTokenSource? _detailCancellation;
     private FileSortColumn _sortColumn = FileSortColumn.Name;
     private bool _sortDescending;
     private bool _initialized;
+    private bool _refreshingTags;
+    private bool _changingFileTags;
 
     public MainWindow()
     {
@@ -25,13 +29,16 @@ public sealed partial class MainWindow : Window
             "index.db");
         _scanner = new(databasePath);
         _fileQuery = new(databasePath);
+        _tags = new(databasePath);
         _initialized = true;
         Closed += (_, _) =>
         {
             _scanCancellation?.Cancel();
             _fileQueryCancellation?.Cancel();
+            _detailCancellation?.Cancel();
         };
         RefreshRoots();
+        _ = RefreshTagsAsync();
         _ = RefreshFilesAsync();
     }
 
@@ -141,16 +148,249 @@ public sealed partial class MainWindow : Window
         await RefreshFilesAsync();
     }
 
-    private void FilesList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void FilesList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        _detailCancellation?.Cancel();
         var selected = FilesList.SelectedItems.OfType<IndexedFile>().ToList();
-        DetailsText.Text = selected.Count switch
+        if (selected.Count != 1)
         {
-            0 => "未选择文件",
-            1 => Describe(selected[0]),
-            _ => $"已选择 {selected.Count} 个文件"
-        };
+            DetailsText.Text = selected.Count == 0 ? "未选择文件" : $"已选择 {selected.Count} 个文件";
+            return;
+        }
+
+        var file = selected[0];
+        var cancellation = new CancellationTokenSource();
+        _detailCancellation = cancellation;
+        DetailsText.Text = Describe(file, []);
+        try
+        {
+            var tags = await Task.Run(() => _tags.ListTagsForFile(file.Id), cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (ReferenceEquals(_detailCancellation, cancellation))
+            {
+                DetailsText.Text = Describe(file, tags);
+            }
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            if (ReferenceEquals(_detailCancellation, cancellation))
+            {
+                DetailsText.Text = $"{Describe(file, [])}\n标签读取失败：{exception.Message}";
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_detailCancellation, cancellation))
+            {
+                _detailCancellation = null;
+            }
+
+            cancellation.Dispose();
+        }
     }
+
+    private async void TagsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_refreshingTags || !_initialized)
+        {
+            return;
+        }
+
+        var selected = SelectedTags();
+        if (selected.Count == 1)
+        {
+            TagNameBox.Text = selected[0].Name;
+        }
+
+        if (TagFilterToggle.IsOn)
+        {
+            await RefreshFilesAsync();
+        }
+    }
+
+    private async void TagFilterToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_initialized)
+        {
+            await RefreshFilesAsync();
+        }
+    }
+
+    private async void TagMatchBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_initialized && TagFilterToggle.IsOn)
+        {
+            await RefreshFilesAsync();
+        }
+    }
+
+    private async void CreateTagButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var tag = await Task.Run(() => _tags.CreateTag(TagNameBox.Text));
+            await RefreshTagsAsync(tag.Id);
+            if (TagFilterToggle.IsOn)
+            {
+                await RefreshFilesAsync();
+            }
+            TagStatusText.Text = $"已创建标签“{tag.Name}”。";
+        }
+        catch (Exception exception)
+        {
+            TagStatusText.Text = exception.Message;
+        }
+    }
+
+    private async void RenameTagButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectedTags() is not [var tag])
+        {
+            TagStatusText.Text = "请选择一个要重命名的标签。";
+            return;
+        }
+
+        try
+        {
+            var renamed = await Task.Run(() => _tags.RenameTag(tag.Id, TagNameBox.Text));
+            await RefreshTagsAsync(renamed.Id);
+            if (TagFilterToggle.IsOn)
+            {
+                await RefreshFilesAsync();
+            }
+            TagStatusText.Text = $"已重命名为“{renamed.Name}”。";
+        }
+        catch (Exception exception)
+        {
+            TagStatusText.Text = exception.Message;
+        }
+    }
+
+    private async void DeleteTagButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectedTags() is not [var tag])
+        {
+            TagStatusText.Text = "请选择一个要删除的标签。";
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            Title = $"删除标签“{tag.Name}”？",
+            Content = "这会移除该标签与文件的关系，但不会删除真实文件。",
+            PrimaryButtonText = "删除",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = (Content as FrameworkElement)?.XamlRoot
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.Run(() => _tags.DeleteTag(tag.Id));
+            TagNameBox.Text = "";
+            await RefreshTagsAsync();
+            await RefreshFilesAsync();
+            TagStatusText.Text = $"已删除标签“{tag.Name}”；真实文件未更改。";
+        }
+        catch (Exception exception)
+        {
+            TagStatusText.Text = exception.Message;
+        }
+    }
+
+    private async void ApplyTagButton_Click(object sender, RoutedEventArgs e) =>
+        await ChangeSelectedFileTagsAsync(add: true);
+
+    private async void RemoveTagButton_Click(object sender, RoutedEventArgs e) =>
+        await ChangeSelectedFileTagsAsync(add: false);
+
+    private async Task ChangeSelectedFileTagsAsync(bool add)
+    {
+        if (_changingFileTags)
+        {
+            return;
+        }
+
+        if (SelectedTags() is not [var tag])
+        {
+            TagStatusText.Text = "请选择一个标签。";
+            return;
+        }
+
+        var fileIds = FilesList.SelectedItems.OfType<IndexedFile>()
+            .Select(file => file.Id)
+            .Distinct()
+            .ToArray();
+        if (fileIds.Length == 0)
+        {
+            TagStatusText.Text = "请先在文件列表中选择一个或多个文件。";
+            return;
+        }
+
+        try
+        {
+            _changingFileTags = true;
+            ApplyTagButton.IsEnabled = false;
+            RemoveTagButton.IsEnabled = false;
+            if (add)
+            {
+                await Task.Run(() => _tags.AddTagToFiles(tag.Id, fileIds));
+            }
+            else
+            {
+                await Task.Run(() => _tags.RemoveTagFromFiles(tag.Id, fileIds));
+            }
+
+            await RefreshFilesAsync();
+            TagStatusText.Text = add
+                ? $"已给 {fileIds.Length} 个文件添加“{tag.Name}”。"
+                : $"已从 {fileIds.Length} 个文件移除“{tag.Name}”。";
+        }
+        catch (Exception exception)
+        {
+            TagStatusText.Text = exception.Message;
+        }
+        finally
+        {
+            _changingFileTags = false;
+            ApplyTagButton.IsEnabled = true;
+            RemoveTagButton.IsEnabled = true;
+        }
+    }
+
+    private async Task RefreshTagsAsync(long? selectedTagId = null)
+    {
+        _refreshingTags = true;
+        try
+        {
+            var tags = await Task.Run(_tags.ListTags);
+            TagsList.ItemsSource = tags;
+            TagsList.SelectedItems.Clear();
+            if (selectedTagId is not null
+                && tags.FirstOrDefault(tag => tag.Id == selectedTagId) is { } selected)
+            {
+                TagsList.SelectedItems.Add(selected);
+            }
+        }
+        catch (Exception exception)
+        {
+            TagStatusText.Text = $"标签加载失败：{exception.Message}";
+        }
+        finally
+        {
+            _refreshingTags = false;
+        }
+    }
+
+    private IReadOnlyList<UserTag> SelectedTags() =>
+        TagsList.SelectedItems.OfType<UserTag>().ToList();
 
     private async Task RefreshFilesAsync(bool debounce = false)
     {
@@ -174,8 +414,16 @@ public sealed partial class MainWindow : Window
             FilesLoadingRing.IsActive = true;
             FilesLoadingRing.Visibility = Visibility.Visible;
             FilesStateText.Text = "正在加载文件…";
+            var tagIds = TagFilterToggle.IsOn
+                ? SelectedTags().Select(tag => tag.Id).ToArray()
+                : null;
             var files = await _fileQuery.QueryAsync(
-                new(SearchBox.Text, _sortColumn, _sortDescending),
+                new(
+                    Search: SearchBox.Text,
+                    SortBy: _sortColumn,
+                    Descending: _sortDescending,
+                    TagIds: tagIds,
+                    TagMatch: TagMatchBox.SelectedIndex == 1 ? TagMatchMode.All : TagMatchMode.Any),
                 cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
             FilesList.ItemsSource = files;
@@ -236,10 +484,11 @@ public sealed partial class MainWindow : Window
     private string SortLabel(string label, FileSortColumn column) =>
         _sortColumn == column ? $"{label} {(_sortDescending ? '▼' : '▲')}" : label;
 
-    private static string Describe(IndexedFile file)
+    private static string Describe(IndexedFile file, IReadOnlyList<UserTag> tags)
     {
         var status = file.IsOnline ? "在线" : "离线";
+        var tagNames = tags.Count == 0 ? "无" : string.Join("、", tags.Select(tag => tag.Name));
         var diagnostic = string.IsNullOrWhiteSpace(file.Diagnostic) ? "" : $"\n诊断：{file.Diagnostic}";
-        return $"{file.Name}\n{file.Path}\n扩展名：{file.Extension}\n大小：{file.Size:N0} 字节\n修改时间：{file.Modified.LocalDateTime:g}\n状态：{status}{diagnostic}";
+        return $"{file.Name}\n{file.Path}\n扩展名：{file.Extension}\n大小：{file.Size:N0} 字节\n修改时间：{file.Modified.LocalDateTime:g}\n状态：{status}\n标签：{tagNames}{diagnostic}";
     }
 }
