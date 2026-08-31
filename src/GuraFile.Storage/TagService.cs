@@ -186,7 +186,7 @@ public sealed class TagService
         }
     }
 
-    private static (string DisplayName, string NormalizedName) NormalizeName(string name)
+    internal static (string DisplayName, string NormalizedName) NormalizeName(string name)
     {
         ArgumentNullException.ThrowIfNull(name);
         var displayName = name.Trim().Normalize(NormalizationForm.FormC);

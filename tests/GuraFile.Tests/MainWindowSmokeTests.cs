@@ -76,7 +76,7 @@ public sealed class MainWindowSmokeTests
             .ToHashSet();
 
         CollectionAssert.IsSubsetOf(
-            new[] { "TagsList", "TagNameBox", "CreateTagButton", "RenameTagButton", "DeleteTagButton", "ApplyTagButton", "RemoveTagButton", "TagFilterToggle", "TagMatchBox", "TagStatusText" },
+            new[] { "TagsList", "TagNameBox", "CreateTagButton", "RenameTagButton", "DeleteTagButton", "ApplyTagButton", "RemoveTagButton", "TagFilterToggle", "TagMatchBox", "ExportTagsButton", "ImportTagsButton", "TagStatusText" },
             names.ToArray());
         var tagsList = document.Descendants()
             .Single(element => element.Attribute(x + "Name")?.Value == "TagsList");
