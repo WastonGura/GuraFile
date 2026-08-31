@@ -11,10 +11,19 @@
             <ColumnDefinition Width="300" />
         </Grid.ColumnDefinitions>
 
-        <Grid RowSpacing="12">
+        <Grid RowSpacing="8">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
             <TextBlock FontSize="20" FontWeight="SemiBold" Text="管理根目录" />
@@ -24,6 +33,25 @@
                 <Button x:Name="RemoveRootButton" AutomationProperties.Name="移除管理根目录" Click="RemoveRootButton_Click" Content="移除" />
                 <Button x:Name="ScanButton" AutomationProperties.Name="扫描所选根目录" Click="ScanButton_Click" Content="扫描" />
             </StackPanel>
+            <Border Grid.Row="3" Height="1" Margin="0,4" Background="{ThemeResource CardStrokeColorDefaultBrush}" />
+            <TextBlock Grid.Row="4" FontSize="20" FontWeight="SemiBold" Text="用户标签" />
+            <TextBox x:Name="TagNameBox" Grid.Row="5" AutomationProperties.Name="标签名称" MaxLength="100" PlaceholderText="输入标签名称" />
+            <ListView x:Name="TagsList" Grid.Row="6" AutomationProperties.Name="用户标签" DisplayMemberPath="Name" SelectionChanged="TagsList_SelectionChanged" SelectionMode="Extended" />
+            <StackPanel Grid.Row="7" Orientation="Horizontal" Spacing="6">
+                <Button x:Name="CreateTagButton" AutomationProperties.Name="新建标签" Click="CreateTagButton_Click" Content="新建" />
+                <Button x:Name="RenameTagButton" AutomationProperties.Name="重命名标签" Click="RenameTagButton_Click" Content="重命名" />
+                <Button x:Name="DeleteTagButton" AutomationProperties.Name="删除标签" Click="DeleteTagButton_Click" Content="删除" />
+            </StackPanel>
+            <StackPanel Grid.Row="8" Orientation="Horizontal" Spacing="6">
+                <Button x:Name="ApplyTagButton" AutomationProperties.Name="给所选文件贴标签" Click="ApplyTagButton_Click" Content="贴到文件" />
+                <Button x:Name="RemoveTagButton" AutomationProperties.Name="从所选文件移除标签" Click="RemoveTagButton_Click" Content="从文件移除" />
+            </StackPanel>
+            <ToggleSwitch x:Name="TagFilterToggle" Grid.Row="9" AutomationProperties.Name="按所选标签筛选" Header="按所选标签筛选" Toggled="TagFilterToggle_Toggled" />
+            <ComboBox x:Name="TagMatchBox" Grid.Row="10" AutomationProperties.Name="标签筛选匹配方式" SelectedIndex="0" SelectionChanged="TagMatchBox_SelectionChanged">
+                <ComboBoxItem Content="满足任一标签" />
+                <ComboBoxItem Content="满足全部标签" />
+            </ComboBox>
+            <TextBlock x:Name="TagStatusText" Grid.Row="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
         </Grid>
 
         <Grid Grid.Column="1" RowSpacing="8">

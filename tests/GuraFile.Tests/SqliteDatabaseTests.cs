@@ -21,6 +21,8 @@ public sealed class SqliteDatabaseTests
             "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name IN ('name', 'extension', 'size', 'modified_utc');"));
         Assert.AreEqual(2L, Scalar<long>(connection,
             "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name IN ('identity_kind', 'is_online');"));
+        Assert.AreEqual("user", Scalar<string>(connection,
+            "SELECT dflt_value FROM pragma_table_info('tags') WHERE name = 'source';").Trim('\''));
     }
 
     [TestMethod]
@@ -55,8 +57,9 @@ public sealed class SqliteDatabaseTests
         Execute(connection, "INSERT INTO tags (id, name, normalized_name) VALUES (1, 'Work', 'work');");
         Execute(connection, "INSERT INTO file_tags (file_id, tag_id) VALUES (1, 1);");
         Assert.AreEqual("user", Scalar<string>(connection, "SELECT source FROM file_tags WHERE file_id = 1 AND tag_id = 1;"));
-        Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 1, 'automatic');");
-        Assert.AreEqual(2L, Scalar<long>(connection, "SELECT COUNT(*) FROM file_tags WHERE file_id = 1 AND tag_id = 1;"));
+        Execute(connection, "INSERT INTO tags (id, name, normalized_name, source) VALUES (2, 'Work', 'work', 'automatic');");
+        Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 2, 'automatic');");
+        Assert.AreEqual(2L, Scalar<long>(connection, "SELECT COUNT(*) FROM file_tags WHERE file_id = 1;"));
 
         Assert.ThrowsExactly<SqliteException>(() =>
             Execute(connection, "INSERT INTO roots (path, normalized_path) VALUES ('C:\\ROOT', 'C:\\ROOT');"));
@@ -69,16 +72,41 @@ public sealed class SqliteDatabaseTests
         Assert.ThrowsExactly<SqliteException>(() =>
             Execute(connection, "INSERT INTO tags (name, normalized_name) VALUES ('WORK', 'WORK');"));
         Assert.ThrowsExactly<SqliteException>(() =>
+            Execute(connection, "INSERT INTO tags (name, normalized_name, source) VALUES ('WORK', 'WORK', 'automatic');"));
+        Assert.ThrowsExactly<SqliteException>(() =>
             Execute(connection, "INSERT INTO file_tags (file_id, tag_id) VALUES (1, 1);"));
         Assert.ThrowsExactly<SqliteException>(() =>
             Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 1, 'automatic');"));
+        Assert.ThrowsExactly<SqliteException>(() =>
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 2, 'automatic');"));
         Assert.ThrowsExactly<SqliteException>(() =>
             Execute(connection, "INSERT INTO file_tags (file_id, tag_id) VALUES (999, 1);"));
         Assert.ThrowsExactly<SqliteException>(() =>
             Execute(connection, "UPDATE file_tags SET source = 'unknown' WHERE file_id = 1 AND tag_id = 1;"));
 
-        Execute(connection, "DELETE FROM file_tags WHERE file_id = 1 AND tag_id = 1 AND source = 'automatic';");
+        Execute(connection, "DELETE FROM file_tags WHERE file_id = 1 AND tag_id = 2 AND source = 'automatic';");
         Assert.AreEqual(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM file_tags WHERE file_id = 1 AND tag_id = 1 AND source = 'user';"));
+    }
+
+    [TestMethod]
+    public void VersionThreeSplitsMixedTagSources()
+    {
+        using var database = TempDatabase.Create();
+        using (var versionThree = SqliteDatabase.Open(database.Path, 3))
+        {
+            Execute(versionThree, "INSERT INTO roots (id, path, normalized_path) VALUES (1, 'C:\\Root', 'c:\\root');");
+            Execute(versionThree, "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc) VALUES (1, 1, 'volume-a', 'file-a', 'C:\\Root\\a.txt', 'c:\\root\\a.txt', 'a.txt', '.txt', 12, '2026-08-31T00:00:00Z');");
+            Execute(versionThree, "INSERT INTO tags (id, name, normalized_name) VALUES (1, 'Shared', 'SHARED');");
+            Execute(versionThree, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 1, 'user');");
+            Execute(versionThree, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 1, 'automatic');");
+        }
+
+        using var migrated = SqliteDatabase.Open(database.Path);
+
+        Assert.AreEqual(2L, Scalar<long>(migrated, "SELECT COUNT(*) FROM tags WHERE normalized_name = 'SHARED';"));
+        Assert.AreEqual(2L, Scalar<long>(migrated, "SELECT COUNT(*) FROM file_tags WHERE file_id = 1;"));
+        Assert.AreEqual(0L, Scalar<long>(migrated,
+            "SELECT COUNT(*) FROM file_tags ft JOIN tags t ON t.id = ft.tag_id WHERE ft.source <> t.source;"));
     }
 
     [TestMethod]
@@ -98,6 +126,7 @@ public sealed class SqliteDatabaseTests
         using var migrated = SqliteDatabase.Open(database.Path);
         Assert.AreEqual(SqliteDatabase.CurrentVersion, Scalar<long>(migrated, "PRAGMA user_version;"));
         Assert.AreEqual("user", Scalar<string>(migrated, "SELECT source FROM file_tags WHERE file_id = 1 AND tag_id = 1;"));
+        Assert.AreEqual("user", Scalar<string>(migrated, "SELECT source FROM tags WHERE id = 1;"));
     }
 
     [TestMethod]

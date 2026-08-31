@@ -4,7 +4,7 @@ namespace GuraFile.Storage;
 
 public static class SqliteDatabase
 {
-    public const int CurrentVersion = 3;
+    public const int CurrentVersion = 4;
 
     private static readonly string[] Migrations =
     [
@@ -99,6 +99,64 @@ public static class SqliteDatabase
         ALTER TABLE file_tags_v3 RENAME TO file_tags;
         CREATE UNIQUE INDEX files_online_path
             ON files(normalized_path COLLATE NOCASE) WHERE is_online = 1;
+        """,
+        """
+        CREATE TABLE tags_v4 (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            normalized_name TEXT NOT NULL COLLATE NOCASE,
+            source TEXT NOT NULL DEFAULT 'user' CHECK (source IN ('user', 'automatic')),
+            UNIQUE (normalized_name, source),
+            UNIQUE (id, source)
+        );
+
+        INSERT INTO tags_v4 (id, name, normalized_name, source)
+        SELECT t.id, t.name, t.normalized_name, 'user'
+        FROM tags t
+        WHERE NOT EXISTS (
+            SELECT 1 FROM file_tags ft WHERE ft.tag_id = t.id AND ft.source = 'automatic'
+        ) OR EXISTS (
+            SELECT 1 FROM file_tags ft WHERE ft.tag_id = t.id AND ft.source = 'user'
+        );
+
+        INSERT INTO tags_v4 (id, name, normalized_name, source)
+        SELECT t.id, t.name, t.normalized_name, 'automatic'
+        FROM tags t
+        WHERE EXISTS (
+            SELECT 1 FROM file_tags ft WHERE ft.tag_id = t.id AND ft.source = 'automatic'
+        ) AND NOT EXISTS (
+            SELECT 1 FROM file_tags ft WHERE ft.tag_id = t.id AND ft.source = 'user'
+        );
+
+        INSERT INTO tags_v4 (name, normalized_name, source)
+        SELECT t.name, t.normalized_name, 'automatic'
+        FROM tags t
+        WHERE EXISTS (
+            SELECT 1 FROM file_tags ft WHERE ft.tag_id = t.id AND ft.source = 'automatic'
+        ) AND EXISTS (
+            SELECT 1 FROM file_tags ft WHERE ft.tag_id = t.id AND ft.source = 'user'
+        );
+
+        CREATE TABLE file_tags_v4 (
+            file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+            tag_id INTEGER NOT NULL,
+            source TEXT NOT NULL DEFAULT 'user' CHECK (source IN ('user', 'automatic')),
+            PRIMARY KEY (file_id, tag_id, source),
+            FOREIGN KEY (tag_id, source) REFERENCES tags_v4(id, source) ON DELETE CASCADE
+        );
+
+        INSERT INTO file_tags_v4 (file_id, tag_id, source)
+        SELECT ft.file_id, replacement.id, ft.source
+        FROM file_tags ft
+        JOIN tags original ON original.id = ft.tag_id
+        JOIN tags_v4 replacement
+          ON replacement.normalized_name = original.normalized_name COLLATE NOCASE
+         AND replacement.source = ft.source;
+
+        DROP TABLE file_tags;
+        DROP TABLE tags;
+        ALTER TABLE tags_v4 RENAME TO tags;
+        ALTER TABLE file_tags_v4 RENAME TO file_tags;
         """
     ];
 

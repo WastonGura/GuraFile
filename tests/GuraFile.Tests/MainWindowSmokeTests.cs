@@ -64,6 +64,26 @@ public sealed class MainWindowSmokeTests
     }
 
     [TestMethod]
+    public void MainWindowExposesTagManagementAndFilteringControls()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "GuraFile", "MainWindow.xaml"));
+        var document = XDocument.Load(path);
+        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var names = document.Descendants()
+            .Select(element => element.Attribute(x + "Name")?.Value)
+            .Where(name => name is not null)
+            .ToHashSet();
+
+        CollectionAssert.IsSubsetOf(
+            new[] { "TagsList", "TagNameBox", "CreateTagButton", "RenameTagButton", "DeleteTagButton", "ApplyTagButton", "RemoveTagButton", "TagFilterToggle", "TagMatchBox", "TagStatusText" },
+            names.ToArray());
+        var tagsList = document.Descendants()
+            .Single(element => element.Attribute(x + "Name")?.Value == "TagsList");
+        Assert.AreEqual("Extended", tagsList.Attribute("SelectionMode")?.Value);
+    }
+
+    [TestMethod]
     public void AddRootHandlerReportsFailuresAtTheUiBoundary()
     {
         var path = Path.GetFullPath(
