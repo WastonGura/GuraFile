@@ -11,6 +11,7 @@ namespace GuraFile;
 public sealed partial class MainWindow : Window
 {
     private readonly ManagedRootScanner _scanner;
+    private readonly FileChangeCoordinator _fileChanges;
     private readonly FileQueryService _fileQuery;
     private readonly TagService _tags;
     private readonly UserTagBackupService _tagBackup;
@@ -34,17 +35,26 @@ public sealed partial class MainWindow : Window
             "GuraFile",
             "index.db");
         _scanner = new(databasePath);
+        _fileChanges = new(
+            _scanner,
+            result => DispatcherQueue.TryEnqueue(() => _ = ShowRealtimeResultAsync(result)),
+            exception => DispatcherQueue.TryEnqueue(() => ShowRealtimeError(exception)));
         _fileQuery = new(databasePath);
         _tags = new(databasePath);
         _tagBackup = new(databasePath);
         _initialized = true;
-        Closed += (_, _) =>
+        Closed += async (_, _) =>
         {
             _scanCancellation?.Cancel();
             _fileQueryCancellation?.Cancel();
             _detailCancellation?.Cancel();
+            await _fileChanges.DisposeAsync();
         };
         RefreshRoots();
+        foreach (var root in _scanner.ListRoots())
+        {
+            _fileChanges.Watch(root);
+        }
         _ = RefreshTagsAsync();
         _ = RefreshAutomaticTagsAsync();
         _ = RefreshFilesAsync();
@@ -63,7 +73,8 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            var root = _scanner.AddRoot(folder.Path);
+            var root = await Task.Run(() => _scanner.AddRoot(folder.Path));
+            _fileChanges.Watch(root);
             RefreshRoots();
             RootsList.SelectedItem = RootsList.Items.Cast<ManagedRoot>().FirstOrDefault(item => item.Id == root.Id);
             await RefreshFilesAsync();
@@ -82,7 +93,21 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        _scanner.RemoveRoot(root.Id);
+        _fileChanges.Unwatch(root.Id);
+        try
+        {
+            await Task.Run(() => _scanner.RemoveRoot(root.Id));
+        }
+        catch (Exception exception)
+        {
+            var restored = _fileChanges.Watch(root);
+            ProgressText.Text = restored ? "移除根目录失败" : "移除根目录失败，且实时监听恢复失败";
+            FailureList.ItemsSource = restored
+                ? new[] { exception.Message }
+                : new[] { exception.Message, "根目录实时监听未恢复；请确认目录可访问。" };
+            return;
+        }
+
         RefreshRoots();
         ProgressText.Text = "根目录索引已移除；真实文件未更改";
         await RefreshAutomaticTagsAsync();
@@ -127,6 +152,21 @@ public sealed partial class MainWindow : Window
     }
 
     private void CancelButton_Click(object sender, RoutedEventArgs e) => _scanCancellation?.Cancel();
+
+    private async Task ShowRealtimeResultAsync(ScanResult result)
+    {
+        ProgressText.Text =
+            $"实时更新；新增 {result.AddedFiles}，更新 {result.UpdatedFiles}，缺失 {result.MissingFiles}，失败 {result.Failures.Count}";
+        FailureList.ItemsSource = result.Failures.Select(failure => $"{failure.Path}: {failure.Error}").ToList();
+        await RefreshAutomaticTagsAsync();
+        await RefreshFilesAsync();
+    }
+
+    private void ShowRealtimeError(Exception exception)
+    {
+        ProgressText.Text = "实时更新失败";
+        FailureList.ItemsSource = new[] { exception.Message };
+    }
 
     private async void SearchBox_TextChanged(object sender, TextChangedEventArgs e)
     {

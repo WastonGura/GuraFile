@@ -20,6 +20,7 @@ public sealed record ScanResult(
 
 public sealed class ManagedRootScanner
 {
+    private readonly SemaphoreSlim _writeGate = new(1, 1);
     private readonly Func<string, FileIdentity> _readIdentity;
     private readonly Func<string, string[]> _getFileSystemEntries;
     private readonly Func<string, FileAttributes> _getAttributes;
@@ -83,37 +84,45 @@ public sealed class ManagedRootScanner
     public ManagedRoot AddRoot(string path)
     {
         var fullPath = Normalize(path);
-        using var connection = SqliteDatabase.Open(DatabasePath);
-        using var transaction = connection.BeginTransaction();
-        using (var select = connection.CreateCommand())
+        _writeGate.Wait();
+        try
         {
-            select.Transaction = transaction;
-            select.CommandText = "SELECT id, path FROM roots;";
-            using var reader = select.ExecuteReader();
-            while (reader.Read())
+            using var connection = SqliteDatabase.Open(DatabasePath);
+            using var transaction = connection.BeginTransaction();
+            using (var select = connection.CreateCommand())
             {
-                var existing = new ManagedRoot(reader.GetInt64(0), reader.GetString(1));
-                if (string.Equals(existing.Path, fullPath, StringComparison.OrdinalIgnoreCase))
+                select.Transaction = transaction;
+                select.CommandText = "SELECT id, path FROM roots;";
+                using var reader = select.ExecuteReader();
+                while (reader.Read())
                 {
-                    transaction.Commit();
-                    return existing;
-                }
+                    var existing = new ManagedRoot(reader.GetInt64(0), reader.GetString(1));
+                    if (string.Equals(existing.Path, fullPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        transaction.Commit();
+                        return existing;
+                    }
 
-                if (IsAncestor(existing.Path, fullPath) || IsAncestor(fullPath, existing.Path))
-                {
-                    throw new InvalidOperationException($"Managed root '{fullPath}' overlaps existing root '{existing.Path}'.");
+                    if (IsAncestor(existing.Path, fullPath) || IsAncestor(fullPath, existing.Path))
+                    {
+                        throw new InvalidOperationException($"Managed root '{fullPath}' overlaps existing root '{existing.Path}'.");
+                    }
                 }
             }
-        }
 
-        using var insert = connection.CreateCommand();
-        insert.Transaction = transaction;
-        insert.CommandText = "INSERT INTO roots (path, normalized_path) VALUES ($path, $normalizedPath) RETURNING id;";
-        insert.Parameters.AddWithValue("$path", fullPath);
-        insert.Parameters.AddWithValue("$normalizedPath", fullPath);
-        var root = new ManagedRoot((long)insert.ExecuteScalar()!, fullPath);
-        transaction.Commit();
-        return root;
+            using var insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = "INSERT INTO roots (path, normalized_path) VALUES ($path, $normalizedPath) RETURNING id;";
+            insert.Parameters.AddWithValue("$path", fullPath);
+            insert.Parameters.AddWithValue("$normalizedPath", fullPath);
+            var root = new ManagedRoot((long)insert.ExecuteScalar()!, fullPath);
+            transaction.Commit();
+            return root;
+        }
+        finally
+        {
+            _writeGate.Release();
+        }
     }
 
     public IReadOnlyList<ManagedRoot> ListRoots()
@@ -133,15 +142,23 @@ public sealed class ManagedRootScanner
 
     public bool RemoveRoot(long rootId)
     {
-        using var connection = SqliteDatabase.Open(DatabasePath);
-        using var transaction = connection.BeginTransaction();
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = "DELETE FROM roots WHERE id = $rootId;";
-        command.Parameters.AddWithValue("$rootId", rootId);
-        var removed = command.ExecuteNonQuery() == 1;
-        transaction.Commit();
-        return removed;
+        _writeGate.Wait();
+        try
+        {
+            using var connection = SqliteDatabase.Open(DatabasePath);
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "DELETE FROM roots WHERE id = $rootId;";
+            command.Parameters.AddWithValue("$rootId", rootId);
+            var removed = command.ExecuteNonQuery() == 1;
+            transaction.Commit();
+            return removed;
+        }
+        finally
+        {
+            _writeGate.Release();
+        }
     }
 
     public Task<ScanResult> ScanAsync(
@@ -151,8 +168,43 @@ public sealed class ManagedRootScanner
         CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(batchSize, 1);
-        return Task.Run(() => Scan(rootId, batchSize, progress, cancellationToken));
+        return RunSerialized(() => Scan(rootId, batchSize, progress, cancellationToken), cancellationToken);
     }
+
+    public Task<ScanResult> ReconcilePathsAsync(
+        long rootId,
+        IReadOnlyCollection<string> paths,
+        int batchSize = 100,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentOutOfRangeException.ThrowIfLessThan(batchSize, 1);
+        return RunSerialized(
+            () => ReconcilePaths(rootId, paths, batchSize, cancellationToken),
+            cancellationToken);
+    }
+
+    private Task<ScanResult> RunSerialized(Func<ScanResult> action, CancellationToken cancellationToken) =>
+        Task.Run(() =>
+        {
+            try
+            {
+                _writeGate.Wait(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return new(0, 0, 0, 0, 0, 0, true, []);
+            }
+
+            try
+            {
+                return action();
+            }
+            finally
+            {
+                _writeGate.Release();
+            }
+        });
 
     private ScanResult Scan(long rootId, int batchSize, Action<ScanProgress>? progress, CancellationToken cancellationToken)
     {
@@ -220,6 +272,13 @@ public sealed class ManagedRootScanner
             string[] entries;
             try
             {
+                var directoryAttributes = _getAttributes(directory);
+                if ((directoryAttributes & FileAttributes.ReparsePoint) != 0 ||
+                    (directoryAttributes & FileAttributes.Directory) == 0)
+                {
+                    continue;
+                }
+
                 entries = _getFileSystemEntries(directory);
             }
             catch (Exception exception) when (IsFileSystemError(exception))
@@ -232,6 +291,11 @@ public sealed class ManagedRootScanner
 
             foreach (var entry in entries)
             {
+                if (IsDatabasePath(entry))
+                {
+                    continue;
+                }
+
                 if (cancellationToken.IsCancellationRequested)
                 {
                     return Complete(canceled: true);
@@ -251,21 +315,13 @@ public sealed class ManagedRootScanner
                         continue;
                     }
 
-                    var file = new FileInfo(entry);
-                    var fullPath = Normalize(file.FullName);
-                    var identity = _readIdentity(fullPath);
-                    if (!identity.IsStable)
+                    var file = ReadFileRecord(entry);
+                    if (!file.Identity.IsStable)
                     {
                         fallback++;
                     }
 
-                    pending.Add(new(
-                        identity,
-                        fullPath,
-                        file.Name,
-                        file.Extension,
-                        file.Length,
-                        file.LastWriteTimeUtc.ToString("O")));
+                    pending.Add(file);
                     discovered++;
                 }
                 catch (Exception exception) when (IsFileSystemError(exception))
@@ -314,6 +370,209 @@ public sealed class ManagedRootScanner
             new(discovered, committed, added, updated, missing, fallback, canceled, failures);
     }
 
+    private ScanResult ReconcilePaths(
+        long rootId,
+        IReadOnlyCollection<string> paths,
+        int batchSize,
+        CancellationToken cancellationToken)
+    {
+        using var connection = SqliteDatabase.Open(DatabasePath);
+        var root = ReadRoot(connection, rootId);
+        var failures = new List<ScanFailure>();
+        var discovered = 0;
+        var committed = 0;
+        var added = 0;
+        var updated = 0;
+        var missing = 0;
+        var fallback = 0;
+
+        foreach (var path in CollapsePaths(root, paths))
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return Complete(canceled: true);
+            }
+
+            FileAttributes attributes;
+            try
+            {
+                attributes = _getAttributes(path);
+            }
+            catch (Exception exception) when (exception is DirectoryNotFoundException or FileNotFoundException)
+            {
+                missing += MarkPathMissing(connection, root.Id, path);
+                continue;
+            }
+            catch (Exception exception) when (IsFileSystemError(exception))
+            {
+                failures.Add(new(path, exception.Message));
+                continue;
+            }
+
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                missing += MarkPathMissing(connection, root.Id, path);
+                continue;
+            }
+
+            if ((attributes & FileAttributes.Directory) == 0)
+            {
+                try
+                {
+                    var file = ReadFileRecord(path);
+                    discovered++;
+                    fallback += file.Identity.IsStable ? 0 : 1;
+                    var written = WriteBatch(connection, root.Id, Guid.NewGuid().ToString("N"), [file], failures);
+                    added += written.Added;
+                    updated += written.Updated;
+                    missing += written.Missing;
+                    committed++;
+                }
+                catch (Exception exception) when (IsFileSystemError(exception))
+                {
+                    failures.Add(new(path, exception.Message));
+                }
+
+                continue;
+            }
+
+            var result = ReconcileDirectory(connection, root.Id, path, batchSize, failures, cancellationToken);
+            discovered += result.DiscoveredFiles;
+            committed += result.CommittedFiles;
+            added += result.AddedFiles;
+            updated += result.UpdatedFiles;
+            missing += result.MissingFiles;
+            fallback += result.FallbackFiles;
+            if (result.Canceled)
+            {
+                return Complete(canceled: true);
+            }
+        }
+
+        return Complete(canceled: false);
+
+        ScanResult Complete(bool canceled) =>
+            new(discovered, committed, added, updated, missing, fallback, canceled, failures);
+    }
+
+    private ScanResult ReconcileDirectory(
+        SqliteConnection connection,
+        long rootId,
+        string directoryPath,
+        int batchSize,
+        ICollection<ScanFailure> failures,
+        CancellationToken cancellationToken)
+    {
+        var pending = new List<FileRecord>(batchSize);
+        var directories = new Stack<string>();
+        var scanToken = Guid.NewGuid().ToString("N");
+        var discovered = 0;
+        var committed = 0;
+        var added = 0;
+        var updated = 0;
+        var missing = 0;
+        var fallback = 0;
+        var coverageComplete = true;
+        directories.Push(directoryPath);
+
+        while (directories.Count > 0 && !cancellationToken.IsCancellationRequested)
+        {
+            var directory = directories.Pop();
+            string[] entries;
+            try
+            {
+                var directoryAttributes = _getAttributes(directory);
+                if ((directoryAttributes & FileAttributes.ReparsePoint) != 0 ||
+                    (directoryAttributes & FileAttributes.Directory) == 0)
+                {
+                    continue;
+                }
+
+                entries = _getFileSystemEntries(directory);
+            }
+            catch (Exception exception) when (IsFileSystemError(exception))
+            {
+                coverageComplete = false;
+                failures.Add(new ScanFailure(directory, exception.Message));
+                continue;
+            }
+
+            foreach (var entry in entries)
+            {
+                if (IsDatabasePath(entry))
+                {
+                    continue;
+                }
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return Complete(canceled: true);
+                }
+
+                try
+                {
+                    var attributes = _getAttributes(entry);
+                    if ((attributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        continue;
+                    }
+
+                    if ((attributes & FileAttributes.Directory) != 0)
+                    {
+                        directories.Push(entry);
+                        continue;
+                    }
+
+                    var file = ReadFileRecord(entry);
+                    pending.Add(file);
+                    discovered++;
+                    fallback += file.Identity.IsStable ? 0 : 1;
+                }
+                catch (Exception exception) when (IsFileSystemError(exception))
+                {
+                    coverageComplete = false;
+                    failures.Add(new ScanFailure(entry, exception.Message));
+                    continue;
+                }
+
+                if (pending.Count == batchSize)
+                {
+                    Flush();
+                }
+            }
+        }
+
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return Complete(canceled: true);
+        }
+
+        if (pending.Count > 0)
+        {
+            Flush();
+        }
+
+        if (coverageComplete)
+        {
+            missing += MarkScopeMissing(connection, rootId, directoryPath, scanToken);
+        }
+
+        return Complete(canceled: false);
+
+        void Flush()
+        {
+            var written = WriteBatch(connection, rootId, scanToken, pending, failures);
+            added += written.Added;
+            updated += written.Updated;
+            missing += written.Missing;
+            committed += pending.Count;
+            pending.Clear();
+        }
+
+        ScanResult Complete(bool canceled) =>
+            new(discovered, committed, added, updated, missing, fallback, canceled, failures.ToArray());
+    }
+
     private static ManagedRoot ReadRoot(SqliteConnection connection, long rootId)
     {
         using var command = connection.CreateCommand();
@@ -326,6 +585,60 @@ public sealed class ManagedRootScanner
         }
 
         return new(reader.GetInt64(0), reader.GetString(1));
+    }
+
+    private IReadOnlyList<string> CollapsePaths(ManagedRoot root, IReadOnlyCollection<string> paths)
+    {
+        var normalized = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in paths)
+        {
+            var fullPath = Normalize(path);
+            if (!string.Equals(root.Path, fullPath, StringComparison.OrdinalIgnoreCase) &&
+                !IsAncestor(root.Path, fullPath))
+            {
+                throw new ArgumentException($"Path '{fullPath}' is outside managed root '{root.Path}'.", nameof(paths));
+            }
+
+            if (IsDatabasePath(fullPath))
+            {
+                continue;
+            }
+
+            normalized[fullPath] = fullPath;
+        }
+
+        var collapsed = new List<string>();
+        foreach (var path in normalized.Values.OrderBy(path => path.Length))
+        {
+            if (!collapsed.Any(parent => IsAncestor(parent, path)))
+            {
+                collapsed.Add(path);
+            }
+        }
+
+        return collapsed;
+    }
+
+    internal bool IsDatabasePath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        return string.Equals(fullPath, DatabasePath, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(fullPath, DatabasePath + "-wal", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(fullPath, DatabasePath + "-shm", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(fullPath, DatabasePath + "-journal", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private FileRecord ReadFileRecord(string path)
+    {
+        var file = new FileInfo(path);
+        var fullPath = Normalize(file.FullName);
+        return new(
+            _readIdentity(fullPath),
+            fullPath,
+            file.Name,
+            file.Extension,
+            file.Length,
+            file.LastWriteTimeUtc.ToString("O"));
     }
 
     private (int Added, int Updated, int Missing) WriteBatch(
@@ -377,6 +690,16 @@ public sealed class ManagedRootScanner
             else
             {
                 added++;
+            }
+
+            using (var releaseDescendants = connection.CreateCommand())
+            {
+                releaseDescendants.Transaction = transaction;
+                releaseDescendants.CommandText =
+                    "UPDATE files SET is_online = 0 WHERE root_id = $rootId AND is_online = 1 AND substr(normalized_path, 1, length($prefix)) = $prefix COLLATE NOCASE;";
+                releaseDescendants.Parameters.AddWithValue("$rootId", rootId);
+                releaseDescendants.Parameters.AddWithValue("$prefix", file.Path + Path.DirectorySeparatorChar);
+                missing += releaseDescendants.ExecuteNonQuery();
             }
 
             using (var releasePath = connection.CreateCommand())
@@ -467,6 +790,44 @@ public sealed class ManagedRootScanner
         command.Parameters.AddWithValue("$rootId", rootId);
         command.Parameters.AddWithValue("$scanToken", scanToken);
         return command.ExecuteNonQuery();
+    }
+
+    private static int MarkPathMissing(SqliteConnection connection, long rootId, string path)
+    {
+        using var transaction = connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            "UPDATE files SET is_online = 0 WHERE root_id = $rootId AND is_online = 1 AND (normalized_path = $path COLLATE NOCASE OR substr(normalized_path, 1, length($prefix)) = $prefix COLLATE NOCASE);";
+        command.Parameters.AddWithValue("$rootId", rootId);
+        command.Parameters.AddWithValue("$path", path);
+        command.Parameters.AddWithValue("$prefix", Path.EndsInDirectorySeparator(path) ? path : path + Path.DirectorySeparatorChar);
+        var missing = command.ExecuteNonQuery();
+        transaction.Commit();
+        return missing;
+    }
+
+    private static int MarkScopeMissing(
+        SqliteConnection connection,
+        long rootId,
+        string directoryPath,
+        string scanToken)
+    {
+        var prefix = Path.EndsInDirectorySeparator(directoryPath)
+            ? directoryPath
+            : directoryPath + Path.DirectorySeparatorChar;
+        using var transaction = connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            "UPDATE files SET is_online = 0 WHERE root_id = $rootId AND is_online = 1 AND scan_token <> $scanToken AND (normalized_path = $path COLLATE NOCASE OR substr(normalized_path, 1, length($prefix)) = $prefix COLLATE NOCASE);";
+        command.Parameters.AddWithValue("$rootId", rootId);
+        command.Parameters.AddWithValue("$scanToken", scanToken);
+        command.Parameters.AddWithValue("$path", directoryPath);
+        command.Parameters.AddWithValue("$prefix", prefix);
+        var missing = command.ExecuteNonQuery();
+        transaction.Commit();
+        return missing;
     }
 
     private static string Normalize(string path)
