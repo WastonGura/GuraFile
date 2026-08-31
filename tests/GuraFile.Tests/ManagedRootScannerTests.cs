@@ -223,6 +223,10 @@ public sealed class ManagedRootScannerTests
         Assert.HasCount(1, result.Failures);
         Assert.AreEqual(root.Path, result.Failures[0].Path);
         Assert.AreEqual(0, result.CommittedFiles);
+        var offline = scanner.ListRoots().Single();
+        Assert.AreEqual(ManagedRootStatus.Offline, offline.Status);
+        Assert.IsNotNull(offline.LastCheckedUtc);
+        StringAssert.Contains(offline.LastError, "does not exist");
     }
 
     [TestMethod]
@@ -249,6 +253,34 @@ public sealed class ManagedRootScannerTests
         Assert.HasCount(1, result.Failures);
         Assert.AreEqual(0, result.MissingFiles);
         Assert.AreEqual(1L, Scalar<long>(databasePath, "SELECT is_online FROM files WHERE id = $id;", ("$id", fileId)));
+        Assert.AreEqual(ManagedRootStatus.Offline, failingScanner.ListRoots().Single().Status);
+    }
+
+    [TestMethod]
+    public async Task RootEnumerationFailureMarksRootOfflineWithoutMarkingFilesMissing()
+    {
+        using var temp = TempDirectory.Create();
+        var rootPath = temp.CreateDirectory("root-enumeration");
+        var filePath = Path.Combine(rootPath, "keep.txt");
+        await File.WriteAllTextAsync(filePath, "keep");
+        var databasePath = Path.Combine(temp.Path, "index.db");
+        var scanner = new ManagedRootScanner(databasePath);
+        var root = scanner.AddRoot(rootPath);
+        await scanner.ScanAsync(root.Id);
+        var failingScanner = new ManagedRootScanner(
+            databasePath,
+            FileIdentityReader.Read,
+            path => string.Equals(path, rootPath, StringComparison.OrdinalIgnoreCase)
+                ? throw new UnauthorizedAccessException("simulated enumeration denial")
+                : Directory.GetFileSystemEntries(path));
+
+        var result = await failingScanner.ScanAsync(root.Id);
+
+        Assert.HasCount(1, result.Failures);
+        Assert.AreEqual(0, result.MissingFiles);
+        Assert.AreEqual(ManagedRootStatus.Offline, failingScanner.ListRoots().Single().Status);
+        Assert.IsTrue((await new FileQueryService(databasePath).QueryAsync(new()))
+            .Single(file => file.Path == filePath).IsOnline);
     }
 
     [TestMethod]

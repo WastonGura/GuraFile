@@ -2,7 +2,29 @@ using Microsoft.Data.Sqlite;
 
 namespace GuraFile.Storage;
 
-public sealed record ManagedRoot(long Id, string Path);
+public enum ManagedRootStatus
+{
+    Online,
+    Offline,
+    Recovering
+}
+
+public sealed record ManagedRoot(
+    long Id,
+    string Path,
+    ManagedRootStatus Status = ManagedRootStatus.Online,
+    string? LastError = null,
+    DateTimeOffset? LastCheckedUtc = null)
+{
+    public string DisplayName => Status switch
+    {
+        ManagedRootStatus.Offline => $"{Path}  [离线]{ErrorSuffix}",
+        ManagedRootStatus.Recovering => $"{Path}  [正在恢复]{ErrorSuffix}",
+        _ => $"{Path}  [在线]{ErrorSuffix}"
+    };
+
+    private string ErrorSuffix => string.IsNullOrWhiteSpace(LastError) ? "" : $"  {LastError}";
+}
 
 public sealed record ScanFailure(string Path, string Error);
 
@@ -129,12 +151,13 @@ public sealed class ManagedRootScanner
     {
         using var connection = SqliteDatabase.Open(DatabasePath);
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id, path FROM roots ORDER BY path COLLATE NOCASE;";
+        command.CommandText =
+            "SELECT id, path, status, last_error, last_checked_utc FROM roots ORDER BY path COLLATE NOCASE;";
         using var reader = command.ExecuteReader();
         var roots = new List<ManagedRoot>();
         while (reader.Read())
         {
-            roots.Add(new(reader.GetInt64(0), reader.GetString(1)));
+            roots.Add(ReadManagedRoot(reader));
         }
 
         return roots;
@@ -154,6 +177,20 @@ public sealed class ManagedRootScanner
             var removed = command.ExecuteNonQuery() == 1;
             transaction.Commit();
             return removed;
+        }
+        finally
+        {
+            _writeGate.Release();
+        }
+    }
+
+    internal void SetRootStatus(long rootId, ManagedRootStatus status, string? error = null)
+    {
+        _writeGate.Wait();
+        try
+        {
+            using var connection = SqliteDatabase.Open(DatabasePath);
+            SetRootStatus(connection, rootId, status, error);
         }
         finally
         {
@@ -221,6 +258,7 @@ public sealed class ManagedRootScanner
         var missing = 0;
         var fallback = 0;
         var coverageComplete = true;
+        var rootAvailable = false;
 
         if (cancellationToken.IsCancellationRequested)
         {
@@ -243,6 +281,7 @@ public sealed class ManagedRootScanner
             }
 
             directories.Push(root.Path);
+            rootAvailable = true;
         }
         catch (Exception exception) when (exception is DirectoryNotFoundException or FileNotFoundException)
         {
@@ -257,7 +296,6 @@ public sealed class ManagedRootScanner
                 return Complete(canceled: true);
             }
 
-            missing = MarkMissing(connection, root.Id, scanToken);
             return Complete(canceled: false);
         }
         catch (Exception exception) when (IsFileSystemError(exception))
@@ -284,6 +322,11 @@ public sealed class ManagedRootScanner
             catch (Exception exception) when (IsFileSystemError(exception))
             {
                 coverageComplete = false;
+                if (string.Equals(directory, root.Path, StringComparison.OrdinalIgnoreCase))
+                {
+                    rootAvailable = false;
+                }
+
                 failures.Add(new(directory, exception.Message));
                 progress?.Invoke(new(discovered, committed, failures.Count));
                 continue;
@@ -366,8 +409,19 @@ public sealed class ManagedRootScanner
         }
         return Complete(canceled: false);
 
-        ScanResult Complete(bool canceled) =>
-            new(discovered, committed, added, updated, missing, fallback, canceled, failures);
+        ScanResult Complete(bool canceled)
+        {
+            if (!canceled)
+            {
+                SetRootStatus(
+                    connection,
+                    root.Id,
+                    rootAvailable ? ManagedRootStatus.Online : ManagedRootStatus.Offline,
+                    failures.LastOrDefault()?.Error);
+            }
+
+            return new(discovered, committed, added, updated, missing, fallback, canceled, failures);
+        }
     }
 
     private ScanResult ReconcilePaths(
@@ -576,7 +630,8 @@ public sealed class ManagedRootScanner
     private static ManagedRoot ReadRoot(SqliteConnection connection, long rootId)
     {
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id, path FROM roots WHERE id = $rootId;";
+        command.CommandText =
+            "SELECT id, path, status, last_error, last_checked_utc FROM roots WHERE id = $rootId;";
         command.Parameters.AddWithValue("$rootId", rootId);
         using var reader = command.ExecuteReader();
         if (!reader.Read())
@@ -584,7 +639,42 @@ public sealed class ManagedRootScanner
             throw new ArgumentException("Managed root was not found.", nameof(rootId));
         }
 
-        return new(reader.GetInt64(0), reader.GetString(1));
+        return ReadManagedRoot(reader);
+    }
+
+    private static ManagedRoot ReadManagedRoot(SqliteDataReader reader) =>
+        new(
+            reader.GetInt64(0),
+            reader.GetString(1),
+            ParseStatus(reader.GetString(2)),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            reader.IsDBNull(4) ? null : DateTimeOffset.Parse(reader.GetString(4)));
+
+    private static ManagedRootStatus ParseStatus(string status) => status switch
+    {
+        "online" => ManagedRootStatus.Online,
+        "offline" => ManagedRootStatus.Offline,
+        "recovering" => ManagedRootStatus.Recovering,
+        _ => throw new InvalidDataException($"Unknown managed root status '{status}'.")
+    };
+
+    private static void SetRootStatus(
+        SqliteConnection connection,
+        long rootId,
+        ManagedRootStatus status,
+        string? error)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "UPDATE roots SET status = $status, last_error = $error, last_checked_utc = $checked WHERE id = $rootId;";
+        command.Parameters.AddWithValue("$status", status.ToString().ToLowerInvariant());
+        command.Parameters.AddWithValue("$error", (object?)error ?? DBNull.Value);
+        command.Parameters.AddWithValue("$checked", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$rootId", rootId);
+        if (command.ExecuteNonQuery() != 1)
+        {
+            throw new ArgumentException("Managed root was not found.", nameof(rootId));
+        }
     }
 
     private IReadOnlyList<string> CollapsePaths(ManagedRoot root, IReadOnlyCollection<string> paths)

@@ -23,6 +23,8 @@ public sealed class SqliteDatabaseTests
             "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name IN ('identity_kind', 'is_online');"));
         Assert.AreEqual("user", Scalar<string>(connection,
             "SELECT dflt_value FROM pragma_table_info('tags') WHERE name = 'source';").Trim('\''));
+        Assert.AreEqual(3L, Scalar<long>(connection,
+            "SELECT COUNT(*) FROM pragma_table_info('roots') WHERE name IN ('status', 'last_error', 'last_checked_utc');"));
     }
 
     [TestMethod]
