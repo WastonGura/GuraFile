@@ -82,7 +82,7 @@
                 <ProgressRing x:Name="FilesLoadingRing" Width="18" Height="18" Visibility="Collapsed" />
                 <TextBlock x:Name="FilesStateText" VerticalAlignment="Center" Text="正在加载文件…" />
             </StackPanel>
-            <ListView x:Name="FilesList" Grid.Row="3" AutomationProperties.Name="文件列表" SelectionChanged="FilesList_SelectionChanged" SelectionMode="Extended">
+            <ListView x:Name="FilesList" Grid.Row="3" AutomationProperties.Name="文件列表" DoubleTapped="FilesList_DoubleTapped" SelectionChanged="FilesList_SelectionChanged" SelectionMode="Extended">
                 <ListView.ItemsPanel>
                     <ItemsPanelTemplate>
                         <ItemsStackPanel />
@@ -122,13 +122,20 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
             <TextBlock FontSize="20" FontWeight="SemiBold" Text="文件详情" />
             <TextBlock x:Name="DetailsText" Grid.Row="1" AutomationProperties.Name="所选文件详情" Text="未选择文件" TextWrapping="Wrap" />
-            <Border Grid.Row="2" Height="1" Background="{ThemeResource CardStrokeColorDefaultBrush}" />
-            <TextBlock Grid.Row="3" FontSize="20" FontWeight="SemiBold" Text="扫描状态" />
-            <Grid Grid.Row="4" RowSpacing="8">
+            <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
+                <Button x:Name="OpenFileButton" AutomationProperties.Name="使用默认应用打开文件" Click="OpenFileButton_Click" Content="打开" IsEnabled="False" />
+                <Button x:Name="RevealFileButton" AutomationProperties.Name="在资源管理器中显示文件" Click="RevealFileButton_Click" Content="在资源管理器中显示" IsEnabled="False" />
+            </StackPanel>
+            <TextBlock x:Name="FileActionStatusText" Grid.Row="3" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+            <Border Grid.Row="4" Height="1" Background="{ThemeResource CardStrokeColorDefaultBrush}" />
+            <TextBlock Grid.Row="5" FontSize="20" FontWeight="SemiBold" Text="扫描状态" />
+            <Grid Grid.Row="6" RowSpacing="8">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
