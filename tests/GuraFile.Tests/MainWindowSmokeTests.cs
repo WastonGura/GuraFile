@@ -76,11 +76,15 @@ public sealed class MainWindowSmokeTests
             .ToHashSet();
 
         CollectionAssert.IsSubsetOf(
-            new[] { "TagsList", "TagNameBox", "CreateTagButton", "RenameTagButton", "DeleteTagButton", "ApplyTagButton", "RemoveTagButton", "TagFilterToggle", "TagMatchBox", "ExportTagsButton", "ImportTagsButton", "TagStatusText" },
+            new[] { "TagsList", "AutomaticTagsList", "TagNameBox", "CreateTagButton", "RenameTagButton", "DeleteTagButton", "ApplyTagButton", "RemoveTagButton", "TagFilterToggle", "TagMatchBox", "ExportTagsButton", "ImportTagsButton", "TagStatusText", "ReidentifyTypeButton" },
             names.ToArray());
         var tagsList = document.Descendants()
             .Single(element => element.Attribute(x + "Name")?.Value == "TagsList");
         Assert.AreEqual("Extended", tagsList.Attribute("SelectionMode")?.Value);
+        var automaticTags = document.Descendants()
+            .Single(element => element.Attribute(x + "Name")?.Value == "AutomaticTagsList");
+        Assert.AreEqual("Extended", automaticTags.Attribute("SelectionMode")?.Value);
+        Assert.AreEqual("自动标签（只读）", automaticTags.Attribute("Header")?.Value);
     }
 
     [TestMethod]
@@ -121,7 +125,7 @@ public sealed class MainWindowSmokeTests
             Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "GuraFile", "MainWindow.xaml.cs"));
         var source = File.ReadAllText(path);
         var start = source.IndexOf("private async void AddRootButton_Click", StringComparison.Ordinal);
-        var end = source.IndexOf("private void RemoveRootButton_Click", start, StringComparison.Ordinal);
+        var end = source.IndexOf("private async void RemoveRootButton_Click", start, StringComparison.Ordinal);
         var handler = source[start..end];
 
         StringAssert.Contains(handler, "catch (Exception exception)");

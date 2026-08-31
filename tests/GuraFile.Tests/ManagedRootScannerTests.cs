@@ -147,8 +147,8 @@ public sealed class ManagedRootScannerTests
 
         Assert.AreEqual(2L, Scalar<long>(scanner.DatabasePath, "SELECT COUNT(*) FROM files;"));
         Assert.AreEqual(0L, Scalar<long>(scanner.DatabasePath, "SELECT is_online FROM files WHERE id = $id;", ("$id", oldId)));
-        Assert.AreEqual(1L, Scalar<long>(scanner.DatabasePath, "SELECT COUNT(*) FROM file_tags WHERE file_id = $id;", ("$id", oldId)));
-        Assert.AreEqual(0L, Scalar<long>(scanner.DatabasePath, "SELECT COUNT(*) FROM file_tags ft JOIN files f ON f.id = ft.file_id WHERE f.is_online = 1;"));
+        Assert.AreEqual(1L, Scalar<long>(scanner.DatabasePath, "SELECT COUNT(*) FROM file_tags WHERE file_id = $id AND source = 'user';", ("$id", oldId)));
+        Assert.AreEqual(0L, Scalar<long>(scanner.DatabasePath, "SELECT COUNT(*) FROM file_tags ft JOIN files f ON f.id = ft.file_id WHERE f.is_online = 1 AND ft.source = 'user';"));
     }
 
     [TestMethod]
@@ -376,7 +376,7 @@ public sealed class ManagedRootScannerTests
         Assert.AreEqual(2L, Scalar<long>(databasePath, "SELECT COUNT(*) FROM files;"));
         Assert.AreEqual(0L, Scalar<long>(databasePath, "SELECT is_online FROM files WHERE id = 17;"));
         Assert.AreEqual(1L, Scalar<long>(databasePath, "SELECT COUNT(*) FROM file_tags WHERE file_id = 17 AND tag_id = 3 AND source = 'user';"));
-        Assert.AreEqual(0L, Scalar<long>(databasePath, "SELECT COUNT(*) FROM file_tags ft JOIN files f ON f.id = ft.file_id WHERE f.is_online = 1;"));
+        Assert.AreEqual(0L, Scalar<long>(databasePath, "SELECT COUNT(*) FROM file_tags ft JOIN files f ON f.id = ft.file_id WHERE f.is_online = 1 AND ft.source = 'user';"));
     }
 
     [TestMethod]
