@@ -6,9 +6,9 @@
     Title="GuraFile">
     <Grid Padding="16" ColumnSpacing="16">
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="280" />
+            <ColumnDefinition Width="240" />
             <ColumnDefinition Width="*" />
-            <ColumnDefinition Width="320" />
+            <ColumnDefinition Width="300" />
         </Grid.ColumnDefinitions>
 
         <Grid RowSpacing="12">
@@ -18,41 +18,102 @@
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
             <TextBlock FontSize="20" FontWeight="SemiBold" Text="管理根目录" />
-            <ListView
-                x:Name="RootsList"
-                Grid.Row="1"
-                DisplayMemberPath="Path"
-                SelectionMode="Single" />
+            <ListView x:Name="RootsList" Grid.Row="1" AutomationProperties.Name="管理根目录" DisplayMemberPath="Path" SelectionMode="Single" />
             <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
-                <Button x:Name="AddRootButton" Click="AddRootButton_Click" Content="添加" />
-                <Button x:Name="RemoveRootButton" Click="RemoveRootButton_Click" Content="移除" />
-                <Button x:Name="ScanButton" Click="ScanButton_Click" Content="扫描" />
+                <Button x:Name="AddRootButton" AutomationProperties.Name="添加管理根目录" Click="AddRootButton_Click" Content="添加" />
+                <Button x:Name="RemoveRootButton" AutomationProperties.Name="移除管理根目录" Click="RemoveRootButton_Click" Content="移除" />
+                <Button x:Name="ScanButton" AutomationProperties.Name="扫描所选根目录" Click="ScanButton_Click" Content="扫描" />
             </StackPanel>
         </Grid>
 
-        <Border Grid.Column="1" Padding="24" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" CornerRadius="8">
-            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8">
-                <TextBlock HorizontalAlignment="Center" FontSize="24" Text="文件索引" />
-                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="文件列表将在 Issue #4 中实现" />
+        <Grid Grid.Column="1" RowSpacing="8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <TextBox x:Name="SearchBox" AutomationProperties.Name="筛选文件" PlaceholderText="按名称、路径或扩展名筛选" TextChanged="SearchBox_TextChanged" />
+            <Grid Grid.Row="1" ColumnSpacing="4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="140" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="96" />
+                    <ColumnDefinition Width="126" />
+                    <ColumnDefinition Width="136" />
+                    <ColumnDefinition Width="60" />
+                </Grid.ColumnDefinitions>
+                <Button x:Name="SortNameButton" AutomationProperties.Name="按名称排序" Click="SortButton_Click" Content="名称 ▲" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Tag="Name" />
+                <Button x:Name="SortPathButton" Grid.Column="1" AutomationProperties.Name="按路径排序" Click="SortButton_Click" Content="路径" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Tag="Path" />
+                <Button x:Name="SortExtensionButton" Grid.Column="2" AutomationProperties.Name="按扩展名排序" Click="SortButton_Click" Content="扩展名" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Tag="Extension" />
+                <Button x:Name="SortSizeButton" Grid.Column="3" AutomationProperties.Name="按大小排序" Click="SortButton_Click" Content="大小（字节）" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Tag="Size" />
+                <Button x:Name="SortModifiedButton" Grid.Column="4" AutomationProperties.Name="按修改时间排序" Click="SortButton_Click" Content="修改时间" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Tag="Modified" />
+                <TextBlock Grid.Column="5" VerticalAlignment="Center" Text="状态" />
+            </Grid>
+            <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
+                <ProgressRing x:Name="FilesLoadingRing" Width="18" Height="18" Visibility="Collapsed" />
+                <TextBlock x:Name="FilesStateText" VerticalAlignment="Center" Text="正在加载文件…" />
             </StackPanel>
-        </Border>
+            <ListView x:Name="FilesList" Grid.Row="3" AutomationProperties.Name="文件列表" SelectionChanged="FilesList_SelectionChanged" SelectionMode="Extended">
+                <ListView.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <ItemsStackPanel />
+                    </ItemsPanelTemplate>
+                </ListView.ItemsPanel>
+                <ListView.ItemContainerStyle>
+                    <Style TargetType="ListViewItem">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                    </Style>
+                </ListView.ItemContainerStyle>
+                <ListView.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Padding="4" ColumnSpacing="4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="140" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="96" />
+                                <ColumnDefinition Width="126" />
+                                <ColumnDefinition Width="136" />
+                                <ColumnDefinition Width="60" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Grid.Column="1" Text="{Binding Path}" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Grid.Column="2" Text="{Binding Extension}" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Grid.Column="3" Text="{Binding Size}" />
+                            <TextBlock Grid.Column="4" Text="{Binding Modified}" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Grid.Column="5" Text="{Binding Status}" />
+                        </Grid>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+        </Grid>
 
         <Grid Grid.Column="2" RowSpacing="12">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
-            <TextBlock FontSize="20" FontWeight="SemiBold" Text="扫描状态" />
-            <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
-                <ProgressRing x:Name="ScanProgressRing" Width="20" Height="20" />
-                <TextBlock x:Name="ProgressText" VerticalAlignment="Center" Text="空闲" />
-                <Button x:Name="CancelButton" Click="CancelButton_Click" Content="取消" IsEnabled="False" />
-            </StackPanel>
-            <StackPanel Grid.Row="2" Spacing="8">
-                <TextBlock FontWeight="SemiBold" Text="失败项" />
-                <ListView x:Name="FailureList" />
-            </StackPanel>
+            <TextBlock FontSize="20" FontWeight="SemiBold" Text="文件详情" />
+            <TextBlock x:Name="DetailsText" Grid.Row="1" AutomationProperties.Name="所选文件详情" Text="未选择文件" TextWrapping="Wrap" />
+            <Border Grid.Row="2" Height="1" Background="{ThemeResource CardStrokeColorDefaultBrush}" />
+            <TextBlock Grid.Row="3" FontSize="20" FontWeight="SemiBold" Text="扫描状态" />
+            <Grid Grid.Row="4" RowSpacing="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <ProgressRing x:Name="ScanProgressRing" Width="20" Height="20" Visibility="Collapsed" />
+                    <TextBlock x:Name="ProgressText" VerticalAlignment="Center" Text="空闲" />
+                    <Button x:Name="CancelButton" AutomationProperties.Name="取消扫描" Click="CancelButton_Click" Content="取消" IsEnabled="False" />
+                </StackPanel>
+                <TextBlock Grid.Row="1" FontWeight="SemiBold" Text="失败项" />
+                <ListView x:Name="FailureList" Grid.Row="2" AutomationProperties.Name="扫描失败项" />
+            </Grid>
         </Grid>
     </Grid>
 </Window>
