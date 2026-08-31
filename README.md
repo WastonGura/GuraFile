@@ -1,38 +1,63 @@
 # GuraFile
 
-GuraFile 是一个 Windows 优先的标签式文件管理器。它保留真实文件系统作为唯一文件来源，通过本地索引、用户标签、自动类型标签和关系图谱提供不同于文件夹树的组织方式。
+GuraFile 是一个 Windows 优先的标签式文件管理器。它保留真实文件系统作为唯一文件来源，在本地建立索引，让你用标签而不是文件夹层级整理和查找文件。
 
-## 当前状态
+## v0.1.0 Technical Preview
 
-项目处于 `v0.1.0` Technical Preview 开发阶段。首个版本聚焦文件索引、手动标签、列表搜索和安全的数据导出，不以替代 Windows 资源管理器为目标。
+首个公开预览版已经支持：
 
-## 核心原则
+- 添加一个或多个管理根目录并手动差异扫描；
+- 使用稳定 Windows 文件身份跟踪同卷重命名和移动；
+- 在虚拟化列表中按名称、路径、扩展名和元数据筛选、排序；
+- 创建、重命名和删除用户标签，为单个或多个文件批量贴标；
+- 按任一标签或全部标签组合筛选；
+- 使用系统默认应用打开文件，或在资源管理器中定位文件；
+- 将用户标签与关系导出为版本化 JSON，并恢复到重新扫描后的索引。
 
-- 原始文件始终保存在用户选择的位置；
-- 用户标签与自动标签分开保存；
-- 文件监听只作为变更提示，最终状态以磁盘回读和差异扫描为准；
-- 图谱使用文件—标签二部图，避免文件两两连线失控；
-- 数据安全、可恢复性和可验证性优先于功能数量。
+这是 Technical Preview，不建议把 SQLite 索引数据库本身作为唯一备份。重要整理结果请定期使用“导出备份”。
 
-## 开发
+## 安装与运行
 
-开发以 GitHub Issue 为交付单位，使用独立 worktree、测试先行、独立代码审查和受保护的 `main` 分支。
+1. 从 GitHub Releases 下载 `GuraFile-v0.1.0-win-x64.zip` 和对应的 `.sha256` 文件。
+2. 校验压缩包 SHA-256 后解压到可写目录。
+3. 运行 `GuraFile.exe`。应用为未签名预览包，Windows 可能显示 SmartScreen 提示。
 
-### 前置条件
+系统要求：x64 Windows 10 版本 1809（build 17763）或更高版本。发布包为 unpackaged、自包含部署，不要求单独安装 .NET 或 Windows App Runtime。
 
-- x64 Windows 10 版本 1809（build 17763）或更高版本；
-- .NET SDK 10.0.400 或更高版本；
-- 可访问 NuGet.org 以还原项目依赖。
+## 基本使用
 
-应用当前仅支持 x64，使用 Windows App SDK 2.4.0，并以 unpackaged、自包含方式运行；不需要全局安装 WinUI 项目模板或 Windows App Runtime。
+1. 在左侧添加管理根目录并选择“扫描”。
+2. 在中间文件列表选择一个或多个文件。
+3. 在左侧创建并选择标签，然后选择“贴到文件”。
+4. 开启“按所选标签筛选”，选择“满足任一标签”或“满足全部标签”。
+5. 在右侧使用“打开”或“在资源管理器中显示”。
+6. 使用“导出备份”保存用户标签；恢复时先扫描目标文件，再选择“导入备份”。
 
-### 本地索引数据
+索引保存在 `%LOCALAPPDATA%\GuraFile\index.db`。移除管理根目录只会删除 GuraFile 索引，不会删除真实文件。
 
-SQLite schema 使用 `PRAGMA user_version` 向前迁移，并在每次连接时启用 WAL 与外键。`roots`、`files` 和 `file_tags.source = 'automatic'` 是可由磁盘重建的索引数据；`file_tags.source = 'user'` 是不可替代的用户数据，索引重建不得删除。运行时值必须使用参数化命令写入，关联写入必须放在事务中。
+## 备份与升级
 
-### 还原、构建与测试
+- JSON 备份格式为 `GuraFile.UserTags` v1，只包含用户标签和用户关系；自动标签与可重建元数据不进入备份。
+- stable 身份只按稳定文件身份恢复；path 降级记录只匹配在线 path 身份，不会把标签猜测绑定到同路径替换文件。
+- 数据库 schema 会在启动时自动向前迁移。升级前建议先导出标签；升级后的数据库不能由不支持该 schema 的旧版本打开。
+- 单个 JSON 备份上限为 64 MB；超限时导出会明确失败，不会生成无法重新导入的文件。
 
-在干净 clone 的仓库根目录使用 PowerShell 7：
+## 已知限制
+
+- 没有实时监听；磁盘变化后需要手动重新扫描。
+- 不提供复制、移动、重命名或删除等文件写操作。
+- 尚未提供图谱；文件—标签可视化将在后续版本实现。
+- 尚未提供自动类型标签、保存视图、全文检索或跨平台版本。
+- path 身份是稳定身份不可用时的保守降级，外部重命名后可能无法自动延续节点。
+- 当前仅提供未签名的 Windows x64 便携压缩包。
+
+## 隐私与数据边界
+
+GuraFile 的索引和标签保存在本机，不上传文件内容。真实文件始终位于原目录；当前版本只会读取元数据、打开文件、请求资源管理器定位，以及修改本地索引和用户选择的 JSON 备份。
+
+## 开发与验证
+
+需要 .NET SDK 10.0.400 或更高版本。在仓库根目录使用 PowerShell 7：
 
 ```powershell
 dotnet restore .\GuraFile.slnx
@@ -41,10 +66,10 @@ dotnet test .\tests\GuraFile.Tests\GuraFile.Tests.csproj --configuration Release
 .\tests\LaunchSmoke.ps1 -Configuration Release -RuntimeIdentifier win-x64
 ```
 
-### 运行
+生成可发布包：
 
 ```powershell
-dotnet run --project .\src\GuraFile\GuraFile.csproj --configuration Release --no-build
+.\scripts\PackageRelease.ps1 -Version 0.1.0
 ```
 
-应用启动后应显示标题为 `GuraFile` 的最小主窗口。MSTest 检查窗口声明，`LaunchSmoke.ps1` 则限时启动应用并确认窗口标题和响应状态，然后关闭测试进程。
+项目按 GitHub Issue、独立 worktree、测试先行、独立审查、PR 和受保护 `main` 分支交付。第三方组件及许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。

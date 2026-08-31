@@ -7,7 +7,9 @@ param(
     [string]$RuntimeIdentifier = 'win-x64',
 
     [ValidateRange(1, 60)]
-    [int]$TimeoutSeconds = 15
+    [int]$TimeoutSeconds = 15,
+
+    [string]$ExecutablePath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,8 +31,12 @@ namespace GuraFile.Tests
 }
 
 $targetFramework = 'net10.0-windows10.0.26100.0'
-$executable = [System.IO.Path]::GetFullPath(
-    (Join-Path $PSScriptRoot "..\src\GuraFile\bin\$Configuration\$targetFramework\$RuntimeIdentifier\GuraFile.exe"))
+$executable = if ($ExecutablePath) {
+    [System.IO.Path]::GetFullPath($ExecutablePath)
+} else {
+    [System.IO.Path]::GetFullPath(
+        (Join-Path $PSScriptRoot "..\src\GuraFile\bin\$Configuration\$targetFramework\$RuntimeIdentifier\GuraFile.exe"))
+}
 
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
     throw "GuraFile executable not found: $executable. Build configuration '$Configuration' for '$RuntimeIdentifier' first."
