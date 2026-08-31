@@ -1,6 +1,6 @@
 # Third-party notices
 
-GuraFile v0.1.0 的 Windows x64 自包含发布包包含下列第三方组件。具体许可文本随发布包放在 `licenses/` 目录；本清单不修改各组件原有许可。
+GuraFile v0.2.0 的 Windows x64 自包含发布包包含下列第三方组件。具体许可文本随发布包放在 `licenses/` 目录；本清单不修改各组件原有许可。
 
 | 组件 | 版本 | 许可 / 条款 |
 | --- | --- | --- |
