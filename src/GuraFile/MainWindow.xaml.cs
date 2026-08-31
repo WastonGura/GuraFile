@@ -13,6 +13,7 @@ public sealed partial class MainWindow : Window
     private readonly ManagedRootScanner _scanner;
     private readonly FileQueryService _fileQuery;
     private readonly TagService _tags;
+    private readonly UserTagBackupService _tagBackup;
     private readonly ShellFileActions _shell = new();
     private CancellationTokenSource? _scanCancellation;
     private CancellationTokenSource? _fileQueryCancellation;
@@ -22,6 +23,7 @@ public sealed partial class MainWindow : Window
     private bool _initialized;
     private bool _refreshingTags;
     private bool _changingFileTags;
+    private bool _transferringTags;
 
     public MainWindow()
     {
@@ -33,6 +35,7 @@ public sealed partial class MainWindow : Window
         _scanner = new(databasePath);
         _fileQuery = new(databasePath);
         _tags = new(databasePath);
+        _tagBackup = new(databasePath);
         _initialized = true;
         Closed += (_, _) =>
         {
@@ -371,6 +374,91 @@ public sealed partial class MainWindow : Window
 
     private async void RemoveTagButton_Click(object sender, RoutedEventArgs e) =>
         await ChangeSelectedFileTagsAsync(add: false);
+
+    private async void ExportTagsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_transferringTags)
+        {
+            return;
+        }
+
+        var picker = new FileSavePicker
+        {
+            SuggestedFileName = $"GuraFile-tags-{DateTime.Now:yyyyMMdd}"
+        };
+        picker.FileTypeChoices.Add("JSON", [".json"]);
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        var file = await picker.PickSaveFileAsync();
+        if (file is null)
+        {
+            return;
+        }
+
+        SetTagTransfer(true);
+        try
+        {
+            var json = await Task.Run(_tagBackup.Export);
+            await File.WriteAllTextAsync(file.Path, json);
+            TagStatusText.Text = $"已导出用户标签备份：{file.Name}";
+        }
+        catch (Exception exception)
+        {
+            TagStatusText.Text = $"导出失败：{exception.Message}";
+        }
+        finally
+        {
+            SetTagTransfer(false);
+        }
+    }
+
+    private async void ImportTagsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_transferringTags)
+        {
+            return;
+        }
+
+        var picker = new FileOpenPicker();
+        picker.FileTypeFilter.Add(".json");
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        var file = await picker.PickSingleFileAsync();
+        if (file is null)
+        {
+            return;
+        }
+
+        SetTagTransfer(true);
+        try
+        {
+            if (new FileInfo(file.Path).Length > UserTagBackupService.MaximumBackupBytes)
+            {
+                throw new InvalidDataException("备份文件过大。");
+            }
+
+            var json = await File.ReadAllTextAsync(file.Path);
+            var result = await Task.Run(() => _tagBackup.Import(json));
+            await RefreshTagsAsync();
+            await RefreshFilesAsync();
+            TagStatusText.Text =
+                $"导入完成：新建 {result.CreatedTags} 个标签，复用 {result.ReusedTags} 个，恢复 {result.RestoredRelations} 条关系；" +
+                $"名称冲突 {result.Conflicts.Count}，未匹配文件 {result.MissingFiles.Count}。";
+        }
+        catch (Exception exception)
+        {
+            TagStatusText.Text = $"导入失败：{exception.Message}";
+        }
+        finally
+        {
+            SetTagTransfer(false);
+        }
+    }
+
+    private void SetTagTransfer(bool transferring)
+    {
+        _transferringTags = transferring;
+        ExportTagsButton.IsEnabled = !transferring;
+        ImportTagsButton.IsEnabled = !transferring;
+    }
 
     private async Task ChangeSelectedFileTagsAsync(bool add)
     {
