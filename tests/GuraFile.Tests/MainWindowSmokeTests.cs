@@ -18,4 +18,39 @@ public sealed class MainWindowSmokeTests
         Assert.AreEqual("Window", window.Name.LocalName);
         Assert.AreEqual("GuraFile", window.Attribute("Title")?.Value);
     }
+
+    [TestMethod]
+    public void MainWindowHasManagedRootScanningControls()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "GuraFile", "MainWindow.xaml"));
+        var document = XDocument.Load(path);
+        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+
+        var columns = document.Descendants().First(element => element.Name.LocalName == "Grid.ColumnDefinitions");
+        Assert.HasCount(3, columns.Elements());
+
+        var names = document.Descendants()
+            .Select(element => element.Attribute(x + "Name")?.Value)
+            .Where(name => name is not null)
+            .ToHashSet();
+        CollectionAssert.IsSubsetOf(
+            new[] { "RootsList", "AddRootButton", "RemoveRootButton", "ScanButton", "CancelButton", "ProgressText", "FailureList" },
+            names.ToArray());
+    }
+
+    [TestMethod]
+    public void AddRootHandlerReportsFailuresAtTheUiBoundary()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "GuraFile", "MainWindow.xaml.cs"));
+        var source = File.ReadAllText(path);
+        var start = source.IndexOf("private async void AddRootButton_Click", StringComparison.Ordinal);
+        var end = source.IndexOf("private void RemoveRootButton_Click", start, StringComparison.Ordinal);
+        var handler = source[start..end];
+
+        StringAssert.Contains(handler, "catch (Exception exception)");
+        StringAssert.Contains(handler, "ProgressText.Text = \"添加根目录失败\"");
+        StringAssert.Contains(handler, "FailureList.ItemsSource = new[] { exception.Message }");
+    }
 }

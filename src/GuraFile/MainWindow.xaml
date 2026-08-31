@@ -4,11 +4,55 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="GuraFile">
-    <Grid>
-        <TextBlock
-            HorizontalAlignment="Center"
-            VerticalAlignment="Center"
-            FontSize="32"
-            Text="GuraFile" />
+    <Grid Padding="16" ColumnSpacing="16">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="280" />
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="320" />
+        </Grid.ColumnDefinitions>
+
+        <Grid RowSpacing="12">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <TextBlock FontSize="20" FontWeight="SemiBold" Text="管理根目录" />
+            <ListView
+                x:Name="RootsList"
+                Grid.Row="1"
+                DisplayMemberPath="Path"
+                SelectionMode="Single" />
+            <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
+                <Button x:Name="AddRootButton" Click="AddRootButton_Click" Content="添加" />
+                <Button x:Name="RemoveRootButton" Click="RemoveRootButton_Click" Content="移除" />
+                <Button x:Name="ScanButton" Click="ScanButton_Click" Content="扫描" />
+            </StackPanel>
+        </Grid>
+
+        <Border Grid.Column="1" Padding="24" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" CornerRadius="8">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8">
+                <TextBlock HorizontalAlignment="Center" FontSize="24" Text="文件索引" />
+                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="文件列表将在 Issue #4 中实现" />
+            </StackPanel>
+        </Border>
+
+        <Grid Grid.Column="2" RowSpacing="12">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <TextBlock FontSize="20" FontWeight="SemiBold" Text="扫描状态" />
+            <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
+                <ProgressRing x:Name="ScanProgressRing" Width="20" Height="20" />
+                <TextBlock x:Name="ProgressText" VerticalAlignment="Center" Text="空闲" />
+                <Button x:Name="CancelButton" Click="CancelButton_Click" Content="取消" IsEnabled="False" />
+            </StackPanel>
+            <StackPanel Grid.Row="2" Spacing="8">
+                <TextBlock FontWeight="SemiBold" Text="失败项" />
+                <ListView x:Name="FailureList" />
+            </StackPanel>
+        </Grid>
     </Grid>
 </Window>
