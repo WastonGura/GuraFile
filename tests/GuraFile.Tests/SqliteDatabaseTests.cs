@@ -19,6 +19,8 @@ public sealed class SqliteDatabaseTests
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('roots', 'files', 'tags', 'file_tags');"));
         Assert.AreEqual(4L, Scalar<long>(connection,
             "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name IN ('name', 'extension', 'size', 'modified_utc');"));
+        Assert.AreEqual(2L, Scalar<long>(connection,
+            "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name IN ('identity_kind', 'is_online');"));
     }
 
     [TestMethod]
@@ -94,7 +96,7 @@ public sealed class SqliteDatabaseTests
         }
 
         using var migrated = SqliteDatabase.Open(database.Path);
-        Assert.AreEqual(2L, Scalar<long>(migrated, "PRAGMA user_version;"));
+        Assert.AreEqual(SqliteDatabase.CurrentVersion, Scalar<long>(migrated, "PRAGMA user_version;"));
         Assert.AreEqual("user", Scalar<string>(migrated, "SELECT source FROM file_tags WHERE file_id = 1 AND tag_id = 1;"));
     }
 

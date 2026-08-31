@@ -77,7 +77,7 @@ public sealed partial class MainWindow : Window
                 cancellationToken: cancellation.Token);
             ProgressText.Text = result.Canceled
                 ? $"已取消；保留 {result.CommittedFiles} 个已提交文件"
-                : $"完成；扫描 {result.DiscoveredFiles} 个，提交 {result.CommittedFiles} 个，失败 {result.Failures.Count} 项";
+                : $"完成；新增 {result.AddedFiles}，更新 {result.UpdatedFiles}，缺失 {result.MissingFiles}，降级 {result.FallbackFiles}，失败 {result.Failures.Count}";
             FailureList.ItemsSource = result.Failures.Select(failure => $"{failure.Path}: {failure.Error}").ToList();
         }
         catch (Exception exception)
