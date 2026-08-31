@@ -4,7 +4,7 @@ namespace GuraFile.Storage;
 
 public static class SqliteDatabase
 {
-    public const int CurrentVersion = 2;
+    public const int CurrentVersion = 3;
 
     private static readonly string[] Migrations =
     [
@@ -54,6 +54,51 @@ public static class SqliteDatabase
 
         DROP TABLE file_tags;
         ALTER TABLE file_tags_v2 RENAME TO file_tags;
+        """,
+        """
+        CREATE TABLE files_v3 (
+            id INTEGER PRIMARY KEY,
+            root_id INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
+            volume_id TEXT NOT NULL,
+            file_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            normalized_path TEXT NOT NULL COLLATE NOCASE,
+            name TEXT NOT NULL,
+            extension TEXT NOT NULL,
+            size INTEGER NOT NULL CHECK (size >= 0),
+            modified_utc TEXT NOT NULL,
+            identity_kind TEXT NOT NULL DEFAULT 'path' CHECK (identity_kind IN ('stable', 'path')),
+            identity_diagnostic TEXT,
+            is_online INTEGER NOT NULL DEFAULT 1 CHECK (is_online IN (0, 1)),
+            scan_token TEXT NOT NULL DEFAULT '',
+            UNIQUE (volume_id, file_id)
+        );
+
+        INSERT INTO files_v3 (
+            id, root_id, volume_id, file_id, path, normalized_path,
+            name, extension, size, modified_utc, identity_kind)
+        SELECT
+            id, root_id, volume_id, file_id, path, normalized_path,
+            name, extension, size, modified_utc,
+            CASE WHEN volume_id = 'path-fallback' THEN 'path' ELSE 'stable' END
+        FROM files;
+
+        CREATE TABLE file_tags_v3 (
+            file_id INTEGER NOT NULL REFERENCES files_v3(id) ON DELETE CASCADE,
+            tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+            source TEXT NOT NULL DEFAULT 'user' CHECK (source IN ('user', 'automatic')),
+            PRIMARY KEY (file_id, tag_id, source)
+        );
+
+        INSERT INTO file_tags_v3 (file_id, tag_id, source)
+        SELECT file_id, tag_id, source FROM file_tags;
+
+        DROP TABLE file_tags;
+        DROP TABLE files;
+        ALTER TABLE files_v3 RENAME TO files;
+        ALTER TABLE file_tags_v3 RENAME TO file_tags;
+        CREATE UNIQUE INDEX files_online_path
+            ON files(normalized_path COLLATE NOCASE) WHERE is_online = 1;
         """
     ];
 
