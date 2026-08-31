@@ -37,6 +37,10 @@ public sealed class MainWindowSmokeTests
         CollectionAssert.IsSubsetOf(
             new[] { "RootsList", "AddRootButton", "RemoveRootButton", "ScanButton", "CancelButton", "ProgressText", "FailureList" },
             names.ToArray());
+        var source = File.ReadAllText(Path.ChangeExtension(path, ".xaml.cs"));
+        StringAssert.Contains(source, "FileChangeCoordinator");
+        StringAssert.Contains(source, "await Task.Run(() => _scanner.AddRoot(folder.Path))");
+        StringAssert.Contains(source, "await Task.Run(() => _scanner.RemoveRoot(root.Id))");
     }
 
     [TestMethod]
