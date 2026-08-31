@@ -4,13 +4,34 @@ using Microsoft.Data.Sqlite;
 namespace GuraFile.Storage;
 
 public sealed record UserTag(long Id, string Name);
+public sealed record AutomaticTag(long Id, string Name);
 
 public sealed class TagService
 {
-    public TagService(string databasePath)
+    private readonly Func<string, FileTypeClassification> _classify;
+    private readonly Func<string, FileIdentity> _readIdentity;
+
+    public TagService(string databasePath) :
+        this(databasePath, new FileTypeClassifier().Classify, FileIdentityReader.Read)
+    {
+    }
+
+    internal TagService(string databasePath, Func<string, FileTypeClassification> classify) :
+        this(databasePath, classify, FileIdentityReader.Read)
+    {
+    }
+
+    internal TagService(
+        string databasePath,
+        Func<string, FileTypeClassification> classify,
+        Func<string, FileIdentity> readIdentity)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+        ArgumentNullException.ThrowIfNull(classify);
+        ArgumentNullException.ThrowIfNull(readIdentity);
         DatabasePath = Path.GetFullPath(databasePath);
+        _classify = classify;
+        _readIdentity = readIdentity;
         using var _ = SqliteDatabase.Open(DatabasePath);
     }
 
@@ -53,6 +74,105 @@ public sealed class TagService
         }
 
         return tags;
+    }
+
+    public IReadOnlyList<AutomaticTag> ListAutomaticTags()
+    {
+        using var connection = SqliteDatabase.Open(DatabasePath);
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT t.id, t.name
+            FROM tags t
+            WHERE t.source = 'automatic'
+              AND EXISTS (SELECT 1 FROM file_tags ft WHERE ft.tag_id = t.id AND ft.source = 'automatic')
+            ORDER BY t.name COLLATE NOCASE, t.id;
+            """;
+        using var reader = command.ExecuteReader();
+        var tags = new List<AutomaticTag>();
+        while (reader.Read())
+        {
+            tags.Add(new(reader.GetInt64(0), reader.GetString(1)));
+        }
+
+        return tags;
+    }
+
+    public IReadOnlyList<AutomaticTag> ListAutomaticTagsForFile(long fileId)
+    {
+        using var connection = SqliteDatabase.Open(DatabasePath);
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT t.id, t.name
+            FROM tags t
+            JOIN file_tags ft ON ft.tag_id = t.id
+            WHERE ft.file_id = $fileId AND ft.source = 'automatic' AND t.source = 'automatic'
+            ORDER BY t.name COLLATE NOCASE, t.id;
+            """;
+        command.Parameters.AddWithValue("$fileId", fileId);
+        using var reader = command.ExecuteReader();
+        var tags = new List<AutomaticTag>();
+        while (reader.Read())
+        {
+            tags.Add(new(reader.GetInt64(0), reader.GetString(1)));
+        }
+
+        return tags;
+    }
+
+    public FileTypeClassification ReclassifyFile(long fileId)
+    {
+        using var connection = SqliteDatabase.Open(DatabasePath);
+        FileNode node;
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT path, volume_id, file_id, is_online FROM files WHERE id = $fileId;";
+            command.Parameters.AddWithValue("$fileId", fileId);
+            using var reader = command.ExecuteReader();
+            if (!reader.Read())
+            {
+                throw new ArgumentException($"文件节点 {fileId} 不存在。", nameof(fileId));
+            }
+
+            node = new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt64(3) != 0);
+        }
+
+        if (!node.IsOnline)
+        {
+            throw new InvalidOperationException("离线文件无法重新识别；请先扫描其根目录。");
+        }
+
+        if (!MatchesIdentity(node, _readIdentity(node.Path)))
+        {
+            throw new InvalidOperationException("文件身份已变化；请先重新扫描其根目录。");
+        }
+
+        var classification = _classify(node.Path);
+        using var transaction = connection.BeginTransaction();
+        using (var verify = connection.CreateCommand())
+        {
+            verify.Transaction = transaction;
+            verify.CommandText =
+                "SELECT EXISTS(SELECT 1 FROM files WHERE id = $fileId AND path = $path AND volume_id = $volumeId AND file_id = $identity AND is_online = 1);";
+            verify.Parameters.AddWithValue("$fileId", fileId);
+            verify.Parameters.AddWithValue("$path", node.Path);
+            verify.Parameters.AddWithValue("$volumeId", node.VolumeId);
+            verify.Parameters.AddWithValue("$identity", node.FileId);
+            if ((long)verify.ExecuteScalar()! == 0)
+            {
+                throw new InvalidOperationException("文件节点已变化；请重试。");
+            }
+        }
+
+        if (!MatchesIdentity(node, _readIdentity(node.Path)))
+        {
+            throw new InvalidOperationException("文件身份在识别期间发生变化；请先重新扫描其根目录。");
+        }
+
+        ReplaceAutomaticTags(connection, transaction, fileId, classification.AutomaticTags);
+        transaction.Commit();
+        return classification;
     }
 
     public UserTag CreateTag(string name)
@@ -186,6 +306,49 @@ public sealed class TagService
         }
     }
 
+    internal static void ReplaceAutomaticTags(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long fileId,
+        IReadOnlyList<string> tagNames)
+    {
+        using (var delete = connection.CreateCommand())
+        {
+            delete.Transaction = transaction;
+            delete.CommandText = "DELETE FROM file_tags WHERE file_id = $fileId AND source = 'automatic';";
+            delete.Parameters.AddWithValue("$fileId", fileId);
+            delete.ExecuteNonQuery();
+        }
+
+        foreach (var name in tagNames.Distinct(StringComparer.Ordinal))
+        {
+            var (displayName, normalizedName) = NormalizeName(name);
+            long tagId;
+            using (var tag = connection.CreateCommand())
+            {
+                tag.Transaction = transaction;
+                tag.CommandText =
+                    """
+                    INSERT INTO tags (name, normalized_name, source)
+                    VALUES ($name, $normalizedName, 'automatic')
+                    ON CONFLICT(normalized_name, source) DO UPDATE SET name = excluded.name
+                    RETURNING id;
+                    """;
+                tag.Parameters.AddWithValue("$name", displayName);
+                tag.Parameters.AddWithValue("$normalizedName", normalizedName);
+                tagId = (long)tag.ExecuteScalar()!;
+            }
+
+            using var relation = connection.CreateCommand();
+            relation.Transaction = transaction;
+            relation.CommandText =
+                "INSERT INTO file_tags (file_id, tag_id, source) VALUES ($fileId, $tagId, 'automatic');";
+            relation.Parameters.AddWithValue("$fileId", fileId);
+            relation.Parameters.AddWithValue("$tagId", tagId);
+            relation.ExecuteNonQuery();
+        }
+    }
+
     internal static (string DisplayName, string NormalizedName) NormalizeName(string name)
     {
         ArgumentNullException.ThrowIfNull(name);
@@ -203,4 +366,10 @@ public sealed class TagService
         var normalizedName = displayName.Normalize(NormalizationForm.FormKC).ToUpperInvariant();
         return (displayName, normalizedName);
     }
+
+    private static bool MatchesIdentity(FileNode node, FileIdentity identity) =>
+        string.Equals(identity.VolumeId, node.VolumeId, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(identity.FileId, node.FileId, StringComparison.OrdinalIgnoreCase);
+
+    private sealed record FileNode(string Path, string VolumeId, string FileId, bool IsOnline);
 }

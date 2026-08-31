@@ -22,6 +22,7 @@ public sealed partial class MainWindow : Window
     private bool _sortDescending;
     private bool _initialized;
     private bool _refreshingTags;
+    private bool _refreshingAutomaticTags;
     private bool _changingFileTags;
     private bool _transferringTags;
 
@@ -45,6 +46,7 @@ public sealed partial class MainWindow : Window
         };
         RefreshRoots();
         _ = RefreshTagsAsync();
+        _ = RefreshAutomaticTagsAsync();
         _ = RefreshFilesAsync();
     }
 
@@ -73,7 +75,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void RemoveRootButton_Click(object sender, RoutedEventArgs e)
+    private async void RemoveRootButton_Click(object sender, RoutedEventArgs e)
     {
         if (RootsList.SelectedItem is not ManagedRoot root)
         {
@@ -83,7 +85,8 @@ public sealed partial class MainWindow : Window
         _scanner.RemoveRoot(root.Id);
         RefreshRoots();
         ProgressText.Text = "根目录索引已移除；真实文件未更改";
-        _ = RefreshFilesAsync();
+        await RefreshAutomaticTagsAsync();
+        await RefreshFilesAsync();
     }
 
     private async void ScanButton_Click(object sender, RoutedEventArgs e)
@@ -118,6 +121,7 @@ public sealed partial class MainWindow : Window
         {
             _scanCancellation = null;
             SetScanning(false);
+            await RefreshAutomaticTagsAsync();
             await RefreshFilesAsync();
         }
     }
@@ -161,6 +165,7 @@ public sealed partial class MainWindow : Window
         var hasSingleFile = selected.Count == 1;
         OpenFileButton.IsEnabled = hasSingleFile;
         RevealFileButton.IsEnabled = hasSingleFile;
+        ReidentifyTypeButton.IsEnabled = hasSingleFile && selected[0].IsOnline;
         FileActionStatusText.Text = "";
         if (selected.Count != 1)
         {
@@ -171,14 +176,16 @@ public sealed partial class MainWindow : Window
         var file = selected[0];
         var cancellation = new CancellationTokenSource();
         _detailCancellation = cancellation;
-        DetailsText.Text = Describe(file, []);
+        DetailsText.Text = Describe(file, [], []);
         try
         {
-            var tags = await Task.Run(() => _tags.ListTagsForFile(file.Id), cancellation.Token);
+            var tags = await Task.Run(
+                () => (_tags.ListTagsForFile(file.Id), _tags.ListAutomaticTagsForFile(file.Id)),
+                cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
             if (ReferenceEquals(_detailCancellation, cancellation))
             {
-                DetailsText.Text = Describe(file, tags);
+                DetailsText.Text = Describe(file, tags.Item1, tags.Item2);
             }
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
@@ -188,7 +195,7 @@ public sealed partial class MainWindow : Window
         {
             if (ReferenceEquals(_detailCancellation, cancellation))
             {
-                DetailsText.Text = $"{Describe(file, [])}\n标签读取失败：{exception.Message}";
+                DetailsText.Text = $"{Describe(file, [], [])}\n标签读取失败：{exception.Message}";
             }
         }
         finally
@@ -267,6 +274,19 @@ public sealed partial class MainWindow : Window
         if (selected.Count == 1)
         {
             TagNameBox.Text = selected[0].Name;
+        }
+
+        if (TagFilterToggle.IsOn)
+        {
+            await RefreshFilesAsync();
+        }
+    }
+
+    private async void AutomaticTagsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_refreshingAutomaticTags || !_initialized)
+        {
+            return;
         }
 
         if (TagFilterToggle.IsOn)
@@ -374,6 +394,36 @@ public sealed partial class MainWindow : Window
 
     private async void RemoveTagButton_Click(object sender, RoutedEventArgs e) =>
         await ChangeSelectedFileTagsAsync(add: false);
+
+    private async void ReidentifyTypeButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (FilesList.SelectedItems.OfType<IndexedFile>().ToList() is not [var file])
+        {
+            FileActionStatusText.Text = "请选择一个要重新识别的文件。";
+            return;
+        }
+
+        ReidentifyTypeButton.IsEnabled = false;
+        try
+        {
+            var classification = await Task.Run(() => _tags.ReclassifyFile(file.Id));
+            await RefreshAutomaticTagsAsync();
+            await RefreshFilesAsync();
+            var diagnostic = string.IsNullOrWhiteSpace(classification.Diagnostic)
+                ? ""
+                : $"；{classification.Diagnostic}";
+            FileActionStatusText.Text =
+                $"类型已重新识别：{string.Join("、", classification.AutomaticTags)}{diagnostic}";
+        }
+        catch (Exception exception)
+        {
+            FileActionStatusText.Text = $"类型识别失败：{exception.Message}";
+        }
+        finally
+        {
+            ReidentifyTypeButton.IsEnabled = FilesList.SelectedItems.OfType<IndexedFile>().ToList() is [var selected] && selected.IsOnline;
+        }
+    }
 
     private async void ExportTagsButton_Click(object sender, RoutedEventArgs e)
     {
@@ -541,6 +591,38 @@ public sealed partial class MainWindow : Window
     private IReadOnlyList<UserTag> SelectedTags() =>
         TagsList.SelectedItems.OfType<UserTag>().ToList();
 
+    private async Task RefreshAutomaticTagsAsync()
+    {
+        _refreshingAutomaticTags = true;
+        try
+        {
+            var selectedIds = AutomaticTagsList.SelectedItems
+                .OfType<AutomaticTag>()
+                .Select(tag => tag.Id)
+                .ToHashSet();
+            var tags = await Task.Run(_tags.ListAutomaticTags);
+            AutomaticTagsList.ItemsSource = tags;
+            AutomaticTagsList.SelectedItems.Clear();
+            foreach (var tag in tags.Where(tag => selectedIds.Contains(tag.Id)))
+            {
+                AutomaticTagsList.SelectedItems.Add(tag);
+            }
+        }
+        catch (Exception exception)
+        {
+            TagStatusText.Text = $"自动标签加载失败：{exception.Message}";
+        }
+        finally
+        {
+            _refreshingAutomaticTags = false;
+        }
+    }
+
+    private long[] SelectedFilterTagIds() =>
+        SelectedTags().Select(tag => tag.Id)
+            .Concat(AutomaticTagsList.SelectedItems.OfType<AutomaticTag>().Select(tag => tag.Id))
+            .ToArray();
+
     private async Task RefreshFilesAsync(bool debounce = false)
     {
         var cancellation = new CancellationTokenSource();
@@ -564,7 +646,7 @@ public sealed partial class MainWindow : Window
             FilesLoadingRing.Visibility = Visibility.Visible;
             FilesStateText.Text = "正在加载文件…";
             var tagIds = TagFilterToggle.IsOn
-                ? SelectedTags().Select(tag => tag.Id).ToArray()
+                ? SelectedFilterTagIds()
                 : null;
             var files = await _fileQuery.QueryAsync(
                 new(
@@ -633,11 +715,17 @@ public sealed partial class MainWindow : Window
     private string SortLabel(string label, FileSortColumn column) =>
         _sortColumn == column ? $"{label} {(_sortDescending ? '▼' : '▲')}" : label;
 
-    private static string Describe(IndexedFile file, IReadOnlyList<UserTag> tags)
+    private static string Describe(
+        IndexedFile file,
+        IReadOnlyList<UserTag> userTags,
+        IReadOnlyList<AutomaticTag> automaticTags)
     {
         var status = file.IsOnline ? "在线" : "离线";
-        var tagNames = tags.Count == 0 ? "无" : string.Join("、", tags.Select(tag => tag.Name));
+        var userTagNames = userTags.Count == 0 ? "无" : string.Join("、", userTags.Select(tag => tag.Name));
+        var automaticTagNames = automaticTags.Count == 0
+            ? "无"
+            : string.Join("、", automaticTags.Select(tag => tag.Name));
         var diagnostic = string.IsNullOrWhiteSpace(file.Diagnostic) ? "" : $"\n诊断：{file.Diagnostic}";
-        return $"{file.Name}\n{file.Path}\n扩展名：{file.Extension}\n大小：{file.Size:N0} 字节\n修改时间：{file.Modified.LocalDateTime:g}\n状态：{status}\n标签：{tagNames}{diagnostic}";
+        return $"{file.Name}\n{file.Path}\n扩展名：{file.Extension}\n大小：{file.Size:N0} 字节\n修改时间：{file.Modified.LocalDateTime:g}\n状态：{status}\n用户标签：{userTagNames}\n自动标签：{automaticTagNames}{diagnostic}";
     }
 }

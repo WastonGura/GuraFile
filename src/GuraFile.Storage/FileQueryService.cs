@@ -113,9 +113,9 @@ public sealed class FileQueryService
                 filters.Add(query.TagMatch switch
                 {
                     TagMatchMode.Any =>
-                        $"EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = f.id AND ft.source = 'user' AND ft.tag_id IN ({tagList}))",
+                        $"EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = f.id AND ft.tag_id IN ({tagList}))",
                     TagMatchMode.All =>
-                        $"(SELECT COUNT(DISTINCT ft.tag_id) FROM file_tags ft WHERE ft.file_id = f.id AND ft.source = 'user' AND ft.tag_id IN ({tagList})) = $tagCount",
+                        $"(SELECT COUNT(DISTINCT ft.tag_id) FROM file_tags ft WHERE ft.file_id = f.id AND ft.tag_id IN ({tagList})) = $tagCount",
                     _ => throw new ArgumentOutOfRangeException(nameof(query), query.TagMatch, "Unsupported tag match mode.")
                 });
                 if (query.TagMatch == TagMatchMode.All)

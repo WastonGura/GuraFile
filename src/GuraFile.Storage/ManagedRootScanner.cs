@@ -23,9 +23,15 @@ public sealed class ManagedRootScanner
     private readonly Func<string, FileIdentity> _readIdentity;
     private readonly Func<string, string[]> _getFileSystemEntries;
     private readonly Func<string, FileAttributes> _getAttributes;
+    private readonly Func<string, FileTypeClassification> _classify;
 
     public ManagedRootScanner(string databasePath) :
-        this(databasePath, FileIdentityReader.Read, Directory.GetFileSystemEntries, File.GetAttributes)
+        this(
+            databasePath,
+            FileIdentityReader.Read,
+            Directory.GetFileSystemEntries,
+            File.GetAttributes,
+            new FileTypeClassifier().Classify)
     {
     }
 
@@ -47,15 +53,27 @@ public sealed class ManagedRootScanner
         Func<string, FileIdentity> readIdentity,
         Func<string, string[]> getFileSystemEntries,
         Func<string, FileAttributes> getAttributes)
+        : this(databasePath, readIdentity, getFileSystemEntries, getAttributes, new FileTypeClassifier().Classify)
+    {
+    }
+
+    internal ManagedRootScanner(
+        string databasePath,
+        Func<string, FileIdentity> readIdentity,
+        Func<string, string[]> getFileSystemEntries,
+        Func<string, FileAttributes> getAttributes,
+        Func<string, FileTypeClassification> classify)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(readIdentity);
         ArgumentNullException.ThrowIfNull(getFileSystemEntries);
         ArgumentNullException.ThrowIfNull(getAttributes);
+        ArgumentNullException.ThrowIfNull(classify);
         DatabasePath = Path.GetFullPath(databasePath);
         _readIdentity = readIdentity;
         _getFileSystemEntries = getFileSystemEntries;
         _getAttributes = getAttributes;
+        _classify = classify;
         Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);
         using var _ = SqliteDatabase.Open(DatabasePath);
     }
@@ -150,6 +168,7 @@ public sealed class ManagedRootScanner
         var updated = 0;
         var missing = 0;
         var fallback = 0;
+        var coverageComplete = true;
 
         if (cancellationToken.IsCancellationRequested)
         {
@@ -205,6 +224,7 @@ public sealed class ManagedRootScanner
             }
             catch (Exception exception) when (IsFileSystemError(exception))
             {
+                coverageComplete = false;
                 failures.Add(new(directory, exception.Message));
                 progress?.Invoke(new(discovered, committed, failures.Count));
                 continue;
@@ -250,6 +270,7 @@ public sealed class ManagedRootScanner
                 }
                 catch (Exception exception) when (IsFileSystemError(exception))
                 {
+                    coverageComplete = false;
                     failures.Add(new(entry, exception.Message));
                     progress?.Invoke(new(discovered, committed, failures.Count));
                     continue;
@@ -257,7 +278,7 @@ public sealed class ManagedRootScanner
 
                 if (pending.Count == batchSize)
                 {
-                    var written = WriteBatch(connection, root.Id, scanToken, pending);
+                    var written = WriteBatch(connection, root.Id, scanToken, pending, failures);
                     added += written.Added;
                     updated += written.Updated;
                     missing += written.Missing;
@@ -275,7 +296,7 @@ public sealed class ManagedRootScanner
 
         if (pending.Count > 0)
         {
-            var written = WriteBatch(connection, root.Id, scanToken, pending);
+            var written = WriteBatch(connection, root.Id, scanToken, pending, failures);
             added += written.Added;
             updated += written.Updated;
             missing += written.Missing;
@@ -283,7 +304,7 @@ public sealed class ManagedRootScanner
             progress?.Invoke(new(discovered, committed, failures.Count));
         }
 
-        if (failures.Count == 0)
+        if (coverageComplete)
         {
             missing += MarkMissing(connection, root.Id, scanToken);
         }
@@ -307,30 +328,49 @@ public sealed class ManagedRootScanner
         return new(reader.GetInt64(0), reader.GetString(1));
     }
 
-    private static (int Added, int Updated, int Missing) WriteBatch(
+    private (int Added, int Updated, int Missing) WriteBatch(
         SqliteConnection connection,
         long rootId,
         string scanToken,
-        IReadOnlyList<FileRecord> files)
+        IReadOnlyList<FileRecord> files,
+        ICollection<ScanFailure> failures)
     {
+        var prepared = new List<PreparedFile>(files.Count);
+        foreach (var file in files)
+        {
+            var existing = ReadExistingFile(connection, file.Identity);
+            FileTypeClassification? classification = null;
+            if (existing is null ||
+                !string.Equals(existing.Extension, file.Extension, StringComparison.OrdinalIgnoreCase) ||
+                existing.Size != file.Size ||
+                !string.Equals(existing.ModifiedUtc, file.ModifiedUtc, StringComparison.Ordinal))
+            {
+                try
+                {
+                    classification = _classify(file.Path);
+                    if (!classification.HasConflict && !string.IsNullOrWhiteSpace(classification.Diagnostic))
+                    {
+                        failures.Add(new(file.Path, classification.Diagnostic));
+                    }
+                }
+                catch (Exception exception) when (IsClassificationError(exception))
+                {
+                    failures.Add(new(file.Path, $"类型识别失败：{exception.Message}"));
+                }
+            }
+
+            prepared.Add(new(file, existing is not null, classification));
+        }
+
         using var transaction = connection.BeginTransaction();
         var added = 0;
         var updated = 0;
         var missing = 0;
-        foreach (var file in files)
+        foreach (var preparedFile in prepared)
         {
-            var identityExists = false;
-            using (var exists = connection.CreateCommand())
-            {
-                exists.Transaction = transaction;
-                exists.CommandText =
-                    "SELECT EXISTS(SELECT 1 FROM files WHERE volume_id = $volumeId AND file_id = $fileId);";
-                exists.Parameters.AddWithValue("$volumeId", file.Identity.VolumeId);
-                exists.Parameters.AddWithValue("$fileId", file.Identity.FileId);
-                identityExists = (long)exists.ExecuteScalar()! == 1;
-            }
+            var file = preparedFile.File;
 
-            if (identityExists)
+            if (preparedFile.IdentityExists)
             {
                 updated++;
             }
@@ -372,7 +412,8 @@ public sealed class ManagedRootScanner
                     identity_kind = excluded.identity_kind,
                     identity_diagnostic = excluded.identity_diagnostic,
                     is_online = 1,
-                    scan_token = excluded.scan_token;
+                    scan_token = excluded.scan_token
+                RETURNING id;
                 """;
             command.Parameters.AddWithValue("$rootId", rootId);
             command.Parameters.AddWithValue("$volumeId", file.Identity.VolumeId);
@@ -386,11 +427,36 @@ public sealed class ManagedRootScanner
             command.Parameters.AddWithValue("$identityKind", file.Identity.IsStable ? "stable" : "path");
             command.Parameters.AddWithValue("$identityDiagnostic", (object?)file.Identity.Diagnostic ?? DBNull.Value);
             command.Parameters.AddWithValue("$scanToken", scanToken);
-            command.ExecuteNonQuery();
+            var persistedFileId = (long)command.ExecuteScalar()!;
+            if (preparedFile.Classification is not null)
+            {
+                TagService.ReplaceAutomaticTags(
+                    connection,
+                    transaction,
+                    persistedFileId,
+                    preparedFile.Classification.AutomaticTags);
+            }
         }
 
         transaction.Commit();
         return (added, updated, missing);
+    }
+
+    private static ExistingFile? ReadExistingFile(SqliteConnection connection, FileIdentity identity)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT extension, size, modified_utc
+            FROM files
+            WHERE volume_id = $volumeId AND file_id = $fileId;
+            """;
+        command.Parameters.AddWithValue("$volumeId", identity.VolumeId);
+        command.Parameters.AddWithValue("$fileId", identity.FileId);
+        using var reader = command.ExecuteReader();
+        return reader.Read()
+            ? new(reader.GetString(0), reader.GetInt64(1), reader.GetString(2))
+            : null;
     }
 
     private static int MarkMissing(SqliteConnection connection, long rootId, string scanToken)
@@ -420,5 +486,11 @@ public sealed class ManagedRootScanner
     private static bool IsFileSystemError(Exception exception) =>
         exception is IOException or UnauthorizedAccessException or System.Security.SecurityException;
 
+    private static bool IsClassificationError(Exception exception) => exception is
+        IOException or UnauthorizedAccessException or System.Security.SecurityException or
+        InvalidDataException or NotSupportedException or ArgumentException;
+
     private sealed record FileRecord(FileIdentity Identity, string Path, string Name, string Extension, long Size, string ModifiedUtc);
+    private sealed record ExistingFile(string Extension, long Size, string ModifiedUtc);
+    private sealed record PreparedFile(FileRecord File, bool IdentityExists, FileTypeClassification? Classification);
 }
