@@ -40,6 +40,30 @@ public sealed class MainWindowSmokeTests
     }
 
     [TestMethod]
+    public void FileListUsesBoundedNativeVirtualizationAndExtendedSelection()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "GuraFile", "MainWindow.xaml"));
+        var document = XDocument.Load(path);
+        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var filesList = document.Descendants()
+            .Single(element => element.Attribute(x + "Name")?.Value == "FilesList");
+
+        Assert.AreEqual("Extended", filesList.Attribute("SelectionMode")?.Value);
+        Assert.IsTrue(filesList.Descendants().Any(element => element.Name.LocalName == "ItemsStackPanel"));
+        Assert.IsFalse(document.Descendants().Any(element => element.Name.LocalName == "ScrollViewer"));
+        Assert.AreEqual("3", filesList.Attribute("Grid.Row")?.Value);
+
+        var names = document.Descendants()
+            .Select(element => element.Attribute(x + "Name")?.Value)
+            .Where(name => name is not null)
+            .ToHashSet();
+        CollectionAssert.IsSubsetOf(
+            new[] { "SearchBox", "FilesStateText", "DetailsText", "SortNameButton", "SortPathButton", "SortExtensionButton", "SortSizeButton", "SortModifiedButton" },
+            names.ToArray());
+    }
+
+    [TestMethod]
     public void AddRootHandlerReportsFailuresAtTheUiBoundary()
     {
         var path = Path.GetFullPath(
