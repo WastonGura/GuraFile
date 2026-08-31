@@ -26,6 +26,10 @@ GuraFile 是一个 Windows 优先的标签式文件管理器。它保留真实�
 
 应用当前仅支持 x64，使用 Windows App SDK 2.4.0，并以 unpackaged、自包含方式运行；不需要全局安装 WinUI 项目模板或 Windows App Runtime。
 
+### 本地索引数据
+
+SQLite schema 使用 `PRAGMA user_version` 向前迁移，并在每次连接时启用 WAL 与外键。`roots`、`files` 和 `file_tags.source = 'automatic'` 是可由磁盘重建的索引数据；`file_tags.source = 'user'` 是不可替代的用户数据，索引重建不得删除。运行时值必须使用参数化命令写入，关联写入必须放在事务中。
+
 ### 还原、构建与测试
 
 在干净 clone 的仓库根目录使用 PowerShell 7：
