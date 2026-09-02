@@ -221,6 +221,20 @@ public sealed class ManagedRootScanner
             cancellationToken);
     }
 
+    internal Task<T> ExecuteWriteAsync<T>(Func<T> action, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            _writeGate.Wait(cancellationToken);
+            try
+            {
+                return action();
+            }
+            finally
+            {
+                _writeGate.Release();
+            }
+        }, cancellationToken);
+
     private Task<ScanResult> RunSerialized(Func<ScanResult> action, CancellationToken cancellationToken) =>
         Task.Run(() =>
         {
