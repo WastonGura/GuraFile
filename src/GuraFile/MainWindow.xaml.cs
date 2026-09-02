@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using GuraFile.Storage;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -16,9 +17,12 @@ public sealed partial class MainWindow : Window
     private readonly TagService _tags;
     private readonly UserTagBackupService _tagBackup;
     private readonly ShellFileActions _shell = new();
+    private readonly IFileClipboardService _clipboard;
+    private readonly FileListOperationService _fileOperations;
     private CancellationTokenSource? _scanCancellation;
     private CancellationTokenSource? _fileQueryCancellation;
     private CancellationTokenSource? _detailCancellation;
+    private CancellationTokenSource? _fileOpCancellation;
     private FileSortColumn _sortColumn = FileSortColumn.Name;
     private bool _sortDescending;
     private bool _initialized;
@@ -26,10 +30,13 @@ public sealed partial class MainWindow : Window
     private bool _refreshingAutomaticTags;
     private bool _changingFileTags;
     private bool _transferringTags;
+    private bool _isScanning;
+    private bool _isOperating;
 
     public MainWindow()
     {
         InitializeComponent();
+        Title = "GuraFile";
         var databasePath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "GuraFile",
@@ -43,12 +50,15 @@ public sealed partial class MainWindow : Window
         _fileQuery = new(databasePath);
         _tags = new(databasePath);
         _tagBackup = new(databasePath);
+        _clipboard = new FileClipboardService();
+        _fileOperations = new FileListOperationService(new FileOperationIndexCommitter(_scanner), _scanner, _clipboard);
         _initialized = true;
         Closed += async (_, _) =>
         {
             _scanCancellation?.Cancel();
             _fileQueryCancellation?.Cancel();
             _detailCancellation?.Cancel();
+            _fileOpCancellation?.Cancel();
             await _fileChanges.DisposeAsync();
         };
         RefreshRoots();
@@ -59,6 +69,7 @@ public sealed partial class MainWindow : Window
         _ = RefreshTagsAsync();
         _ = RefreshAutomaticTagsAsync();
         _ = RefreshFilesAsync();
+        UpdateFileButtonsState();
     }
 
     private async void AddRootButton_Click(object sender, RoutedEventArgs e)
@@ -117,7 +128,7 @@ public sealed partial class MainWindow : Window
 
     private async void ScanButton_Click(object sender, RoutedEventArgs e)
     {
-        if (RootsList.SelectedItem is not ManagedRoot root || _scanCancellation is not null)
+        if (RootsList.SelectedItem is not ManagedRoot root || _scanCancellation is not null || _isOperating)
         {
             return;
         }
@@ -206,10 +217,7 @@ public sealed partial class MainWindow : Window
     {
         _detailCancellation?.Cancel();
         var selected = FilesList.SelectedItems.OfType<IndexedFile>().ToList();
-        var hasSingleFile = selected.Count == 1;
-        OpenFileButton.IsEnabled = hasSingleFile;
-        RevealFileButton.IsEnabled = hasSingleFile;
-        ReidentifyTypeButton.IsEnabled = hasSingleFile && selected[0].IsOnline;
+        UpdateFileButtonsState();
         FileActionStatusText.Text = "";
         if (selected.Count != 1)
         {
@@ -305,6 +313,318 @@ public sealed partial class MainWindow : Window
         }
 
         return null;
+    }
+
+    private void CopyFileButton_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = FilesList.SelectedItems.OfType<IndexedFile>().ToList();
+        if (selected.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            _fileOperations.CopyToClipboard(selected.Select(f => f.Path).ToList());
+            FileActionStatusText.Text = $"已复制 {selected.Count} 个文件到剪贴板。";
+            PasteToFileButton.IsEnabled = true;
+        }
+        catch (Exception exception)
+        {
+            FileActionStatusText.Text = $"复制失败：{exception.Message}";
+        }
+    }
+
+    private void CutFileButton_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = FilesList.SelectedItems.OfType<IndexedFile>().ToList();
+        if (selected.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            _fileOperations.CutToClipboard(selected.Select(f => f.Path).ToList());
+            FileActionStatusText.Text = $"已剪切 {selected.Count} 个文件到剪贴板。";
+            PasteToFileButton.IsEnabled = true;
+        }
+        catch (Exception exception)
+        {
+            FileActionStatusText.Text = $"剪切失败：{exception.Message}";
+        }
+    }
+
+    private async void PasteToFileButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isOperating)
+        {
+            return;
+        }
+
+        var content = _fileOperations.GetClipboardContent();
+        if (content is null || content.Files.Count == 0)
+        {
+            FileActionStatusText.Text = "剪贴板中没有文件。";
+            PasteToFileButton.IsEnabled = false;
+            return;
+        }
+
+        var picker = new FolderPicker();
+        picker.FileTypeFilter.Add("*");
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        var folder = await picker.PickSingleFolderAsync();
+        if (folder is null)
+        {
+            return;
+        }
+
+        var policy = GetSelectedCollisionPolicy();
+        var isMove = content.Effect == FileClipboardEffect.Move;
+        var opName = isMove ? "粘贴（移动）" : "粘贴（复制）";
+
+        await ExecuteFileOperationBatchAsync(opName, async (progress, cancellationToken) =>
+        {
+            return await _fileOperations.PasteFromClipboardAsync(
+                folder.Path,
+                policy,
+                WindowNative.GetWindowHandle(this),
+                progress,
+                cancellationToken);
+        });
+    }
+
+    private async void MoveToFileButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isOperating)
+        {
+            return;
+        }
+
+        var selected = FilesList.SelectedItems.OfType<IndexedFile>().ToList();
+        if (selected.Count == 0)
+        {
+            return;
+        }
+
+        var picker = new FolderPicker();
+        picker.FileTypeFilter.Add("*");
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        var folder = await picker.PickSingleFolderAsync();
+        if (folder is null)
+        {
+            return;
+        }
+
+        var policy = GetSelectedCollisionPolicy();
+        var sourcePaths = selected.Select(f => f.Path).ToList();
+
+        await ExecuteFileOperationBatchAsync("移动", async (progress, cancellationToken) =>
+        {
+            return await _fileOperations.MoveToAsync(
+                sourcePaths,
+                folder.Path,
+                policy,
+                WindowNative.GetWindowHandle(this),
+                progress,
+                cancellationToken);
+        });
+    }
+
+    private async void RenameFileButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isOperating)
+        {
+            return;
+        }
+
+        var selected = FilesList.SelectedItems.OfType<IndexedFile>().ToList();
+        if (selected.Count != 1)
+        {
+            FileActionStatusText.Text = "请选择一个要重命名的文件。";
+            return;
+        }
+
+        var file = selected[0];
+        if (!file.IsOnline)
+        {
+            FileActionStatusText.Text = "无法重命名离线文件。";
+            return;
+        }
+
+        var currentFileName = Path.GetFileName(file.Path);
+        var textBox = new TextBox
+        {
+            Text = currentFileName,
+            SelectionStart = 0,
+            SelectionLength = Path.GetFileNameWithoutExtension(currentFileName).Length
+        };
+
+        var dialog = new ContentDialog
+        {
+            Title = "重命名文件",
+            Content = textBox,
+            PrimaryButtonText = "确定",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = (Content as FrameworkElement)?.XamlRoot
+        };
+
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        var newName = textBox.Text;
+        try
+        {
+            FileListOperationService.ValidateNewFileName(newName);
+        }
+        catch (Exception ex)
+        {
+            FileActionStatusText.Text = ex.Message;
+            FailureList.ItemsSource = new[] { $"{file.Path}: {ex.Message}" };
+            return;
+        }
+
+        var policy = GetSelectedCollisionPolicy();
+
+        await ExecuteFileOperationItemAsync("重命名", async cancellationToken =>
+        {
+            return await _fileOperations.RenameAsync(
+                file.Path,
+                newName,
+                policy,
+                WindowNative.GetWindowHandle(this),
+                cancellationToken);
+        });
+    }
+
+    private void CancelFileOperationButton_Click(object sender, RoutedEventArgs e) =>
+        _fileOpCancellation?.Cancel();
+
+    private async Task ExecuteFileOperationBatchAsync(
+        string operationName,
+        Func<Action<FileOperationProgress>, CancellationToken, Task<FileOperationCommitBatchResult>> action)
+    {
+        using var cancellation = new CancellationTokenSource();
+        _fileOpCancellation = cancellation;
+        SetOperating(true);
+        FailureList.ItemsSource = null;
+        FileActionStatusText.Text = $"正在执行{operationName}…";
+
+        try
+        {
+            var result = await action(
+                progress => DispatcherQueue.TryEnqueue(() =>
+                {
+                    FileActionStatusText.Text = $"正在执行{operationName}… ({progress.CompletedItems}/{progress.TotalItems}) {Path.GetFileName(progress.CurrentSourcePath)}";
+                }),
+                cancellation.Token);
+
+            var summary = FileListOperationService.FormatBatchSummary(result, operationName);
+            FileActionStatusText.Text = summary;
+
+            var failures = result.Items
+                .Where(i => i.Status == FileOperationItemStatus.Failed)
+                .Select(i => $"{i.SourcePath}: {i.Error}")
+                .ToList();
+
+            if (failures.Count > 0)
+            {
+                FailureList.ItemsSource = failures;
+            }
+        }
+        catch (Exception exception)
+        {
+            FileActionStatusText.Text = $"{operationName}失败：{exception.Message}";
+            FailureList.ItemsSource = new[] { exception.Message };
+        }
+        finally
+        {
+            _fileOpCancellation = null;
+            SetOperating(false);
+            RefreshRoots();
+            await RefreshTagsAsync();
+            await RefreshAutomaticTagsAsync();
+            await RefreshFilesAsync();
+            UpdateFileButtonsState();
+        }
+    }
+
+    private async Task ExecuteFileOperationItemAsync(
+        string operationName,
+        Func<CancellationToken, Task<FileOperationCommitItemResult>> action)
+    {
+        using var cancellation = new CancellationTokenSource();
+        _fileOpCancellation = cancellation;
+        SetOperating(true);
+        FailureList.ItemsSource = null;
+        FileActionStatusText.Text = $"正在执行{operationName}…";
+
+        try
+        {
+            var result = await action(cancellation.Token);
+
+            if (result.Succeeded)
+            {
+                FileActionStatusText.Text = $"{operationName}成功：{Path.GetFileName(result.ActualTargetPath)}";
+            }
+            else if (result.IsCanceled)
+            {
+                FileActionStatusText.Text = $"{operationName}已取消。";
+            }
+            else
+            {
+                FileActionStatusText.Text = $"{operationName}失败：{result.Error}";
+                FailureList.ItemsSource = new[] { $"{result.SourcePath}: {result.Error}" };
+            }
+        }
+        catch (Exception exception)
+        {
+            FileActionStatusText.Text = $"{operationName}失败：{exception.Message}";
+            FailureList.ItemsSource = new[] { exception.Message };
+        }
+        finally
+        {
+            _fileOpCancellation = null;
+            SetOperating(false);
+            RefreshRoots();
+            await RefreshTagsAsync();
+            await RefreshAutomaticTagsAsync();
+            await RefreshFilesAsync();
+            UpdateFileButtonsState();
+        }
+    }
+
+    private FileCollisionPolicy GetSelectedCollisionPolicy() =>
+        CollisionPolicyBox?.SelectedIndex switch
+        {
+            1 => FileCollisionPolicy.Skip,
+            2 => FileCollisionPolicy.Overwrite,
+            _ => FileCollisionPolicy.AutoRename
+        };
+
+    private void SetOperating(bool operating)
+    {
+        _isOperating = operating;
+        FileOperationProgressRing.IsActive = operating;
+        FileOperationProgressRing.Visibility = operating ? Visibility.Visible : Visibility.Collapsed;
+        CancelFileOperationButton.Visibility = operating ? Visibility.Visible : Visibility.Collapsed;
+        CancelFileOperationButton.IsEnabled = operating;
+
+        AddRootButton.IsEnabled = !operating && !_isScanning;
+        RemoveRootButton.IsEnabled = !operating && !_isScanning;
+        ScanButton.IsEnabled = !operating && !_isScanning;
+        ApplyTagButton.IsEnabled = !operating;
+        RemoveTagButton.IsEnabled = !operating;
+        CreateTagButton.IsEnabled = !operating;
+        RenameTagButton.IsEnabled = !operating;
+        DeleteTagButton.IsEnabled = !operating;
+        ExportTagsButton.IsEnabled = !operating && !_transferringTags;
+        ImportTagsButton.IsEnabled = !operating && !_transferringTags;
+
+        UpdateFileButtonsState();
     }
 
     private async void TagsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -550,8 +870,8 @@ public sealed partial class MainWindow : Window
     private void SetTagTransfer(bool transferring)
     {
         _transferringTags = transferring;
-        ExportTagsButton.IsEnabled = !transferring;
-        ImportTagsButton.IsEnabled = !transferring;
+        ExportTagsButton.IsEnabled = !transferring && !_isOperating;
+        ImportTagsButton.IsEnabled = !transferring && !_isOperating;
     }
 
     private async Task ChangeSelectedFileTagsAsync(bool add)
@@ -741,12 +1061,27 @@ public sealed partial class MainWindow : Window
 
     private void SetScanning(bool scanning)
     {
+        _isScanning = scanning;
         ScanProgressRing.IsActive = scanning;
         ScanProgressRing.Visibility = scanning ? Visibility.Visible : Visibility.Collapsed;
         CancelButton.IsEnabled = scanning;
-        AddRootButton.IsEnabled = !scanning;
-        RemoveRootButton.IsEnabled = !scanning;
-        ScanButton.IsEnabled = !scanning;
+        AddRootButton.IsEnabled = !scanning && !_isOperating;
+        RemoveRootButton.IsEnabled = !scanning && !_isOperating;
+        ScanButton.IsEnabled = !scanning && !_isOperating;
+    }
+
+    private void UpdateFileButtonsState()
+    {
+        var selected = FilesList.SelectedItems.OfType<IndexedFile>().ToList();
+        var hasSingleFile = selected.Count == 1;
+        OpenFileButton.IsEnabled = hasSingleFile && !_isOperating;
+        RevealFileButton.IsEnabled = hasSingleFile && !_isOperating;
+        ReidentifyTypeButton.IsEnabled = hasSingleFile && selected[0].IsOnline && !_isOperating;
+        CopyFileButton.IsEnabled = selected.Count > 0 && !_isOperating;
+        CutFileButton.IsEnabled = selected.Count > 0 && !_isOperating;
+        PasteToFileButton.IsEnabled = _fileOperations.CanPasteFromClipboard() && !_isOperating;
+        MoveToFileButton.IsEnabled = selected.Count > 0 && !_isOperating;
+        RenameFileButton.IsEnabled = hasSingleFile && selected[0].IsOnline && !_isOperating;
     }
 
     private void UpdateSortLabels()

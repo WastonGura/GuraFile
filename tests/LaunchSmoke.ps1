@@ -16,15 +16,48 @@ $ErrorActionPreference = 'Stop'
 if (-not ('GuraFile.Tests.NativeMethods' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 
 namespace GuraFile.Tests
 {
     public static class NativeMethods
     {
+        public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        public static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern int GetWindowTextW(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool IsWindowVisible(IntPtr windowHandle);
+
+        public static IntPtr FindWindowByTitle(int processId, string expectedTitle)
+        {
+            IntPtr found = IntPtr.Zero;
+            EnumWindows((hWnd, lParam) =>
+            {
+                GetWindowThreadProcessId(hWnd, out uint pid);
+                if (pid == (uint)processId)
+                {
+                    var sb = new StringBuilder(256);
+                    GetWindowTextW(hWnd, sb, 256);
+                    if (string.Equals(sb.ToString(), expectedTitle, StringComparison.Ordinal))
+                    {
+                        found = hWnd;
+                        return false;
+                    }
+                }
+                return true;
+            }, IntPtr.Zero);
+            return found;
+        }
     }
 }
 '@
@@ -56,14 +89,25 @@ try {
         }
 
         $handle = $process.MainWindowHandle
+        $title = $process.MainWindowTitle
         $visible = $handle -ne [IntPtr]::Zero -and [GuraFile.Tests.NativeMethods]::IsWindowVisible($handle)
-        if ($handle -ne [IntPtr]::Zero -and $process.MainWindowTitle -eq 'GuraFile' -and $process.Responding -and $visible) {
+
+        if (-not ($handle -ne [IntPtr]::Zero -and $title -eq 'GuraFile' -and $visible)) {
+            $titledHandle = [GuraFile.Tests.NativeMethods]::FindWindowByTitle($process.Id, 'GuraFile')
+            if ($titledHandle -ne [IntPtr]::Zero) {
+                $handle = $titledHandle
+                $title = 'GuraFile'
+                $visible = [GuraFile.Tests.NativeMethods]::IsWindowVisible($handle)
+            }
+        }
+
+        if ($handle -ne [IntPtr]::Zero -and $title -eq 'GuraFile' -and $process.Responding -and $visible) {
             Write-Host "Launch smoke passed: GuraFile window is visible and responding."
             return
         }
     } while ([DateTime]::UtcNow -lt $deadline)
 
-    throw "Timed out after $TimeoutSeconds seconds waiting for a visible, responding window titled 'GuraFile'. Handle: $handle. Last title: '$($process.MainWindowTitle)'. Responding: $($process.Responding). Visible: $visible."
+    throw "Timed out after $TimeoutSeconds seconds waiting for a visible, responding window titled 'GuraFile'. Handle: $handle. Last title: '$title'. Responding: $($process.Responding). Visible: $visible."
 }
 finally {
     if ($null -ne $process) {

@@ -126,6 +126,40 @@ public sealed class MainWindowSmokeTests
     }
 
     [TestMethod]
+    public void MainWindowExposesFileListOperationsControls()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "GuraFile", "MainWindow.xaml"));
+        var document = XDocument.Load(path);
+        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var names = document.Descendants()
+            .Select(element => element.Attribute(x + "Name")?.Value)
+            .Where(name => name is not null)
+            .ToHashSet();
+
+        CollectionAssert.IsSubsetOf(
+            new[]
+            {
+                "CopyFileButton",
+                "CutFileButton",
+                "PasteToFileButton",
+                "MoveToFileButton",
+                "RenameFileButton",
+                "CollisionPolicyBox",
+                "CancelFileOperationButton",
+                "FileOperationProgressRing"
+            },
+            names.ToArray());
+
+        var source = File.ReadAllText(Path.ChangeExtension(path, ".xaml.cs"));
+        StringAssert.Contains(source, "_fileOperations.CopyToClipboard");
+        StringAssert.Contains(source, "_fileOperations.CutToClipboard");
+        StringAssert.Contains(source, "_fileOperations.PasteFromClipboardAsync");
+        StringAssert.Contains(source, "_fileOperations.MoveToAsync");
+        StringAssert.Contains(source, "_fileOperations.RenameAsync");
+    }
+
+    [TestMethod]
     public void AddRootHandlerReportsFailuresAtTheUiBoundary()
     {
         var path = Path.GetFullPath(
