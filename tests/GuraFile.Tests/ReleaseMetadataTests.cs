@@ -13,9 +13,9 @@ public sealed class ReleaseMetadataTests
         var root = RepositoryRoot();
         var project = XDocument.Load(Path.Combine(root, "src", "GuraFile", "GuraFile.csproj"));
 
-        Assert.AreEqual("0.3.0", project.Descendants("Version").Single().Value);
-        Assert.AreEqual("0.3.0.0", project.Descendants("AssemblyVersion").Single().Value);
-        Assert.AreEqual("0.3.0.0", project.Descendants("FileVersion").Single().Value);
+        Assert.AreEqual("0.3.1", project.Descendants("Version").Single().Value);
+        Assert.AreEqual("0.3.1.0", project.Descendants("AssemblyVersion").Single().Value);
+        Assert.AreEqual("0.3.1.0", project.Descendants("FileVersion").Single().Value);
         Assert.IsTrue(File.Exists(Path.Combine(root, "CHANGELOG.md")));
         Assert.IsTrue(File.Exists(Path.Combine(root, "THIRD_PARTY_NOTICES.md")));
         Assert.IsTrue(File.Exists(Path.Combine(root, "scripts", "PackageRelease.ps1")));
@@ -25,14 +25,14 @@ public sealed class ReleaseMetadataTests
         StringAssert.Contains(readme, "本版不使用 NTFS USN Journal");
         StringAssert.Contains(readme, "删除操作仅支持删除到 Windows 回收站");
         StringAssert.Contains(readme, "尚未提供图谱");
-        StringAssert.Contains(readme, "GuraFile-v0.3.0-win-x64.zip");
+        StringAssert.Contains(readme, "GuraFile-v0.3.1-win-x64.zip");
 
-        StringAssert.Contains(File.ReadAllText(Path.Combine(root, "CHANGELOG.md")), "## 0.3.0 — Alpha");
-        StringAssert.Contains(File.ReadAllText(Path.Combine(root, "THIRD_PARTY_NOTICES.md")), "GuraFile v0.3.0");
+        StringAssert.Contains(File.ReadAllText(Path.Combine(root, "CHANGELOG.md")), "## 0.3.1");
+        StringAssert.Contains(File.ReadAllText(Path.Combine(root, "THIRD_PARTY_NOTICES.md")), "GuraFile v0.3.1");
         StringAssert.Contains(File.ReadAllText(Path.Combine(root, "scripts", "PackageRelease.ps1")),
-            "[string]$Version = '0.3.0'");
+            "[string]$Version = '0.3.1'");
         StringAssert.Contains(File.ReadAllText(Path.Combine(root, "docs", "RELEASE_CHECKLIST.md")),
-            "# v0.3.0 发布验收");
+            "# v0.3.1 发布验收");
     }
 
     [TestMethod]
