@@ -127,6 +127,54 @@ public sealed class FileListOperationService
             cancellationToken);
     }
 
+    public Task<FileOperationCommitBatchResult> DeleteToRecycleBinAsync(
+        IReadOnlyList<string> sourcePaths,
+        IntPtr ownerWindow = default,
+        Action<FileOperationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(sourcePaths);
+        if (sourcePaths.Count == 0)
+        {
+            throw new ArgumentException("请选择要删除的文件。", nameof(sourcePaths));
+        }
+
+        var onlineRoots = GetOnlineRootPaths();
+        foreach (var path in sourcePaths)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                throw new ArgumentException("源路径不能为空。", nameof(sourcePaths));
+            }
+
+            var normalized = SafeFileOperationExecutor.Normalize(path);
+            var isInManagedRoot = false;
+            foreach (var root in onlineRoots)
+            {
+                if (string.IsNullOrWhiteSpace(root)) continue;
+                var normalizedRoot = SafeFileOperationExecutor.Normalize(root);
+                if (string.Equals(normalized, normalizedRoot, StringComparison.OrdinalIgnoreCase) ||
+                    SafeFileOperationExecutor.IsAncestor(normalizedRoot, normalized))
+                {
+                    isInManagedRoot = true;
+                    break;
+                }
+            }
+
+            if (!isInManagedRoot)
+            {
+                throw new ArgumentException($"源路径“{path}”不在任何在线管理根目录范围内。", nameof(sourcePaths));
+            }
+        }
+
+        return _committer.DeleteToRecycleBinAsync(
+            sourcePaths,
+            onlineRoots,
+            ownerWindow,
+            progress,
+            cancellationToken);
+    }
+
     public async Task<FileOperationCommitBatchResult> PasteFromClipboardAsync(
         string destinationDirectory,
         FileCollisionPolicy collisionPolicy = FileCollisionPolicy.AutoRename,

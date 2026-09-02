@@ -323,6 +323,260 @@ public sealed class SafeFileOperationExecutor
             cancellationToken);
     }
 
+    public Task<FileOperationBatchResult> DeleteToRecycleBinAsync(
+        IReadOnlyList<string> sourcePaths,
+        IReadOnlyCollection<string> onlineRootPaths,
+        IntPtr ownerWindow = default,
+        Action<FileOperationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        return ExecuteDeleteBatchAsync(
+            sourcePaths,
+            onlineRootPaths,
+            ownerWindow,
+            progress,
+            cancellationToken);
+    }
+
+    public Task<FileOperationBatchResult> DeleteToRecycleBinAsync(
+        IReadOnlyList<string> sourcePaths,
+        IReadOnlyCollection<ManagedRoot> onlineRoots,
+        IntPtr ownerWindow = default,
+        Action<FileOperationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(onlineRoots);
+        return DeleteToRecycleBinAsync(
+            sourcePaths,
+            onlineRoots.Where(r => r.Status == ManagedRootStatus.Online).Select(r => r.Path).ToArray(),
+            ownerWindow,
+            progress,
+            cancellationToken);
+    }
+
+    private Task<FileOperationBatchResult> ExecuteDeleteBatchAsync(
+        IReadOnlyList<string> sourcePaths,
+        IReadOnlyCollection<string> onlineRootPaths,
+        IntPtr ownerWindow,
+        Action<FileOperationProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(sourcePaths);
+        ArgumentNullException.ThrowIfNull(onlineRootPaths);
+
+        if (sourcePaths.Count == 0)
+        {
+            return Task.FromResult(new FileOperationBatchResult([], false));
+        }
+
+        return RunOnStaThreadAsync(() =>
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                var canceledItems = sourcePaths
+                    .Select(s => new FileOperationItemResult(
+                        string.IsNullOrWhiteSpace(s) ? s : Normalize(s),
+                        null,
+                        FileOperationItemStatus.Canceled,
+                        "操作已被取消。",
+                        IsCanceled: true))
+                    .ToArray();
+                return new FileOperationBatchResult(canceledItems, true);
+            }
+
+            var preparedItems = new List<(string Source, FileOperationItemResult? PreResult)>(sourcePaths.Count);
+            var completedCount = 0;
+            var totalCount = sourcePaths.Count;
+
+            foreach (var rawSource in sourcePaths)
+            {
+                if (string.IsNullOrWhiteSpace(rawSource))
+                {
+                    var fail = new FileOperationItemResult(rawSource ?? "", null, FileOperationItemStatus.Failed, "源路径不能为空。");
+                    preparedItems.Add(("", fail));
+                    completedCount++;
+                    progress?.Invoke(new FileOperationProgress(totalCount, completedCount, rawSource));
+                    continue;
+                }
+
+                string normalizedSource;
+                try
+                {
+                    normalizedSource = Normalize(rawSource);
+                }
+                catch (Exception ex)
+                {
+                    var fail = new FileOperationItemResult(rawSource, null, FileOperationItemStatus.Failed, $"路径格式错误：{ex.Message}");
+                    preparedItems.Add((rawSource, fail));
+                    completedCount++;
+                    progress?.Invoke(new FileOperationProgress(totalCount, completedCount, rawSource));
+                    continue;
+                }
+
+                string? matchingRoot = null;
+                foreach (var root in onlineRootPaths)
+                {
+                    if (string.IsNullOrWhiteSpace(root)) continue;
+                    var normalizedRoot = Normalize(root);
+                    if (string.Equals(normalizedSource, normalizedRoot, StringComparison.OrdinalIgnoreCase) ||
+                        IsAncestor(normalizedRoot, normalizedSource))
+                    {
+                        matchingRoot = normalizedRoot;
+                        break;
+                    }
+                }
+
+                if (matchingRoot is null)
+                {
+                    var fail = new FileOperationItemResult(normalizedSource, null, FileOperationItemStatus.Failed, $"源路径“{rawSource}”不在任何在线管理根目录范围内。");
+                    preparedItems.Add((normalizedSource, fail));
+                    completedCount++;
+                    progress?.Invoke(new FileOperationProgress(totalCount, completedCount, rawSource));
+                    continue;
+                }
+
+                try
+                {
+                    CheckReparsePoints(matchingRoot, normalizedSource);
+                }
+                catch (Exception ex)
+                {
+                    var fail = new FileOperationItemResult(normalizedSource, null, FileOperationItemStatus.Failed, ex.Message);
+                    preparedItems.Add((normalizedSource, fail));
+                    completedCount++;
+                    progress?.Invoke(new FileOperationProgress(totalCount, completedCount, rawSource));
+                    continue;
+                }
+
+                var sourceExists = File.Exists(normalizedSource) || Directory.Exists(normalizedSource);
+                if (!sourceExists)
+                {
+                    var fail = new FileOperationItemResult(normalizedSource, null, FileOperationItemStatus.Failed, $"源文件不存在或无法访问：{normalizedSource}");
+                    preparedItems.Add((normalizedSource, fail));
+                    completedCount++;
+                    progress?.Invoke(new FileOperationProgress(totalCount, completedCount, normalizedSource));
+                    continue;
+                }
+
+                preparedItems.Add((normalizedSource, null));
+            }
+
+            var itemsToQueue = preparedItems.Where(i => i.PreResult is null).ToList();
+            if (itemsToQueue.Count == 0)
+            {
+                var finalResults = preparedItems.Select(i => i.PreResult!).ToList();
+                return new FileOperationBatchResult(finalResults, false);
+            }
+
+            using var sink = new FileOperationProgressSink(itemsToQueue.Select(i => i.Source).ToList(), string.Empty, totalCount, progress, cancellationToken);
+            var hrCreate = CreateFileOperation(out var fileOp);
+            if (hrCreate != 0 || fileOp is null)
+            {
+                var createErr = FormatHResultError(hrCreate, "删除");
+                var failList = preparedItems.Select(item =>
+                    item.PreResult ?? new FileOperationItemResult(item.Source, null, FileOperationItemStatus.Failed, createErr)).ToList();
+                return new FileOperationBatchResult(failList, false);
+            }
+
+            uint cookie = 0;
+            try
+            {
+                var flags = (uint)(FileOperationFlags.FOF_SILENT |
+                                   FileOperationFlags.FOF_NOCONFIRMMKDIR |
+                                   FileOperationFlags.FOF_NOERRORUI |
+                                   FileOperationFlags.FOF_NOCONFIRMATION |
+                                   FileOperationFlags.FOF_ALLOWUNDO |
+                                   FileOperationFlags.FOF_WANTNUKEWARNING);
+
+                fileOp.SetOperationFlags(flags);
+                if (ownerWindow != IntPtr.Zero)
+                {
+                    fileOp.SetOwnerWindow(ownerWindow);
+                }
+
+                var allocatedShellItems = new List<IntPtr>();
+                try
+                {
+                    foreach (var (source, _) in itemsToQueue)
+                    {
+                        var hrSource = CreateShellItem(source, out var sourceItem);
+                        if (hrSource != 0 || sourceItem == IntPtr.Zero)
+                        {
+                            var fail = new FileOperationItemResult(source, null, FileOperationItemStatus.Failed, FormatHResultError(hrSource, Path.GetFileName(source)));
+                            sink.RecordDirectResult(source, fail);
+                            continue;
+                        }
+
+                        allocatedShellItems.Add(sourceItem);
+                        fileOp.DeleteItem(sourceItem, IntPtr.Zero);
+                    }
+
+                    fileOp.Advise(sink.ComPointer, out cookie);
+
+                    try
+                    {
+                        fileOp.PerformOperations();
+                    }
+                    catch (COMException)
+                    {
+                    }
+
+                    fileOp.GetAnyOperationsAborted(out var wasAborted);
+                    wasAborted = wasAborted || cancellationToken.IsCancellationRequested;
+
+                    var results = new List<FileOperationItemResult>(sourcePaths.Count);
+                    foreach (var item in preparedItems)
+                    {
+                        if (item.PreResult is not null)
+                        {
+                            results.Add(item.PreResult);
+                        }
+                        else if (sink.TryGetResult(item.Source, out var reported) && reported is not null)
+                        {
+                            results.Add(reported);
+                        }
+                        else if (wasAborted)
+                        {
+                            results.Add(new FileOperationItemResult(
+                                item.Source,
+                                null,
+                                FileOperationItemStatus.Canceled,
+                                "操作已被取消。",
+                                IsCanceled: true));
+                        }
+                        else
+                        {
+                            results.Add(new FileOperationItemResult(
+                                item.Source,
+                                null,
+                                FileOperationItemStatus.Failed,
+                                "操作未执行。"));
+                        }
+                    }
+
+                    return new FileOperationBatchResult(results, wasAborted);
+                }
+                finally
+                {
+                    foreach (var ptr in allocatedShellItems)
+                    {
+                        if (ptr != IntPtr.Zero)
+                        {
+                            Marshal.Release(ptr);
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                if (cookie != 0)
+                {
+                    try { fileOp.Unadvise(cookie); } catch { }
+                }
+            }
+        }, cancellationToken);
+    }
+
     private Task<FileOperationBatchResult> ExecuteBatchAsync(
         IReadOnlyList<string> sourcePaths,
         string destinationDirectory,
@@ -651,7 +905,7 @@ public sealed class SafeFileOperationExecutor
         return Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
     }
 
-    private static bool IsAncestor(string parent, string child) =>
+    internal static bool IsAncestor(string parent, string child) =>
         child.Length > parent.Length
         && child.StartsWith(parent, StringComparison.OrdinalIgnoreCase)
         && (Path.EndsInDirectorySeparator(parent) || IsDirectorySeparator(child[parent.Length]));
@@ -1074,7 +1328,15 @@ internal sealed class FileOperationProgressSink : IDisposable
     }
 
     private int PreDeleteItemImpl(IntPtr thisPtr, uint dwFlags, IntPtr psiItem) => CheckCancellation();
-    private int PostDeleteItemImpl(IntPtr thisPtr, uint dwFlags, IntPtr psiItem, int hrDelete, IntPtr psiNewlyCreated) => 0;
+
+    private int PostDeleteItemImpl(IntPtr thisPtr, uint dwFlags, IntPtr psiItem, int hrDelete, IntPtr psiNewlyCreated)
+    {
+        var src = (_currentIndex < _queuedSources.Count) ? _queuedSources[_currentIndex] : GetPathFromIntPtr(psiItem);
+        _currentIndex++;
+        RecordResult(src, null, hrDelete);
+        return CheckCancellation();
+    }
+
     private int PreNewItemImpl(IntPtr thisPtr, uint dwFlags, IntPtr psiDestinationFolder, IntPtr pszNewName) => CheckCancellation();
     private int PostNewItemImpl(IntPtr thisPtr, uint dwFlags, IntPtr psiDestinationFolder, IntPtr pszNewName, IntPtr pszTemplateName, uint dwFileAttributes, int hrNewItem, IntPtr psiNewlyCreated) => 0;
     private int UpdateProgressImpl(IntPtr thisPtr, uint iWorkTotal, uint iWorkSoFar) => CheckCancellation();

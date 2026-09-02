@@ -413,6 +413,93 @@ public sealed class FileListOperationServiceTests
         var canceledBatch = new FileOperationCommitBatchResult([completedItem, canceledItem], IsCanceled: true);
         var summaryCanceled = FileListOperationService.FormatBatchSummary(canceledBatch, "粘贴");
         Assert.AreEqual("粘贴已取消：成功 1 个，跳过 0 个，取消 1 个，失败 0 个。", summaryCanceled);
+
+        var deleteBatch = new FileOperationCommitBatchResult([completedItem, completedItem]);
+        var summaryDelete = FileListOperationService.FormatBatchSummary(deleteBatch, "删除");
+        Assert.AreEqual("删除完成：成功 2 个，跳过 0 个，失败 0 个。", summaryDelete);
+    }
+
+    [TestMethod]
+    public async Task DeleteToRecycleBinAsync_ValidFiles_DeletesFilesAndMarksOffline()
+    {
+        using var env = TestEnvironment.Create();
+        var file1 = env.CreateFile("del_service.txt", "del content");
+        var root = env.Scanner.AddRoot(env.RootPath);
+        await env.Scanner.ScanAsync(root.Id);
+
+        var tagService = new TagService(env.DatabasePath);
+        var tag = tagService.CreateTag("DeleteServiceTag");
+        var queryService = new FileQueryService(env.DatabasePath);
+        var initFiles = await queryService.QueryAsync(new());
+        var fileId = initFiles[0].Id;
+        tagService.AddTagToFiles(tag.Id, [fileId]);
+
+        var clipboard = new InMemoryClipboard();
+        var committer = new FileOperationIndexCommitter(env.Scanner);
+        var service = new FileListOperationService(committer, env.Scanner, clipboard);
+
+        var result = await service.DeleteToRecycleBinAsync([file1]);
+
+        Assert.AreEqual(1, result.SucceededCount);
+        Assert.IsFalse(File.Exists(file1));
+
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT is_online FROM files WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$id", fileId);
+            var isOnline = (long)cmd.ExecuteScalar()!;
+            Assert.AreEqual(0, isOnline);
+        }
+
+        var tags = tagService.ListTagsForFile(fileId);
+        Assert.HasCount(1, tags);
+        Assert.AreEqual("DeleteServiceTag", tags[0].Name);
+    }
+
+    [TestMethod]
+    public async Task DeleteToRecycleBinAsync_EmptyList_ThrowsArgumentException()
+    {
+        using var env = TestEnvironment.Create();
+        var clipboard = new InMemoryClipboard();
+        var committer = new FileOperationIndexCommitter(env.Scanner);
+        var service = new FileListOperationService(committer, env.Scanner, clipboard);
+
+        await Assert.ThrowsExactlyAsync<ArgumentException>(async () =>
+        {
+            await service.DeleteToRecycleBinAsync([]);
+        });
+    }
+
+    [TestMethod]
+    public async Task DeleteToRecycleBinAsync_OutsideManagedRoots_ThrowsArgumentException()
+    {
+        using var env = TestEnvironment.Create();
+        var root = env.Scanner.AddRoot(env.RootPath);
+
+        var outsideDir = Path.Combine(Path.GetTempPath(), $"GuraFile_Outside_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(outsideDir);
+        try
+        {
+            var outsideFile = Path.Combine(outsideDir, "outside.txt");
+            File.WriteAllText(outsideFile, "outside data");
+
+            var clipboard = new InMemoryClipboard();
+            var committer = new FileOperationIndexCommitter(env.Scanner);
+            var service = new FileListOperationService(committer, env.Scanner, clipboard);
+
+            await Assert.ThrowsExactlyAsync<ArgumentException>(async () =>
+            {
+                await service.DeleteToRecycleBinAsync([outsideFile]);
+            });
+        }
+        finally
+        {
+            if (Directory.Exists(outsideDir))
+            {
+                Directory.Delete(outsideDir, recursive: true);
+            }
+        }
     }
 
     private sealed class TestEnvironment : IDisposable
