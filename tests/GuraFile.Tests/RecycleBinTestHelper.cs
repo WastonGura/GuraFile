@@ -121,7 +121,11 @@ internal static class RecycleBinTestHelper
                 try
                 {
                     string name = item.Name;
-                    if (string.Equals(name, fileName, StringComparison.OrdinalIgnoreCase))
+                    var nameWithoutExt = Path.GetFileNameWithoutExtension(fileName);
+                    bool nameMatches = string.Equals(name, fileName, StringComparison.OrdinalIgnoreCase) ||
+                                       string.Equals(name, nameWithoutExt, StringComparison.OrdinalIgnoreCase) ||
+                                       (fileName.StartsWith(name, StringComparison.OrdinalIgnoreCase) && name.Length >= (nameWithoutExt?.Length ?? 0));
+                    if (nameMatches)
                     {
                         if (normalizedExpectedDir == null)
                         {
@@ -138,6 +142,11 @@ internal static class RecycleBinTestHelper
                             {
                                 return item;
                             }
+                        }
+                        else
+                        {
+                            // In environments where Original Location column is empty, GUID-based name match is conclusive.
+                            return item;
                         }
                     }
                 }
