@@ -553,6 +553,20 @@ public sealed class SafeFileOperationExecutorTests
         Assert.IsGreaterThanOrEqualTo(progressUpdates.Count, 2);
     }
 
+    [TestMethod]
+    public void DeleteOperationFlags_ExplicitlyIncludesFofxRecycleOnDeleteAndAllowUndo()
+    {
+        var recycleOnDelete = (uint)Enum.Parse<FileOperationFlags>("FOFX_RECYCLEONDELETE");
+        var allowUndo = (uint)Enum.Parse<FileOperationFlags>("FOF_ALLOWUNDO");
+        Assert.AreEqual(0x00080000u, recycleOnDelete);
+        Assert.AreEqual(0x0040u, allowUndo);
+
+        var flags = SafeFileOperationExecutor.DeleteOperationFlags;
+        Assert.AreNotEqual(0u, flags & (uint)FileOperationFlags.FOFX_RECYCLEONDELETE, "DeleteOperationFlags must include FOFX_RECYCLEONDELETE to prevent permanent deletion fallback.");
+        Assert.AreNotEqual(0u, flags & (uint)FileOperationFlags.FOF_ALLOWUNDO, "DeleteOperationFlags must include FOF_ALLOWUNDO.");
+        Assert.AreNotEqual(0u, flags & (uint)FileOperationFlags.FOF_WANTNUKEWARNING, "DeleteOperationFlags must include FOF_WANTNUKEWARNING.");
+    }
+
     private sealed class TestEnvironment : IDisposable
     {
         public string RootPath { get; }

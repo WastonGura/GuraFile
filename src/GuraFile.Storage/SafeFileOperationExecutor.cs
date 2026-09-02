@@ -52,6 +52,15 @@ public sealed class SafeFileOperationExecutor
     private static readonly Guid IidFileOperation = new("947aab5f-0a5c-4c13-b4d6-4bf7836fc9f8");
     private static readonly Guid IidShellItem = new("43826d1e-e718-42ee-bc55-a1e261c37bfe");
 
+    internal const uint DeleteOperationFlags = (uint)(
+        FileOperationFlags.FOF_SILENT |
+        FileOperationFlags.FOF_NOCONFIRMMKDIR |
+        FileOperationFlags.FOF_NOERRORUI |
+        FileOperationFlags.FOF_NOCONFIRMATION |
+        FileOperationFlags.FOF_ALLOWUNDO |
+        FileOperationFlags.FOF_WANTNUKEWARNING |
+        FileOperationFlags.FOFX_RECYCLEONDELETE);
+
     public Task<FileOperationBatchResult> CopyAsync(
         IReadOnlyList<string> sourcePaths,
         string destinationDirectory,
@@ -481,12 +490,7 @@ public sealed class SafeFileOperationExecutor
             uint cookie = 0;
             try
             {
-                var flags = (uint)(FileOperationFlags.FOF_SILENT |
-                                   FileOperationFlags.FOF_NOCONFIRMMKDIR |
-                                   FileOperationFlags.FOF_NOERRORUI |
-                                   FileOperationFlags.FOF_NOCONFIRMATION |
-                                   FileOperationFlags.FOF_ALLOWUNDO |
-                                   FileOperationFlags.FOF_WANTNUKEWARNING);
+                var flags = DeleteOperationFlags;
 
                 fileOp.SetOperationFlags(flags);
                 if (ownerWindow != IntPtr.Zero)
@@ -1496,20 +1500,21 @@ internal enum SIGDN : uint
 
 [Flags]
 internal enum FileOperationFlags : uint
-    {
-        FOF_MULTIDESTFILES = 0x0001,
-        FOF_CONFIRMMOUSE = 0x0002,
-        FOF_SILENT = 0x0004,
-        FOF_RENAMEONCOLLISION = 0x0008,
-        FOF_NOCONFIRMATION = 0x0010,
-        FOF_WANTMAPPINGHANDLE = 0x0020,
-        FOF_ALLOWUNDO = 0x0040,
-        FOF_FILESONLY = 0x0080,
-        FOF_SIMPLEPROGRESS = 0x0100,
-        FOF_NOCONFIRMMKDIR = 0x0200,
-        FOF_NOERRORUI = 0x0400,
-        FOF_NOCOPYSECURITYATTRIBS = 0x0800,
-        FOF_NORECURSION = 0x1000,
-        FOF_NO_CONNECTED_ELEMENTS = 0x2000,
-        FOF_WANTNUKEWARNING = 0x4000,
-    }
+{
+    FOF_MULTIDESTFILES = 0x0001,
+    FOF_CONFIRMMOUSE = 0x0002,
+    FOF_SILENT = 0x0004,
+    FOF_RENAMEONCOLLISION = 0x0008,
+    FOF_NOCONFIRMATION = 0x0010,
+    FOF_WANTMAPPINGHANDLE = 0x0020,
+    FOF_ALLOWUNDO = 0x0040,
+    FOF_FILESONLY = 0x0080,
+    FOF_SIMPLEPROGRESS = 0x0100,
+    FOF_NOCONFIRMMKDIR = 0x0200,
+    FOF_NOERRORUI = 0x0400,
+    FOF_NOCOPYSECURITYATTRIBS = 0x0800,
+    FOF_NORECURSION = 0x1000,
+    FOF_NO_CONNECTED_ELEMENTS = 0x2000,
+    FOF_WANTNUKEWARNING = 0x4000,
+    FOFX_RECYCLEONDELETE = 0x00080000,
+}

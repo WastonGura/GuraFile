@@ -1021,6 +1021,65 @@ public sealed class FileOperationIndexCommitterTests
         Assert.AreEqual("WatcherPreservedTag", tags[0].Name);
     }
 
+    [TestMethod]
+    public async Task DeleteToRecycleBin_WhenShellFails_PreservesDatabaseNodeOnlineStatusAndUserTags()
+    {
+        using var env = TestEnvironment.Create();
+        var sourcePath = env.CreateFile("failed_delete.txt", "undeletable content");
+        var root = env.Scanner.AddRoot(env.RootPath);
+        await env.Scanner.ScanAsync(root.Id);
+
+        var queryService = new FileQueryService(env.DatabasePath);
+        var initialFiles = await queryService.QueryAsync(new());
+        Assert.HasCount(1, initialFiles);
+        var fileId = initialFiles[0].Id;
+
+        var tagService = new TagService(env.DatabasePath);
+        var tag = tagService.CreateTag("SafeTag");
+        tagService.AddTagToFiles(tag.Id, [fileId]);
+
+        // Simulate executor returning failure (e.g. recycle bin unavailable)
+        var failedItem = new FileOperationItemResult(
+            sourcePath,
+            null,
+            FileOperationItemStatus.Failed,
+            "无法移入回收站：目标驱动器不支持回收站。");
+
+        var committer = new FileOperationIndexCommitter(
+            env.DatabasePath,
+            env.Scanner,
+            executor: null,
+            readIdentity: path => new FileIdentity("VOL1", "ID1", true, null),
+            classify: new FileTypeClassifier().Classify,
+            getAttributes: File.GetAttributes,
+            fileExists: File.Exists,
+            directoryExists: Directory.Exists);
+
+        var result = await committer.CommitDeleteBatchAsync([failedItem], [root.Path]);
+
+        Assert.AreEqual(0, result.SucceededCount);
+        Assert.AreEqual(1, result.FailedCount);
+        Assert.AreEqual(FileOperationItemStatus.Failed, result.Items[0].Status);
+
+        // Database record must still be online = 1
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT is_online FROM files WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$id", fileId);
+            var isOnline = (long)cmd.ExecuteScalar()!;
+            Assert.AreEqual(1, isOnline);
+        }
+
+        // Tag must still exist on the file
+        var tags = tagService.ListTagsForFile(fileId);
+        Assert.HasCount(1, tags);
+        Assert.AreEqual("SafeTag", tags[0].Name);
+
+        // Physical file on disk must still exist
+        Assert.IsTrue(File.Exists(sourcePath));
+    }
+
     private static async Task<string> GetIdentityKindAsync(string databasePath, long fileId)
     {
         using var connection = SqliteDatabase.Open(databasePath);
