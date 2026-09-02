@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage.Pickers;
 using WinRT.Interop;
 
@@ -32,6 +33,7 @@ public sealed partial class MainWindow : Window
     private bool _transferringTags;
     private bool _isScanning;
     private bool _isOperating;
+    private List<string>? _draggedFilePaths;
 
     public MainWindow()
     {
@@ -547,6 +549,130 @@ public sealed partial class MainWindow : Window
 
     private void CancelFileOperationButton_Click(object sender, RoutedEventArgs e) =>
         _fileOpCancellation?.Cancel();
+
+    private void FilesList_DragItemsStarting(object sender, DragItemsStartingEventArgs e)
+    {
+        if (_isOperating)
+        {
+            e.Cancel = true;
+            return;
+        }
+
+        var items = e.Items.OfType<IndexedFile>().ToList();
+        if (items.Count == 0)
+        {
+            e.Cancel = true;
+            return;
+        }
+
+        _draggedFilePaths = items.Select(f => f.Path).ToList();
+        e.Data.RequestedOperation = DataPackageOperation.Move;
+    }
+
+    private ManagedRoot? GetTargetRootFromDragEvent(DragEventArgs e)
+    {
+        if ((e.OriginalSource as FrameworkElement)?.DataContext is ManagedRoot root)
+        {
+            return root;
+        }
+
+        return RootsList.SelectedItem as ManagedRoot;
+    }
+
+    private void RootsList_DragOver(object sender, DragEventArgs e)
+    {
+        if (_isOperating)
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+            return;
+        }
+
+        var targetRoot = GetTargetRootFromDragEvent(e);
+        if (targetRoot == null || targetRoot.Status != ManagedRootStatus.Online)
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+            e.DragUIOverride.Caption = "目标根目录不可用或已离线";
+            e.DragUIOverride.IsCaptionVisible = true;
+            return;
+        }
+
+        if (_draggedFilePaths != null && _draggedFilePaths.Count > 0)
+        {
+            e.AcceptedOperation = DataPackageOperation.Move;
+            e.DragUIOverride.Caption = $"移动到 {targetRoot.DisplayName}";
+            e.DragUIOverride.IsCaptionVisible = true;
+        }
+        else if (e.DataView.Contains(StandardDataFormats.StorageItems))
+        {
+            e.AcceptedOperation = DataPackageOperation.Copy;
+            e.DragUIOverride.Caption = $"复制到 {targetRoot.DisplayName}";
+            e.DragUIOverride.IsCaptionVisible = true;
+        }
+        else
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+        }
+    }
+
+    private async void RootsList_Drop(object sender, DragEventArgs e)
+    {
+        if (_isOperating)
+        {
+            return;
+        }
+
+        var targetRoot = GetTargetRootFromDragEvent(e);
+        if (targetRoot == null || targetRoot.Status != ManagedRootStatus.Online)
+        {
+            FileActionStatusText.Text = "拖放目标必须为在线管理根目录。";
+            return;
+        }
+
+        var isInternal = _draggedFilePaths != null && _draggedFilePaths.Count > 0;
+        List<string> sourcePaths = new();
+
+        if (isInternal)
+        {
+            sourcePaths.AddRange(_draggedFilePaths!);
+            _draggedFilePaths = null;
+        }
+        else if (e.DataView.Contains(StandardDataFormats.StorageItems))
+        {
+            var items = await e.DataView.GetStorageItemsAsync();
+            foreach (var item in items)
+            {
+                if (item is Windows.Storage.StorageFile file)
+                {
+                    sourcePaths.Add(file.Path);
+                }
+                else if (item is Windows.Storage.StorageFolder folder)
+                {
+                    FileActionStatusText.Text = $"不支持拖入文件夹“{folder.Name}”，仅支持拖入文件。";
+                    return;
+                }
+            }
+        }
+
+        if (sourcePaths.Count == 0)
+        {
+            return;
+        }
+
+        var policy = GetSelectedCollisionPolicy();
+        await ExecuteFileOperationBatchAsync(
+            isInternal ? "移动" : "复制",
+            async (progress, cancellationToken) =>
+            {
+                return await _fileOperations.ExecuteDropAsync(
+                    sourcePaths,
+                    targetRoot.Path,
+                    isInternal,
+                    policy,
+                    WindowNative.GetWindowHandle(this),
+                    progress,
+                    cancellationToken);
+            });
+    }
 
     private async Task ExecuteFileOperationBatchAsync(
         string operationName,

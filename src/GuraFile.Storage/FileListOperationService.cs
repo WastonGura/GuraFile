@@ -222,6 +222,77 @@ public sealed class FileListOperationService
         }
     }
 
+    public async Task<FileOperationCommitBatchResult> ExecuteDropAsync(
+        IReadOnlyList<string> sourcePaths,
+        string destinationDirectory,
+        bool isInternalDrag,
+        FileCollisionPolicy collisionPolicy = FileCollisionPolicy.AutoRename,
+        IntPtr ownerWindow = default,
+        Action<FileOperationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(sourcePaths);
+        if (sourcePaths.Count == 0)
+        {
+            throw new ArgumentException("请提供拖放的文件。", nameof(sourcePaths));
+        }
+
+        ValidateDestination(destinationDirectory);
+        var normDest = SafeFileOperationExecutor.Normalize(destinationDirectory);
+
+        foreach (var path in sourcePaths)
+        {
+            if (string.IsNullOrWhiteSpace(path)) continue;
+            if (Directory.Exists(path))
+            {
+                throw new ArgumentException($"不支持拖入文件夹“{path}”，仅支持拖入文件。", nameof(sourcePaths));
+            }
+        }
+
+        var onlineRoots = GetOnlineRootPaths();
+
+        if (isInternalDrag)
+        {
+            var validSources = new List<string>();
+            foreach (var path in sourcePaths)
+            {
+                var normSource = SafeFileOperationExecutor.Normalize(path);
+                var sourceParent = Path.GetDirectoryName(normSource);
+                if (sourceParent != null && string.Equals(SafeFileOperationExecutor.Normalize(sourceParent), normDest, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Same directory
+                    continue;
+                }
+                validSources.Add(path);
+            }
+
+            if (validSources.Count == 0)
+            {
+                throw new InvalidOperationException("所选文件已在目标文件夹中。");
+            }
+
+            return await _committer.MoveAsync(
+                validSources,
+                destinationDirectory,
+                onlineRoots,
+                collisionPolicy,
+                ownerWindow,
+                progress,
+                cancellationToken);
+        }
+        else
+        {
+            return await _committer.CopyAsync(
+                sourcePaths,
+                destinationDirectory,
+                onlineRoots,
+                collisionPolicy,
+                ownerWindow,
+                progress,
+                cancellationToken);
+        }
+    }
+
     public static string FormatBatchSummary(FileOperationCommitBatchResult result, string operationName)
     {
         if (result.IsCanceled)
