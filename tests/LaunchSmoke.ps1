@@ -43,10 +43,11 @@ namespace GuraFile.Tests
             IntPtr found = IntPtr.Zero;
             EnumWindows((hWnd, lParam) =>
             {
-                GetWindowThreadProcessId(hWnd, out uint pid);
+                uint pid = 0;
+                GetWindowThreadProcessId(hWnd, out pid);
                 if (pid == (uint)processId)
                 {
-                    var sb = new StringBuilder(256);
+                    StringBuilder sb = new StringBuilder(256);
                     GetWindowTextW(hWnd, sb, 256);
                     if (string.Equals(sb.ToString(), expectedTitle, StringComparison.Ordinal))
                     {
