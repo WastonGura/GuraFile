@@ -186,10 +186,23 @@
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
             <TextBlock FontSize="20" FontWeight="SemiBold" Text="文件详情" />
-            <TextBlock x:Name="DetailsText" Grid.Row="1" AutomationProperties.Name="所选文件详情" Text="未选择文件" TextWrapping="Wrap" />
+            <StackPanel Grid.Row="1" Spacing="4">
+                <TextBlock x:Name="DetailsTitleText" FontWeight="SemiBold" Text="未选择文件" TextWrapping="Wrap" />
+                <TextBlock x:Name="DetailsPathText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
+                <TextBlock x:Name="DetailsMetaText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
+                <TextBlock x:Name="DetailsStatusText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
+                <TextBlock x:Name="DetailsIdentityText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
+                <TextBlock x:Name="DetailsUserTagsText" TextWrapping="Wrap" Visibility="Collapsed" />
+                <TextBlock x:Name="DetailsAutoTagsText" TextWrapping="Wrap" Visibility="Collapsed" />
+                <TextBlock x:Name="DetailsDiagnosticText" Foreground="{ThemeResource SystemFillColorCautionBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
+                <TextBlock x:Name="DetailsText" Visibility="Collapsed" />
+            </StackPanel>
             <StackPanel Grid.Row="2" Spacing="8">
-                <Button x:Name="OpenFileButton" AutomationProperties.Name="使用默认应用打开文件" Click="OpenFileButton_Click" Content="打开" IsEnabled="False" />
-                <Button x:Name="RevealFileButton" AutomationProperties.Name="在资源管理器中显示文件" Click="RevealFileButton_Click" Content="在资源管理器中显示" IsEnabled="False" />
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <Button x:Name="OpenFileButton" AutomationProperties.Name="使用默认应用打开文件" Click="OpenFileButton_Click" Content="打开" IsEnabled="False" />
+                    <Button x:Name="RevealFileButton" AutomationProperties.Name="在资源管理器中显示文件" Click="RevealFileButton_Click" Content="在资源管理器中显示" IsEnabled="False" />
+                    <Button x:Name="CopyPathButton" AutomationProperties.Name="复制文件完整路径" Click="CopyPathButton_Click" Content="复制路径" IsEnabled="False" />
+                </StackPanel>
                 <Button x:Name="ReidentifyTypeButton" AutomationProperties.Name="重新识别文件类型" Click="ReidentifyTypeButton_Click" Content="重新识别类型" IsEnabled="False" />
             </StackPanel>
             <TextBlock x:Name="FileActionStatusText" Grid.Row="3" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
