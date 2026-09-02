@@ -58,7 +58,6 @@ public sealed class SafeFileOperationExecutor
         FileOperationFlags.FOF_NOERRORUI |
         FileOperationFlags.FOF_NOCONFIRMATION |
         FileOperationFlags.FOF_ALLOWUNDO |
-        FileOperationFlags.FOF_WANTNUKEWARNING |
         FileOperationFlags.FOFX_RECYCLEONDELETE);
 
     public Task<FileOperationBatchResult> CopyAsync(
@@ -1246,20 +1245,13 @@ internal sealed class FileOperationProgressSink : IDisposable
         try
         {
             var item = (IShellItem)Marshal.GetObjectForIUnknown(psi);
-            try
+            if (item.GetDisplayName(SIGDN.SIGDN_FILESYSPATH, out var path) == 0 && !string.IsNullOrWhiteSpace(path))
             {
-                if (item.GetDisplayName(SIGDN.SIGDN_FILESYSPATH, out var path) == 0 && !string.IsNullOrWhiteSpace(path))
-                {
-                    return path;
-                }
-                if (item.GetDisplayName(SIGDN.SIGDN_DESKTOPABSOLUTEPARSING, out var parsePath) == 0 && !string.IsNullOrWhiteSpace(parsePath))
-                {
-                    return parsePath;
-                }
+                return path;
             }
-            finally
+            if (item.GetDisplayName(SIGDN.SIGDN_DESKTOPABSOLUTEPARSING, out var parsePath) == 0 && !string.IsNullOrWhiteSpace(parsePath))
             {
-                Marshal.ReleaseComObject(item);
+                return parsePath;
             }
         }
         catch

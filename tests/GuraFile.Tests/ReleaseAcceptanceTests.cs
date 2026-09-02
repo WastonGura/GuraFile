@@ -1,9 +1,11 @@
+using System.Runtime.Versioning;
 using GuraFile.Storage;
 using System.Reflection;
 
 namespace GuraFile.Tests;
 
 [TestClass]
+[SupportedOSPlatform("windows")]
 public sealed class ReleaseAcceptanceTests
 {
     [TestMethod]
@@ -206,6 +208,128 @@ public sealed class ReleaseAcceptanceTests
         await WaitForFileWithinTwoSecondsAsync(query, file => file.Path == occupiedPath && file.IsOnline);
     }
 
+    [TestMethod]
+    public async Task FullBusinessChain_CreateScanTagCopyMoveRenameRecycleRestart_PreservesConsistencyAndUserDataAsync()
+    {
+        using var temp = TempDirectory.Create();
+        var rootPath = Path.Combine(temp.Path, "业务链根目录");
+        Directory.CreateDirectory(rootPath);
+        var databasePath = Path.Combine(temp.Path, "e2e_acceptance.db");
+
+        // 1. Create file on disk
+        var originalFileName = $"acceptance_{Guid.NewGuid():N}.txt";
+        var originalPath = Path.Combine(rootPath, originalFileName);
+        await File.WriteAllTextAsync(originalPath, "GuraFile v0.3 Full Chain Acceptance Data");
+
+        // 2. Add root and Scan
+        var scanner = new ManagedRootScanner(databasePath);
+        var root = scanner.AddRoot(rootPath);
+        var scanResult = await scanner.ScanAsync(root.Id);
+        Assert.AreEqual(1, scanResult.CommittedFiles);
+
+        var queryService = new FileQueryService(databasePath);
+        var initialFiles = await queryService.QueryAsync(new());
+        Assert.HasCount(1, initialFiles);
+        var initialFile = initialFiles[0];
+        Assert.AreEqual(originalPath, initialFile.Path);
+        Assert.IsTrue(initialFile.IsOnline);
+
+        // 3. User applies user tag
+        var tagService = new TagService(databasePath);
+        var userTag = tagService.CreateTag("v0.3 Acceptance Tag");
+        tagService.AddTagToFiles(userTag.Id, [initialFile.Id]);
+        var tagsAfterTagging = tagService.ListTagsForFile(initialFile.Id);
+        Assert.AreEqual("v0.3 Acceptance Tag", tagsAfterTagging.Single().Name);
+
+        var initialAutoTags = tagService.ListAutomaticTagsForFile(initialFile.Id);
+        CollectionAssert.Contains(initialAutoTags.Select(t => t.Name).ToArray(), "类型/文档");
+        CollectionAssert.Contains(initialAutoTags.Select(t => t.Name).ToArray(), "格式/TXT");
+
+        // 4. Copy operation (inherits user tags and computes automatic tags)
+        var copyDir = Path.Combine(rootPath, "Copied");
+        Directory.CreateDirectory(copyDir);
+        var committer = new FileOperationIndexCommitter(scanner);
+        var copyResult = await committer.CopyAsync([originalPath], copyDir, [root.Path]);
+        Assert.AreEqual(1, copyResult.SucceededCount);
+        var copiedPath = copyResult.Items[0].ActualTargetPath!;
+        Assert.IsTrue(File.Exists(originalPath));
+        Assert.IsTrue(File.Exists(copiedPath));
+
+        var filesAfterCopy = await queryService.QueryAsync(new());
+        Assert.HasCount(2, filesAfterCopy.Where(f => f.IsOnline));
+        var copiedDb = filesAfterCopy.Single(f => f.Path == copiedPath);
+        Assert.AreEqual("v0.3 Acceptance Tag", tagService.ListTagsForFile(copiedDb.Id).Single().Name);
+
+        // 5. Move operation (preserves user tags and stable identity)
+        var moveDir = Path.Combine(rootPath, "Moved");
+        Directory.CreateDirectory(moveDir);
+        var moveResult = await committer.MoveAsync([copiedPath], moveDir, [root.Path]);
+        Assert.AreEqual(1, moveResult.SucceededCount);
+        var movedPath = moveResult.Items[0].ActualTargetPath!;
+        Assert.IsFalse(File.Exists(copiedPath));
+        Assert.IsTrue(File.Exists(movedPath));
+
+        var filesAfterMove = await queryService.QueryAsync(new());
+        var movedDb = filesAfterMove.Single(f => f.Path == movedPath);
+        Assert.AreEqual(copiedDb.Id, movedDb.Id);
+        Assert.AreEqual("v0.3 Acceptance Tag", tagService.ListTagsForFile(movedDb.Id).Single().Name);
+
+        // 6. Rename operation (preserves user tags and updates automatic tags for .md extension)
+        var renamedFileName = $"renamed_{Guid.NewGuid():N}.md";
+        var renameResult = await committer.RenameAsync(movedPath, renamedFileName, [root.Path]);
+        Assert.AreEqual(FileOperationItemStatus.Completed, renameResult.Status);
+        var renamedPath = renameResult.ActualTargetPath!;
+        Assert.IsFalse(File.Exists(movedPath));
+        Assert.IsTrue(File.Exists(renamedPath));
+
+        var filesAfterRename = await queryService.QueryAsync(new());
+        var renamedDb = filesAfterRename.Single(f => f.Path == renamedPath);
+        Assert.AreEqual(copiedDb.Id, renamedDb.Id);
+        Assert.AreEqual("v0.3 Acceptance Tag", tagService.ListTagsForFile(renamedDb.Id).Single().Name);
+        var autoTagsAfterRename = tagService.ListAutomaticTagsForFile(renamedDb.Id);
+        CollectionAssert.Contains(autoTagsAfterRename.Select(t => t.Name).ToArray(), "格式/Markdown");
+
+        // 7. Delete to Recycle Bin (marks offline and preserves user tags)
+        var deleteResult = await committer.DeleteToRecycleBinAsync([renamedPath], [root.Path]);
+        Assert.AreEqual(1, deleteResult.SucceededCount);
+        Assert.IsFalse(File.Exists(renamedPath));
+        Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(renamedFileName, Path.GetDirectoryName(renamedPath)), "Deleted file was not found in Recycle Bin.");
+
+        using (var connection = SqliteDatabase.Open(databasePath))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT is_online FROM files WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$id", renamedDb.Id);
+            var isOnline = (long)cmd.ExecuteScalar()!;
+            Assert.AreEqual(0, isOnline, "Deleted file must be marked offline in database.");
+        }
+
+        var offlineTags = tagService.ListTagsForFile(renamedDb.Id);
+        Assert.AreEqual("v0.3 Acceptance Tag", offlineTags.Single().Name, "Offline deleted file must preserve user tags.");
+
+        // 8. Restart application and rescan reconciliation
+        var restartedScanner = new ManagedRootScanner(databasePath);
+        var roots = restartedScanner.ListRoots();
+        Assert.HasCount(1, roots);
+        Assert.AreEqual(ManagedRootStatus.Online, roots[0].Status);
+
+        var restartScanResult = await restartedScanner.ScanAsync(roots[0].Id);
+        Assert.AreEqual(0, restartScanResult.AddedFiles);
+        Assert.AreEqual(0, restartScanResult.MissingFiles);
+
+        var filesAfterRestart = await queryService.QueryAsync(new());
+        var onlineAfterRestart = filesAfterRestart.Where(f => f.IsOnline).ToList();
+        var offlineAfterRestart = filesAfterRestart.Where(f => !f.IsOnline).ToList();
+
+        Assert.HasCount(1, onlineAfterRestart);
+        Assert.AreEqual(originalPath, onlineAfterRestart[0].Path);
+        Assert.AreEqual("v0.3 Acceptance Tag", tagService.ListTagsForFile(onlineAfterRestart[0].Id).Single().Name);
+
+        Assert.HasCount(1, offlineAfterRestart);
+        Assert.AreEqual(renamedDb.Id, offlineAfterRestart[0].Id);
+        Assert.AreEqual("v0.3 Acceptance Tag", tagService.ListTagsForFile(offlineAfterRestart[0].Id).Single().Name);
+    }
+
     private static async Task<IndexedFile> WaitForFileWithinTwoSecondsAsync(
         FileQueryService query,
         Func<IndexedFile, bool> predicate)
@@ -274,6 +398,14 @@ public sealed class ReleaseAcceptanceTests
 
         public void Dispose()
         {
+            try
+            {
+                RecycleBinTestHelper.CleanupRecycleBinItemsForDirectory(Path);
+            }
+            catch
+            {
+            }
+
             foreach (var offlinePath in Directory.GetDirectories(Path, "*-offline"))
             {
                 var restoredPath = offlinePath[..^"-offline".Length];

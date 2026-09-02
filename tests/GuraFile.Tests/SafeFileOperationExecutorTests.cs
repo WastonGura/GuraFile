@@ -439,7 +439,8 @@ public sealed class SafeFileOperationExecutorTests
     {
         using var temp = TestEnvironment.Create();
         var executor = new SafeFileOperationExecutor();
-        var sourceFile = temp.CreateFile("delete_me.txt", "to be recycled");
+        var fileName = $"delete_me_{Guid.NewGuid():N}.txt";
+        var sourceFile = temp.CreateFile(fileName, "to be recycled");
 
         var result = await executor.DeleteToRecycleBinAsync([sourceFile], [temp.RootPath]);
 
@@ -451,6 +452,7 @@ public sealed class SafeFileOperationExecutorTests
         var item = result.Items[0];
         Assert.AreEqual(FileOperationItemStatus.Completed, item.Status);
         Assert.IsFalse(File.Exists(sourceFile));
+        Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(fileName, temp.RootPath), "Deleted file was not found in Recycle Bin.");
     }
 
     [TestMethod]
@@ -458,9 +460,12 @@ public sealed class SafeFileOperationExecutorTests
     {
         using var temp = TestEnvironment.Create();
         var executor = new SafeFileOperationExecutor();
-        var file1 = temp.CreateFile("del1.txt", "content 1");
-        var file2 = temp.CreateFile("del2.txt", "content 2");
-        var file3 = temp.CreateFile("del3.txt", "content 3");
+        var name1 = $"del1_{Guid.NewGuid():N}.txt";
+        var name2 = $"del2_{Guid.NewGuid():N}.txt";
+        var name3 = $"del3_{Guid.NewGuid():N}.txt";
+        var file1 = temp.CreateFile(name1, "content 1");
+        var file2 = temp.CreateFile(name2, "content 2");
+        var file3 = temp.CreateFile(name3, "content 3");
 
         var result = await executor.DeleteToRecycleBinAsync([file1, file2, file3], [temp.RootPath]);
 
@@ -471,6 +476,10 @@ public sealed class SafeFileOperationExecutorTests
         Assert.IsFalse(File.Exists(file1));
         Assert.IsFalse(File.Exists(file2));
         Assert.IsFalse(File.Exists(file3));
+
+        Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(name1, temp.RootPath), "File 1 was not found in Recycle Bin.");
+        Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(name2, temp.RootPath), "File 2 was not found in Recycle Bin.");
+        Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(name3, temp.RootPath), "File 3 was not found in Recycle Bin.");
     }
 
     [TestMethod]
@@ -478,8 +487,10 @@ public sealed class SafeFileOperationExecutorTests
     {
         using var temp = TestEnvironment.Create();
         var executor = new SafeFileOperationExecutor();
-        var dir = temp.CreateDirectory("DeleteDir");
-        var childFile = temp.CreateFile(Path.Combine("DeleteDir", "child.txt"), "child data");
+        var dirName = $"DeleteDir_{Guid.NewGuid():N}";
+        var dir = temp.CreateDirectory(dirName);
+        var childName = $"child_{Guid.NewGuid():N}.txt";
+        var childFile = temp.CreateFile(Path.Combine(dirName, childName), "child data");
 
         var result = await executor.DeleteToRecycleBinAsync([dir], [temp.RootPath]);
 
@@ -487,6 +498,7 @@ public sealed class SafeFileOperationExecutorTests
         Assert.AreEqual(1, result.SucceededCount);
         Assert.IsFalse(Directory.Exists(dir));
         Assert.IsFalse(File.Exists(childFile));
+        Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(dirName, temp.RootPath), "Deleted directory was not found in Recycle Bin.");
     }
 
     [TestMethod]
@@ -539,8 +551,10 @@ public sealed class SafeFileOperationExecutorTests
     {
         using var temp = TestEnvironment.Create();
         var executor = new SafeFileOperationExecutor();
-        var file1 = temp.CreateFile("prog1.txt", "1");
-        var file2 = temp.CreateFile("prog2.txt", "2");
+        var name1 = $"prog1_{Guid.NewGuid():N}.txt";
+        var name2 = $"prog2_{Guid.NewGuid():N}.txt";
+        var file1 = temp.CreateFile(name1, "1");
+        var file2 = temp.CreateFile(name2, "2");
 
         var progressUpdates = new List<FileOperationProgress>();
         var result = await executor.DeleteToRecycleBinAsync(
@@ -564,7 +578,6 @@ public sealed class SafeFileOperationExecutorTests
         var flags = SafeFileOperationExecutor.DeleteOperationFlags;
         Assert.AreNotEqual(0u, flags & (uint)FileOperationFlags.FOFX_RECYCLEONDELETE, "DeleteOperationFlags must include FOFX_RECYCLEONDELETE to prevent permanent deletion fallback.");
         Assert.AreNotEqual(0u, flags & (uint)FileOperationFlags.FOF_ALLOWUNDO, "DeleteOperationFlags must include FOF_ALLOWUNDO.");
-        Assert.AreNotEqual(0u, flags & (uint)FileOperationFlags.FOF_WANTNUKEWARNING, "DeleteOperationFlags must include FOF_WANTNUKEWARNING.");
     }
 
     private sealed class TestEnvironment : IDisposable
@@ -602,6 +615,7 @@ public sealed class SafeFileOperationExecutorTests
         {
             try
             {
+                RecycleBinTestHelper.CleanupRecycleBinItemsForDirectory(RootPath);
                 if (Directory.Exists(RootPath))
                 {
                     Directory.Delete(RootPath, recursive: true);

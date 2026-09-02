@@ -423,7 +423,8 @@ public sealed class FileListOperationServiceTests
     public async Task DeleteToRecycleBinAsync_ValidFiles_DeletesFilesAndMarksOffline()
     {
         using var env = TestEnvironment.Create();
-        var file1 = env.CreateFile("del_service.txt", "del content");
+        var fileName = $"del_service_{Guid.NewGuid():N}.txt";
+        var file1 = env.CreateFile(fileName, "del content");
         var root = env.Scanner.AddRoot(env.RootPath);
         await env.Scanner.ScanAsync(root.Id);
 
@@ -442,6 +443,7 @@ public sealed class FileListOperationServiceTests
 
         Assert.AreEqual(1, result.SucceededCount);
         Assert.IsFalse(File.Exists(file1));
+        Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(fileName, env.RootPath), "Deleted file was not found in Recycle Bin.");
 
         using (var connection = SqliteDatabase.Open(env.DatabasePath))
         {
@@ -543,6 +545,7 @@ public sealed class FileListOperationServiceTests
         {
             try
             {
+                RecycleBinTestHelper.CleanupRecycleBinItemsForDirectory(RootPath);
                 if (Directory.Exists(RootPath))
                 {
                     Directory.Delete(RootPath, recursive: true);

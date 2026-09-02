@@ -5,6 +5,7 @@ using GuraFile.Storage;
 namespace GuraFile.Tests;
 
 [TestClass]
+[DoNotParallelize]
 [SupportedOSPlatform("windows")]
 public sealed class FileClipboardServiceTests
 {
