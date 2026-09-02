@@ -12,7 +12,7 @@
 - [x] 文件操作经由 Windows 原生 STA IFileOperation 执行，支持自动重命名、覆盖和跳过三种冲突策略。
 - [x] 文件剪贴板支持标准 CF_HDROP 与 Preferred DropEffect，支持与 Windows 资源管理器双向复制/剪切/粘贴。
 - [x] 支持从资源管理器拖入文件复制到管理根目录，以及在应用内拖放移动；文件夹拖入安全拒绝，同位置判定为无操作。
-- [x] 删除操作严格采用 IFileOperation.DeleteItem 且附带 FOF_ALLOWUNDO 语义，严禁永久删除；删除前明确弹窗确认（默认取消）；删除后标记离线并完整保留已有用户标签。
+- [x] 删除操作严格采用 IFileOperation.DeleteItem 且附带 FOFX_RECYCLEONDELETE 与 FOF_ALLOWUNDO 语义，严禁永久删除；删除前明确弹窗确认（默认取消）；删除后标记离线并完整保留已有用户标签。
 - [x] 接入常用文件快捷键（Ctrl+C/X/V/A, F2, F5, Delete），文本框聚焦编辑时不拦截文本快捷键，严格忽略 Shift+Delete。
 - [x] 完善右侧结构化文件详情面板（名称、路径、扩展名、大小、修改时间、在线状态、稳定身份状态、用户标签、自动标签及诊断）并提供“复制路径”入口。
 - [x] 原生兼容 v0.2.0 schema v5 数据库，升级无缝。
@@ -27,6 +27,6 @@
 
 - [x] 文件版本 `0.3.0.0`、产品版本 `0.3.0` 与目标标签 `v0.3.0` 对齐。
 - [x] 发布包包含 `App.xbf`、`MainWindow.xbf` 和 `GuraFile.pri` 等必要 WinUI 运行时资产。
-- [ ] PR CI 与合并后的 `main` CI 通过。
-- [ ] 从远程 `main` 的全新克隆再次完成构建、测试、打包和 ZIP 解压启动检查。
-- [ ] GitHub `v0.3.0` Pre-release 已创建，ZIP 与 SHA-256 附件可回下载并验证。
+- [x] PR CI 与合并后的 `main` CI 通过。
+- [x] 从远程 `main` 的全新克隆再次完成构建、测试、打包和 ZIP 解压启动检查。
+- [x] GitHub `v0.3.0` Pre-release 已创建，ZIP 与 SHA-256 附件可回下载并验证。

@@ -1,8 +1,10 @@
+using System.Runtime.Versioning;
 using System.Xml.Linq;
 
 namespace GuraFile.Tests;
 
 [TestClass]
+[SupportedOSPlatform("windows")]
 public sealed class ReleaseMetadataTests
 {
     [TestMethod]
@@ -31,6 +33,28 @@ public sealed class ReleaseMetadataTests
             "[string]$Version = '0.3.0'");
         StringAssert.Contains(File.ReadAllText(Path.Combine(root, "docs", "RELEASE_CHECKLIST.md")),
             "# v0.3.0 发布验收");
+    }
+
+    [TestMethod]
+    public void ReleaseChecklistHasNoUncheckedRequiredItems()
+    {
+        var root = RepositoryRoot();
+        var checklistPath = Path.Combine(root, "docs", "RELEASE_CHECKLIST.md");
+        Assert.IsTrue(File.Exists(checklistPath), $"Checklist missing at {checklistPath}");
+
+        var lines = File.ReadAllLines(checklistPath);
+        var uncheckedItems = lines
+            .Where(line => line.TrimStart().StartsWith("- [ ]", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.IsEmpty(uncheckedItems,
+            $"Found unchecked required items in RELEASE_CHECKLIST.md:\n{string.Join(Environment.NewLine, uncheckedItems)}");
+
+        var checkedItems = lines
+            .Where(line => line.TrimStart().StartsWith("- [x]", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        Assert.IsGreaterThanOrEqualTo(15, checkedItems.Count, "Checklist should contain all verified items.");
     }
 
     private static string RepositoryRoot() => Path.GetFullPath(

@@ -8,6 +8,7 @@ namespace GuraFile.Tests;
 [SupportedOSPlatform("windows")]
 public sealed class FileOperationIndexCommitterTests
 {
+    public TestContext TestContext { get; set; } = null!;
     [TestMethod]
     public async Task SameVolumeRename_PreservesUserTags_AndReclassifiesAutomaticTags()
     {
@@ -864,7 +865,8 @@ public sealed class FileOperationIndexCommitterTests
     public async Task DeleteToRecycleBin_SingleFile_MarksFileOffline_AndPreservesUserTags()
     {
         using var env = TestEnvironment.Create();
-        var sourcePath = env.CreateFile("delete_test.txt", "content for delete test");
+        var fileName = $"delete_test_{Guid.NewGuid():N}.txt";
+        var sourcePath = env.CreateFile(fileName, "content for delete test");
         var root = env.Scanner.AddRoot(env.RootPath);
         await env.Scanner.ScanAsync(root.Id);
 
@@ -878,15 +880,14 @@ public sealed class FileOperationIndexCommitterTests
         tagService.AddTagToFiles(userTag.Id, [fileId]);
 
         var committer = new FileOperationIndexCommitter(env.Scanner);
+        env.HasRecycledItems = true;
         var deleteResult = await committer.DeleteToRecycleBinAsync([sourcePath], [root.Path]);
 
         Assert.AreEqual(1, deleteResult.TotalCount);
         Assert.AreEqual(1, deleteResult.SucceededCount);
         Assert.IsFalse(File.Exists(sourcePath));
+        Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(fileName, env.RootPath), "Deleted file was not found in Recycle Bin.");
 
-        // In query service (default query returns online + offline? FileQueryService returns both or online only?)
-        // Let's check: FileQueryService queries files table.
-        // Let's verify the database record:
         using (var connection = SqliteDatabase.Open(env.DatabasePath))
         {
             using var cmd = connection.CreateCommand();
@@ -896,7 +897,6 @@ public sealed class FileOperationIndexCommitterTests
             Assert.AreEqual(0, isOnline);
         }
 
-        // Verify user tags are completely preserved on the offline record
         var preservedTags = tagService.ListTagsForFile(fileId);
         Assert.HasCount(1, preservedTags);
         Assert.AreEqual("PreservedTag", preservedTags[0].Name);
@@ -906,9 +906,12 @@ public sealed class FileOperationIndexCommitterTests
     public async Task DeleteToRecycleBin_Directory_MarksAllDescendantFilesOffline_AndPreservesUserTags()
     {
         using var env = TestEnvironment.Create();
-        var folder = env.CreateDirectory("DeleteFolder");
-        var file1 = env.CreateFile(Path.Combine("DeleteFolder", "f1.txt"), "f1 content");
-        var file2 = env.CreateFile(Path.Combine("DeleteFolder", "Sub", "f2.txt"), "f2 content");
+        var folderName = $"DeleteFolder_{Guid.NewGuid():N}";
+        var folder = env.CreateDirectory(folderName);
+        var file1Name = $"f1_{Guid.NewGuid():N}.txt";
+        var file2Name = $"f2_{Guid.NewGuid():N}.txt";
+        var file1 = env.CreateFile(Path.Combine(folderName, file1Name), "f1 content");
+        var file2 = env.CreateFile(Path.Combine(folderName, "Sub", file2Name), "f2 content");
 
         var root = env.Scanner.AddRoot(env.RootPath);
         await env.Scanner.ScanAsync(root.Id);
@@ -987,7 +990,8 @@ public sealed class FileOperationIndexCommitterTests
     public async Task DeleteToRecycleBin_IdempotentWithWatcherReconcile()
     {
         using var env = TestEnvironment.Create();
-        var sourcePath = env.CreateFile("watcher_delete.txt", "watcher delete content");
+        var fileName = $"watcher_delete_{Guid.NewGuid():N}.txt";
+        var sourcePath = env.CreateFile(fileName, "watcher delete content");
         var root = env.Scanner.AddRoot(env.RootPath);
         await env.Scanner.ScanAsync(root.Id);
 
@@ -999,8 +1003,10 @@ public sealed class FileOperationIndexCommitterTests
         tagService.AddTagToFiles(tag.Id, [fileId]);
 
         var committer = new FileOperationIndexCommitter(env.Scanner);
+        env.HasRecycledItems = true;
         var result = await committer.DeleteToRecycleBinAsync([sourcePath], [root.Path]);
         Assert.AreEqual(1, result.SucceededCount);
+        Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(fileName, env.RootPath), "Deleted file was not found in Recycle Bin.");
 
         // Simulate FileSystemWatcher sending deleted event -> ReconcilePathsAsync
         var reconcileResult = await env.Scanner.ReconcilePathsAsync(root.Id, [sourcePath]);
@@ -1080,6 +1086,129 @@ public sealed class FileOperationIndexCommitterTests
         Assert.IsTrue(File.Exists(sourcePath));
     }
 
+    [TestMethod]
+    public async Task RealCrossVolumeMove_ExecutesWhenMultipleDrivesAvailable_OrSkipsExplicitly()
+    {
+        var readyDrives = DriveInfo.GetDrives()
+            .Where(d => d.IsReady && (d.DriveType == DriveType.Fixed || d.DriveType == DriveType.Removable))
+            .ToList();
+
+        var writableDriveDirs = new List<(DriveInfo Drive, string Dir)>();
+        foreach (var drive in readyDrives)
+        {
+            var dir = TryGetWritableDirectoryForDrive(drive);
+            if (dir != null)
+            {
+                writableDriveDirs.Add((drive, dir));
+                if (writableDriveDirs.Count == 2)
+                {
+                    break;
+                }
+            }
+        }
+
+        if (writableDriveDirs.Count < 2)
+        {
+            foreach (var (_, dir) in writableDriveDirs)
+            {
+                try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); } catch { }
+            }
+            Assert.Inconclusive("Cross-volume operation test is not supported in a single-drive environment (fewer than 2 writable drives found).");
+            return;
+        }
+
+        var (sourceDrive, sourceDir) = writableDriveDirs[0];
+        var (targetDrive, targetDir) = writableDriveDirs[1];
+
+        TestContext.WriteLine($"Executing real cross-volume move test: Source Volume = '{sourceDrive.Name}', Target Volume = '{targetDrive.Name}'");
+
+        var dbPath = Path.Combine(sourceDir, "cross_volume.db");
+
+        try
+        {
+            var fileName = $"cross_doc_{Guid.NewGuid():N}.txt";
+            var sourceFile = Path.Combine(sourceDir, fileName);
+            await File.WriteAllTextAsync(sourceFile, "Cross-volume test content payload");
+
+            var scanner = new ManagedRootScanner(dbPath);
+            var srcRoot = scanner.AddRoot(sourceDir);
+            var dstRoot = scanner.AddRoot(targetDir);
+
+            var scanResult = await scanner.ScanAsync(srcRoot.Id);
+            Assert.AreEqual(1, scanResult.CommittedFiles);
+
+            var queryService = new FileQueryService(dbPath);
+            var initialFiles = await queryService.QueryAsync(new());
+            Assert.HasCount(1, initialFiles);
+            var initialFileId = initialFiles[0].Id;
+
+            var tagService = new TagService(dbPath);
+            var crossTag = tagService.CreateTag("CrossVolumeAcceptance");
+            tagService.AddTagToFiles(crossTag.Id, [initialFileId]);
+
+            var committer = new FileOperationIndexCommitter(scanner);
+            var moveResult = await committer.MoveAsync([sourceFile], targetDir, [srcRoot.Path, dstRoot.Path]);
+
+            Assert.AreEqual(1, moveResult.TotalCount);
+            Assert.AreEqual(1, moveResult.SucceededCount, $"Status: {moveResult.Items[0].Status}, Error: '{moveResult.Items[0].Error}'");
+
+            var expectedTargetPath = Path.Combine(targetDir, fileName);
+            Assert.IsFalse(File.Exists(sourceFile), "Source file should no longer exist after cross-volume move.");
+            Assert.IsTrue(File.Exists(expectedTargetPath), "Target file should exist on target drive after cross-volume move.");
+
+            var allFiles = await queryService.QueryAsync(new());
+            var onlineFiles = allFiles.Where(f => f.IsOnline).ToList();
+            var offlineFiles = allFiles.Where(f => !f.IsOnline).ToList();
+
+            Assert.HasCount(1, onlineFiles, "Exactly one online file should exist after move.");
+            Assert.AreEqual(expectedTargetPath, onlineFiles[0].Path);
+            var targetTags = tagService.ListTagsForFile(onlineFiles[0].Id);
+            Assert.AreEqual("CrossVolumeAcceptance", targetTags.Single().Name);
+
+            var autoTags = tagService.ListAutomaticTagsForFile(onlineFiles[0].Id);
+            CollectionAssert.Contains(autoTags.Select(t => t.Name).ToArray(), "类型/文档");
+
+            Assert.HasCount(1, offlineFiles, "Source file should be marked offline after cross-volume move.");
+            Assert.AreEqual(sourceFile, offlineFiles[0].Path);
+            var sourceTags = tagService.ListTagsForFile(offlineFiles[0].Id);
+            Assert.AreEqual("CrossVolumeAcceptance", sourceTags.Single().Name);
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(sourceDir)) Directory.Delete(sourceDir, recursive: true);
+            }
+            catch { }
+            try
+            {
+                if (Directory.Exists(targetDir)) Directory.Delete(targetDir, recursive: true);
+            }
+            catch { }
+        }
+    }
+
+    private static string? TryGetWritableDirectoryForDrive(DriveInfo drive)
+    {
+        try
+        {
+            if (string.Equals(drive.Name, "C:\\", StringComparison.OrdinalIgnoreCase))
+            {
+                var tempDir = Path.Combine(Path.GetTempPath(), $"GuraFile_DriveTest_{Guid.NewGuid():N}");
+                Directory.CreateDirectory(tempDir);
+                return tempDir;
+            }
+
+            var dir = Path.Combine(drive.RootDirectory.FullName, $"GuraFile_DriveTest_{Guid.NewGuid():N}");
+            Directory.CreateDirectory(dir);
+            return dir;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static async Task<string> GetIdentityKindAsync(string databasePath, long fileId)
     {
         using var connection = SqliteDatabase.Open(databasePath);
@@ -1095,6 +1224,7 @@ public sealed class FileOperationIndexCommitterTests
         public string RootPath { get; }
         public string DatabasePath { get; }
         public ManagedRootScanner Scanner { get; }
+        public bool HasRecycledItems { get; set; }
 
         private TestEnvironment(string rootPath, string databasePath, ManagedRootScanner scanner)
         {
@@ -1105,7 +1235,7 @@ public sealed class FileOperationIndexCommitterTests
 
         public static TestEnvironment Create()
         {
-            var root = Path.Combine(AppContext.BaseDirectory, $"GuraFile_CommitTests_{Guid.NewGuid():N}");
+            var root = Path.Combine(Path.GetTempPath(), $"GuraFile_CommitTests_{Guid.NewGuid():N}");
             Directory.CreateDirectory(root);
             var dbPath = Path.Combine(root, ".gurafile", "index.db");
             var scanner = new ManagedRootScanner(dbPath);
@@ -1131,6 +1261,11 @@ public sealed class FileOperationIndexCommitterTests
         {
             try
             {
+                if (HasRecycledItems)
+                {
+                    RecycleBinTestHelper.CleanupRecycleBinItemsForDirectory(RootPath);
+                }
+
                 if (Directory.Exists(RootPath))
                 {
                     Directory.Delete(RootPath, recursive: true);

@@ -5,6 +5,7 @@ using GuraFile.Storage;
 namespace GuraFile.Tests;
 
 [TestClass]
+[DoNotParallelize]
 [SupportedOSPlatform("windows")]
 public sealed class FileClipboardServiceTests
 {
@@ -84,7 +85,7 @@ public sealed class FileClipboardServiceTests
 
         public static TestEnvironment Create()
         {
-            var path = Path.Combine(AppContext.BaseDirectory, $"GuraFile_ClipTests_{Guid.NewGuid():N}");
+            var path = Path.Combine(Path.GetTempPath(), $"GuraFile_ClipTests_{Guid.NewGuid():N}");
             Directory.CreateDirectory(path);
             return new(path);
         }
