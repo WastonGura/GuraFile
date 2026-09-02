@@ -1235,7 +1235,7 @@ public sealed class FileOperationIndexCommitterTests
 
         public static TestEnvironment Create()
         {
-            var root = Path.Combine(AppContext.BaseDirectory, $"GuraFile_CommitTests_{Guid.NewGuid():N}");
+            var root = Path.Combine(Path.GetTempPath(), $"GuraFile_CommitTests_{Guid.NewGuid():N}");
             Directory.CreateDirectory(root);
             var dbPath = Path.Combine(root, ".gurafile", "index.db");
             var scanner = new ManagedRootScanner(dbPath);

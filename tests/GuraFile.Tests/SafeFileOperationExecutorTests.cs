@@ -591,7 +591,7 @@ public sealed class SafeFileOperationExecutorTests
 
         public static TestEnvironment Create()
         {
-            var path = Path.Combine(AppContext.BaseDirectory, $"GuraFile_OpTests_{Guid.NewGuid():N}");
+            var path = Path.Combine(Path.GetTempPath(), $"GuraFile_OpTests_{Guid.NewGuid():N}");
             Directory.CreateDirectory(path);
             return new(path);
         }
