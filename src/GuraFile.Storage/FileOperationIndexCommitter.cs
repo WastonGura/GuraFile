@@ -643,9 +643,16 @@ public sealed class FileOperationIndexCommitter
         bool isMove,
         SourceSnapshot snapshot)
     {
-        // For directory operations, reconcile the target directory scope and mark old scope missing if moved
-        Scanner.ReconcilePathsAsync(targetRoot.Id, [normalizedTarget]).GetAwaiter().GetResult();
+        // 1. Reconcile the target directory scope without deadlocking (using ReconcilePathsDirect)
+        Scanner.ReconcilePathsDirect(targetRoot.Id, [normalizedTarget]);
 
+        // 2. If directory copy, inherit user tags for files in target directory from source directory
+        if (!isMove)
+        {
+            InheritDirectoryUserTags(connection, normalizedSource, normalizedTarget);
+        }
+
+        // 3. If move and source directory no longer exists on disk, mark old scope as offline
         if (isMove && !_directoryExists(normalizedSource))
         {
             var sourceRoot = FindMatchingRoot(LoadRoots(connection), normalizedSource);
@@ -677,6 +684,109 @@ public sealed class FileOperationIndexCommitter
             normalizedSource,
             normalizedTarget,
             FileOperationItemStatus.Completed);
+    }
+
+    private static void InheritDirectoryUserTags(
+        SqliteConnection connection,
+        string sourceDir,
+        string targetDir)
+    {
+        var targetPrefix = Path.EndsInDirectorySeparator(targetDir)
+            ? targetDir
+            : targetDir + Path.DirectorySeparatorChar;
+
+        var targetFiles = new List<(long Id, string Path)>();
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText =
+                """
+                SELECT id, normalized_path
+                FROM files
+                WHERE (normalized_path = $targetDir COLLATE NOCASE OR substr(normalized_path, 1, length($prefix)) = $prefix COLLATE NOCASE)
+                  AND is_online = 1;
+                """;
+            cmd.Parameters.AddWithValue("$targetDir", targetDir);
+            cmd.Parameters.AddWithValue("$prefix", targetPrefix);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                targetFiles.Add((reader.GetInt64(0), reader.GetString(1)));
+            }
+        }
+
+        if (targetFiles.Count == 0)
+        {
+            return;
+        }
+
+        using var transaction = connection.BeginTransaction();
+
+        foreach (var (targetFileId, targetFilePath) in targetFiles)
+        {
+            var relativePath = Path.GetRelativePath(targetDir, targetFilePath);
+            var expectedSourcePath = SafeFileOperationExecutor.Normalize(Path.Combine(sourceDir, relativePath));
+
+            var sourceUserTags = new List<string>();
+            using (var sourceCmd = connection.CreateCommand())
+            {
+                sourceCmd.Transaction = transaction;
+                sourceCmd.CommandText =
+                    """
+                    SELECT t.name
+                    FROM tags t
+                    JOIN file_tags ft ON ft.tag_id = t.id
+                    JOIN files f ON f.id = ft.file_id
+                    WHERE f.normalized_path = $srcPath COLLATE NOCASE
+                      AND ft.source = 'user' AND t.source = 'user'
+                    ORDER BY t.name COLLATE NOCASE;
+                    """;
+                sourceCmd.Parameters.AddWithValue("$srcPath", expectedSourcePath);
+                using var reader = sourceCmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    sourceUserTags.Add(reader.GetString(0));
+                }
+            }
+
+            if (sourceUserTags.Count > 0)
+            {
+                using var clearCmd = connection.CreateCommand();
+                clearCmd.Transaction = transaction;
+                clearCmd.CommandText = "DELETE FROM file_tags WHERE file_id = $fileId AND source = 'user';";
+                clearCmd.Parameters.AddWithValue("$fileId", targetFileId);
+                clearCmd.ExecuteNonQuery();
+
+                foreach (var userTagName in sourceUserTags)
+                {
+                    var (displayName, normalizedTagName) = TagService.NormalizeName(userTagName);
+                    long tagId;
+                    using (var tagCmd = connection.CreateCommand())
+                    {
+                        tagCmd.Transaction = transaction;
+                        tagCmd.CommandText =
+                            """
+                            INSERT INTO tags (name, normalized_name, source)
+                            VALUES ($name, $normalizedName, 'user')
+                            ON CONFLICT(normalized_name, source) DO UPDATE SET name = excluded.name
+                            RETURNING id;
+                            """;
+                        tagCmd.Parameters.AddWithValue("$name", displayName);
+                        tagCmd.Parameters.AddWithValue("$normalizedName", normalizedTagName);
+                        tagId = (long)tagCmd.ExecuteScalar()!;
+                    }
+
+                    using var relCmd = connection.CreateCommand();
+                    relCmd.Transaction = transaction;
+                    relCmd.CommandText =
+                        "INSERT INTO file_tags (file_id, tag_id, source) VALUES ($fileId, $tagId, 'user') ON CONFLICT DO NOTHING;";
+                    relCmd.Parameters.AddWithValue("$fileId", targetFileId);
+                    relCmd.Parameters.AddWithValue("$tagId", tagId);
+                    relCmd.ExecuteNonQuery();
+                }
+            }
+        }
+
+        transaction.Commit();
     }
 
     private Dictionary<string, SourceSnapshot> TakeSourceSnapshots(IReadOnlyList<string> sourcePaths)

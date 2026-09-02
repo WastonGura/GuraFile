@@ -737,6 +737,129 @@ public sealed class FileOperationIndexCommitterTests
         Assert.AreEqual("SafeSourceTag", tags.Single().Name);
     }
 
+    [TestMethod]
+    public async Task DirectoryMove_PreservesChildFilesAndTags_AndMarksOldScopeMissing()
+    {
+        using var env = TestEnvironment.Create();
+        var folderA = env.CreateDirectory("FolderA");
+        var subFolder = env.CreateDirectory(Path.Combine("FolderA", "SubFolder"));
+        var file1 = env.CreateFile(Path.Combine("FolderA", "file1.txt"), "file 1 data");
+        var file2 = env.CreateFile(Path.Combine("FolderA", "SubFolder", "file2.md"), "# file 2 data");
+        var destDir = env.CreateDirectory("MoveDest");
+
+        var root = env.Scanner.AddRoot(env.RootPath);
+        await env.Scanner.ScanAsync(root.Id);
+
+        var tagService = new TagService(env.DatabasePath);
+        var tagA = tagService.CreateTag("TagA");
+        var tagB = tagService.CreateTag("TagB");
+
+        var queryService = new FileQueryService(env.DatabasePath);
+        var initFiles = await queryService.QueryAsync(new());
+        tagService.AddTagToFiles(tagA.Id, [initFiles.Single(f => f.Path == file1).Id]);
+        tagService.AddTagToFiles(tagB.Id, [initFiles.Single(f => f.Path == file2).Id]);
+
+        var committer = new FileOperationIndexCommitter(env.Scanner);
+        var moveResult = await committer.MoveAsync([folderA], destDir, [root.Path]);
+
+        Assert.AreEqual(1, moveResult.SucceededCount);
+        Assert.AreEqual(0, moveResult.FailedCount);
+
+        var allFiles = await queryService.QueryAsync(new());
+        var onlineFiles = allFiles.Where(f => f.IsOnline).ToList();
+        Assert.HasCount(2, onlineFiles);
+
+        var expectedTargetFile1 = Path.Combine(destDir, "FolderA", "file1.txt");
+        var expectedTargetFile2 = Path.Combine(destDir, "FolderA", "SubFolder", "file2.md");
+
+        var targetDb1 = onlineFiles.Single(f => f.Path == expectedTargetFile1);
+        var targetDb2 = onlineFiles.Single(f => f.Path == expectedTargetFile2);
+
+        var userTags1 = tagService.ListTagsForFile(targetDb1.Id);
+        var userTags2 = tagService.ListTagsForFile(targetDb2.Id);
+
+        Assert.AreEqual("TagA", userTags1.Single().Name);
+        Assert.AreEqual("TagB", userTags2.Single().Name);
+    }
+
+    [TestMethod]
+    public async Task DirectoryCopy_CreatesNewIndexRecords_InheritsChildUserTags()
+    {
+        using var env = TestEnvironment.Create();
+        var sourceFolder = env.CreateDirectory("SourceFolder");
+        var sourceFile = env.CreateFile(Path.Combine("SourceFolder", "doc.txt"), "doc content");
+        var destDir = env.CreateDirectory("CopyDest");
+
+        var root = env.Scanner.AddRoot(env.RootPath);
+        await env.Scanner.ScanAsync(root.Id);
+
+        var tagService = new TagService(env.DatabasePath);
+        var docTag = tagService.CreateTag("UserDocTag");
+
+        var queryService = new FileQueryService(env.DatabasePath);
+        var initFiles = await queryService.QueryAsync(new());
+        tagService.AddTagToFiles(docTag.Id, [initFiles.Single(f => f.Path == sourceFile).Id]);
+
+        var committer = new FileOperationIndexCommitter(env.Scanner);
+        var copyResult = await committer.CopyAsync([sourceFolder], destDir, [root.Path]);
+
+        Assert.AreEqual(1, copyResult.SucceededCount);
+        Assert.AreEqual(0, copyResult.FailedCount);
+
+        var expectedCopiedFile = Path.Combine(destDir, "SourceFolder", "doc.txt");
+        Assert.IsTrue(File.Exists(sourceFile));
+        Assert.IsTrue(File.Exists(expectedCopiedFile));
+
+        var allFiles = await queryService.QueryAsync(new());
+        var onlineFiles = allFiles.Where(f => f.IsOnline).ToList();
+        Assert.HasCount(2, onlineFiles);
+
+        var srcDb = onlineFiles.Single(f => f.Path == sourceFile);
+        var copyDb = onlineFiles.Single(f => f.Path == expectedCopiedFile);
+        Assert.AreNotEqual(srcDb.Id, copyDb.Id);
+
+        var srcTags = tagService.ListTagsForFile(srcDb.Id);
+        var copyTags = tagService.ListTagsForFile(copyDb.Id);
+
+        Assert.AreEqual("UserDocTag", srcTags.Single().Name);
+        Assert.AreEqual("UserDocTag", copyTags.Single().Name);
+    }
+
+    [TestMethod]
+    public async Task DirectoryRename_PreservesChildFilesAndTags()
+    {
+        using var env = TestEnvironment.Create();
+        var oldDir = env.CreateDirectory("OldDir");
+        var fileInOldDir = env.CreateFile(Path.Combine("OldDir", "sample.txt"), "sample data");
+
+        var root = env.Scanner.AddRoot(env.RootPath);
+        await env.Scanner.ScanAsync(root.Id);
+
+        var tagService = new TagService(env.DatabasePath);
+        var tag = tagService.CreateTag("SampleTag");
+
+        var queryService = new FileQueryService(env.DatabasePath);
+        var initFiles = await queryService.QueryAsync(new());
+        tagService.AddTagToFiles(tag.Id, [initFiles.Single(f => f.Path == fileInOldDir).Id]);
+
+        var committer = new FileOperationIndexCommitter(env.Scanner);
+        var renameResult = await committer.RenameAsync(oldDir, "NewDir", [root.Path]);
+
+        Assert.AreEqual(FileOperationItemStatus.Completed, renameResult.Status, renameResult.Error);
+
+        var expectedRenamedFile = Path.Combine(env.RootPath, "NewDir", "sample.txt");
+        Assert.IsTrue(File.Exists(expectedRenamedFile));
+        Assert.IsFalse(File.Exists(fileInOldDir));
+
+        var allFiles = await queryService.QueryAsync(new());
+        var onlineFiles = allFiles.Where(f => f.IsOnline).ToList();
+        Assert.HasCount(1, onlineFiles);
+        Assert.AreEqual(expectedRenamedFile, onlineFiles[0].Path);
+
+        var tags = tagService.ListTagsForFile(onlineFiles[0].Id);
+        Assert.AreEqual("SampleTag", tags.Single().Name);
+    }
+
     private static async Task<string> GetIdentityKindAsync(string databasePath, long fileId)
     {
         using var connection = SqliteDatabase.Open(databasePath);
