@@ -860,6 +860,167 @@ public sealed class FileOperationIndexCommitterTests
         Assert.AreEqual("SampleTag", tags.Single().Name);
     }
 
+    [TestMethod]
+    public async Task DeleteToRecycleBin_SingleFile_MarksFileOffline_AndPreservesUserTags()
+    {
+        using var env = TestEnvironment.Create();
+        var sourcePath = env.CreateFile("delete_test.txt", "content for delete test");
+        var root = env.Scanner.AddRoot(env.RootPath);
+        await env.Scanner.ScanAsync(root.Id);
+
+        var queryService = new FileQueryService(env.DatabasePath);
+        var initialFiles = await queryService.QueryAsync(new());
+        Assert.HasCount(1, initialFiles);
+        var fileId = initialFiles[0].Id;
+
+        var tagService = new TagService(env.DatabasePath);
+        var userTag = tagService.CreateTag("PreservedTag");
+        tagService.AddTagToFiles(userTag.Id, [fileId]);
+
+        var committer = new FileOperationIndexCommitter(env.Scanner);
+        var deleteResult = await committer.DeleteToRecycleBinAsync([sourcePath], [root.Path]);
+
+        Assert.AreEqual(1, deleteResult.TotalCount);
+        Assert.AreEqual(1, deleteResult.SucceededCount);
+        Assert.IsFalse(File.Exists(sourcePath));
+
+        // In query service (default query returns online + offline? FileQueryService returns both or online only?)
+        // Let's check: FileQueryService queries files table.
+        // Let's verify the database record:
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT is_online FROM files WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$id", fileId);
+            var isOnline = (long)cmd.ExecuteScalar()!;
+            Assert.AreEqual(0, isOnline);
+        }
+
+        // Verify user tags are completely preserved on the offline record
+        var preservedTags = tagService.ListTagsForFile(fileId);
+        Assert.HasCount(1, preservedTags);
+        Assert.AreEqual("PreservedTag", preservedTags[0].Name);
+    }
+
+    [TestMethod]
+    public async Task DeleteToRecycleBin_Directory_MarksAllDescendantFilesOffline_AndPreservesUserTags()
+    {
+        using var env = TestEnvironment.Create();
+        var folder = env.CreateDirectory("DeleteFolder");
+        var file1 = env.CreateFile(Path.Combine("DeleteFolder", "f1.txt"), "f1 content");
+        var file2 = env.CreateFile(Path.Combine("DeleteFolder", "Sub", "f2.txt"), "f2 content");
+
+        var root = env.Scanner.AddRoot(env.RootPath);
+        await env.Scanner.ScanAsync(root.Id);
+
+        var queryService = new FileQueryService(env.DatabasePath);
+        var initFiles = await queryService.QueryAsync(new());
+        Assert.HasCount(2, initFiles);
+
+        var tagService = new TagService(env.DatabasePath);
+        var tag1 = tagService.CreateTag("TagF1");
+        var tag2 = tagService.CreateTag("TagF2");
+        tagService.AddTagToFiles(tag1.Id, [initFiles.Single(f => f.Path == file1).Id]);
+        tagService.AddTagToFiles(tag2.Id, [initFiles.Single(f => f.Path == file2).Id]);
+
+        var committer = new FileOperationIndexCommitter(env.Scanner);
+        var deleteResult = await committer.DeleteToRecycleBinAsync([folder], [root.Path]);
+
+        Assert.AreEqual(1, deleteResult.SucceededCount);
+        Assert.IsFalse(Directory.Exists(folder));
+
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM files WHERE root_id = $rootId AND is_online = 1;";
+            cmd.Parameters.AddWithValue("$rootId", root.Id);
+            var onlineCount = (long)cmd.ExecuteScalar()!;
+            Assert.AreEqual(0, onlineCount);
+        }
+
+        var f1DbId = initFiles.Single(f => f.Path == file1).Id;
+        var f2DbId = initFiles.Single(f => f.Path == file2).Id;
+        Assert.AreEqual("TagF1", tagService.ListTagsForFile(f1DbId).Single().Name);
+        Assert.AreEqual("TagF2", tagService.ListTagsForFile(f2DbId).Single().Name);
+    }
+
+    [TestMethod]
+    public async Task CommitDeleteBatchAsync_WhenSourceFileStillExistsOnDisk_DoesNotMarkOffline()
+    {
+        using var env = TestEnvironment.Create();
+        var sourcePath = env.CreateFile("still_exists.txt", "undeleted content");
+        var root = env.Scanner.AddRoot(env.RootPath);
+        await env.Scanner.ScanAsync(root.Id);
+
+        var committer = new FileOperationIndexCommitter(
+            env.DatabasePath,
+            env.Scanner,
+            executor: null,
+            readIdentity: path => new FileIdentity("VOL1", "ID1", true, null),
+            classify: new FileTypeClassifier().Classify,
+            getAttributes: File.GetAttributes,
+            fileExists: _ => true, // File STILL exists on disk
+            directoryExists: Directory.Exists);
+
+        var simulatedItem = new FileOperationItemResult(
+            sourcePath,
+            null,
+            FileOperationItemStatus.Completed);
+
+        var result = await committer.CommitDeleteBatchAsync([simulatedItem], [root.Path]);
+
+        Assert.AreEqual(0, result.SucceededCount);
+        Assert.AreEqual(1, result.FailedCount);
+        StringAssert.Contains(result.Items[0].Error, "仍存在于磁盘上");
+
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT is_online FROM files WHERE normalized_path = $path COLLATE NOCASE;";
+            cmd.Parameters.AddWithValue("$path", sourcePath);
+            var isOnline = (long)cmd.ExecuteScalar()!;
+            Assert.AreEqual(1, isOnline);
+        }
+    }
+
+    [TestMethod]
+    public async Task DeleteToRecycleBin_IdempotentWithWatcherReconcile()
+    {
+        using var env = TestEnvironment.Create();
+        var sourcePath = env.CreateFile("watcher_delete.txt", "watcher delete content");
+        var root = env.Scanner.AddRoot(env.RootPath);
+        await env.Scanner.ScanAsync(root.Id);
+
+        var tagService = new TagService(env.DatabasePath);
+        var tag = tagService.CreateTag("WatcherPreservedTag");
+        var queryService = new FileQueryService(env.DatabasePath);
+        var initFiles = await queryService.QueryAsync(new());
+        var fileId = initFiles[0].Id;
+        tagService.AddTagToFiles(tag.Id, [fileId]);
+
+        var committer = new FileOperationIndexCommitter(env.Scanner);
+        var result = await committer.DeleteToRecycleBinAsync([sourcePath], [root.Path]);
+        Assert.AreEqual(1, result.SucceededCount);
+
+        // Simulate FileSystemWatcher sending deleted event -> ReconcilePathsAsync
+        var reconcileResult = await env.Scanner.ReconcilePathsAsync(root.Id, [sourcePath]);
+        Assert.IsFalse(reconcileResult.Canceled);
+
+        // Verify state is completely consistent and tag remains intact
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT is_online FROM files WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$id", fileId);
+            var isOnline = (long)cmd.ExecuteScalar()!;
+            Assert.AreEqual(0, isOnline);
+        }
+
+        var tags = tagService.ListTagsForFile(fileId);
+        Assert.HasCount(1, tags);
+        Assert.AreEqual("WatcherPreservedTag", tags[0].Name);
+    }
+
     private static async Task<string> GetIdentityKindAsync(string databasePath, long fileId)
     {
         using var connection = SqliteDatabase.Open(databasePath);

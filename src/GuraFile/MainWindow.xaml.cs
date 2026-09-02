@@ -500,6 +500,51 @@ public sealed partial class MainWindow : Window
         });
     }
 
+    private async void DeleteFileButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isOperating)
+        {
+            return;
+        }
+
+        var selected = FilesList.SelectedItems.OfType<IndexedFile>().ToList();
+        if (selected.Count == 0)
+        {
+            return;
+        }
+
+        var representativeName = selected[0].Name;
+        var message = selected.Count == 1
+            ? $"文件：“{representativeName}”\n已删除的项目可从 Windows 回收站恢复。"
+            : $"已选择 {selected.Count} 个文件（例如：“{representativeName}”等）。\n已删除的项目可从 Windows 回收站恢复。";
+
+        var dialog = new ContentDialog
+        {
+            Title = selected.Count == 1 ? $"将“{representativeName}”移入回收站？" : $"将选中的 {selected.Count} 个文件移入回收站？",
+            Content = message,
+            PrimaryButtonText = "删除",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = (Content as FrameworkElement)?.XamlRoot
+        };
+
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        var sourcePaths = selected.Select(f => f.Path).ToList();
+
+        await ExecuteFileOperationBatchAsync("删除", async (progress, cancellationToken) =>
+        {
+            return await _fileOperations.DeleteToRecycleBinAsync(
+                sourcePaths,
+                WindowNative.GetWindowHandle(this),
+                progress,
+                cancellationToken);
+        });
+    }
+
     private void CancelFileOperationButton_Click(object sender, RoutedEventArgs e) =>
         _fileOpCancellation?.Cancel();
 
@@ -1082,6 +1127,7 @@ public sealed partial class MainWindow : Window
         PasteToFileButton.IsEnabled = _fileOperations.CanPasteFromClipboard() && !_isOperating;
         MoveToFileButton.IsEnabled = selected.Count > 0 && !_isOperating;
         RenameFileButton.IsEnabled = hasSingleFile && selected[0].IsOnline && !_isOperating;
+        DeleteFileButton.IsEnabled = selected.Count > 0 && !_isOperating;
     }
 
     private void UpdateSortLabels()

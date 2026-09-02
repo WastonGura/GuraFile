@@ -257,6 +257,176 @@ public sealed class FileOperationIndexCommitter
             cancellationToken);
     }
 
+    public async Task<FileOperationCommitBatchResult> DeleteToRecycleBinAsync(
+        IReadOnlyList<string> sourcePaths,
+        IReadOnlyCollection<string>? onlineRootPaths = null,
+        IntPtr ownerWindow = default,
+        Action<FileOperationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(sourcePaths);
+
+        if (_executor is null)
+        {
+            throw new InvalidOperationException("SafeFileOperationExecutor 未配置。");
+        }
+
+        var effectiveRoots = ResolveOnlineRoots(onlineRootPaths);
+
+        var batchResult = await _executor.DeleteToRecycleBinAsync(
+            sourcePaths,
+            effectiveRoots,
+            ownerWindow,
+            progress,
+            cancellationToken);
+
+        return await CommitDeleteBatchAsync(
+            batchResult.Items,
+            effectiveRoots,
+            cancellationToken);
+    }
+
+    public Task<FileOperationCommitBatchResult> DeleteToRecycleBinAsync(
+        IReadOnlyList<string> sourcePaths,
+        IReadOnlyCollection<ManagedRoot> onlineRoots,
+        IntPtr ownerWindow = default,
+        Action<FileOperationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(onlineRoots);
+        return DeleteToRecycleBinAsync(
+            sourcePaths,
+            onlineRoots.Where(r => r.Status == ManagedRootStatus.Online).Select(r => r.Path).ToArray(),
+            ownerWindow,
+            progress,
+            cancellationToken);
+    }
+
+    internal Task<FileOperationCommitBatchResult> CommitDeleteBatchAsync(
+        IReadOnlyList<FileOperationItemResult> items,
+        IReadOnlyCollection<string> onlineRootPaths,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        ArgumentNullException.ThrowIfNull(onlineRootPaths);
+
+        return Scanner.ExecuteWriteAsync(() =>
+        {
+            using var connection = SqliteDatabase.Open(DatabasePath);
+            var roots = LoadRoots(connection);
+            var results = new List<FileOperationCommitItemResult>(items.Count);
+
+            foreach (var item in items)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    results.Add(new FileOperationCommitItemResult(
+                        item.SourcePath,
+                        null,
+                        FileOperationItemStatus.Canceled,
+                        "操作已被取消。",
+                        IsCanceled: true));
+                    continue;
+                }
+
+                if (!item.Succeeded)
+                {
+                    results.Add(FileOperationCommitItemResult.FromItemResult(item));
+                    continue;
+                }
+
+                string normalizedSource;
+                try
+                {
+                    normalizedSource = SafeFileOperationExecutor.Normalize(item.SourcePath);
+                }
+                catch (Exception ex)
+                {
+                    results.Add(new FileOperationCommitItemResult(
+                        item.SourcePath,
+                        null,
+                        FileOperationItemStatus.Failed,
+                        $"路径解析错误：{ex.Message}"));
+                    continue;
+                }
+
+                var sourceStillExists = _fileExists(normalizedSource) || _directoryExists(normalizedSource);
+                if (sourceStillExists)
+                {
+                    results.Add(new FileOperationCommitItemResult(
+                        normalizedSource,
+                        null,
+                        FileOperationItemStatus.Failed,
+                        $"文件仍存在于磁盘上，未能移入回收站：{normalizedSource}"));
+                    continue;
+                }
+
+                var matchingRoot = FindMatchingRoot(roots, normalizedSource);
+                if (matchingRoot is null)
+                {
+                    results.Add(new FileOperationCommitItemResult(
+                        normalizedSource,
+                        null,
+                        FileOperationItemStatus.Failed,
+                        $"源路径“{normalizedSource}”不在任何在线管理根目录范围内。"));
+                    continue;
+                }
+
+                var commitResult = CommitSingleDeleteItem(connection, matchingRoot, normalizedSource);
+                results.Add(commitResult);
+            }
+
+            return new FileOperationCommitBatchResult(
+                results,
+                results.Any(r => r.IsCanceled) || cancellationToken.IsCancellationRequested);
+        }, cancellationToken);
+    }
+
+    private static FileOperationCommitItemResult CommitSingleDeleteItem(
+        SqliteConnection connection,
+        ManagedRoot root,
+        string normalizedSource)
+    {
+        try
+        {
+            using var transaction = connection.BeginTransaction();
+            var prefix = Path.EndsInDirectorySeparator(normalizedSource)
+                ? normalizedSource
+                : normalizedSource + Path.DirectorySeparatorChar;
+
+            using (var markMissing = connection.CreateCommand())
+            {
+                markMissing.Transaction = transaction;
+                markMissing.CommandText =
+                    """
+                    UPDATE files SET is_online = 0
+                    WHERE root_id = $rootId
+                      AND is_online = 1
+                      AND (normalized_path = $path COLLATE NOCASE OR substr(normalized_path, 1, length($prefix)) = $prefix COLLATE NOCASE);
+                    """;
+                markMissing.Parameters.AddWithValue("$rootId", root.Id);
+                markMissing.Parameters.AddWithValue("$path", normalizedSource);
+                markMissing.Parameters.AddWithValue("$prefix", prefix);
+                markMissing.ExecuteNonQuery();
+            }
+
+            transaction.Commit();
+
+            return new FileOperationCommitItemResult(
+                normalizedSource,
+                null,
+                FileOperationItemStatus.Completed);
+        }
+        catch (Exception ex)
+        {
+            return new FileOperationCommitItemResult(
+                normalizedSource,
+                null,
+                FileOperationItemStatus.Failed,
+                $"提交删除索引时发生错误：{ex.Message}");
+        }
+    }
+
     internal Task<FileOperationCommitBatchResult> CommitBatchAsync(
         IReadOnlyList<FileOperationItemResult> items,
         bool isMove,

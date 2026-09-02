@@ -434,6 +434,125 @@ public sealed class SafeFileOperationExecutorTests
         Assert.AreEqual("target data", File.ReadAllText(existingTarget));
     }
 
+    [TestMethod]
+    public async Task DeleteToRecycleBin_SingleFile_SuccessfullyDeletesToRecycleBin()
+    {
+        using var temp = TestEnvironment.Create();
+        var executor = new SafeFileOperationExecutor();
+        var sourceFile = temp.CreateFile("delete_me.txt", "to be recycled");
+
+        var result = await executor.DeleteToRecycleBinAsync([sourceFile], [temp.RootPath]);
+
+        Assert.AreEqual(1, result.TotalCount);
+        Assert.AreEqual(1, result.SucceededCount, $"Status: {result.Items[0].Status}, Error: '{result.Items[0].Error}'");
+        Assert.AreEqual(0, result.FailedCount);
+        Assert.IsFalse(result.IsCanceled);
+
+        var item = result.Items[0];
+        Assert.AreEqual(FileOperationItemStatus.Completed, item.Status);
+        Assert.IsFalse(File.Exists(sourceFile));
+    }
+
+    [TestMethod]
+    public async Task DeleteToRecycleBin_MultipleFiles_SuccessfullyDeletesAll()
+    {
+        using var temp = TestEnvironment.Create();
+        var executor = new SafeFileOperationExecutor();
+        var file1 = temp.CreateFile("del1.txt", "content 1");
+        var file2 = temp.CreateFile("del2.txt", "content 2");
+        var file3 = temp.CreateFile("del3.txt", "content 3");
+
+        var result = await executor.DeleteToRecycleBinAsync([file1, file2, file3], [temp.RootPath]);
+
+        Assert.AreEqual(3, result.TotalCount);
+        Assert.AreEqual(3, result.SucceededCount);
+        Assert.AreEqual(0, result.FailedCount);
+
+        Assert.IsFalse(File.Exists(file1));
+        Assert.IsFalse(File.Exists(file2));
+        Assert.IsFalse(File.Exists(file3));
+    }
+
+    [TestMethod]
+    public async Task DeleteToRecycleBin_Directory_SuccessfullyDeletesDirectoryAndContents()
+    {
+        using var temp = TestEnvironment.Create();
+        var executor = new SafeFileOperationExecutor();
+        var dir = temp.CreateDirectory("DeleteDir");
+        var childFile = temp.CreateFile(Path.Combine("DeleteDir", "child.txt"), "child data");
+
+        var result = await executor.DeleteToRecycleBinAsync([dir], [temp.RootPath]);
+
+        Assert.AreEqual(1, result.TotalCount);
+        Assert.AreEqual(1, result.SucceededCount);
+        Assert.IsFalse(Directory.Exists(dir));
+        Assert.IsFalse(File.Exists(childFile));
+    }
+
+    [TestMethod]
+    public async Task DeleteToRecycleBin_NonExistentFile_FailsWithDescriptiveError()
+    {
+        using var temp = TestEnvironment.Create();
+        var executor = new SafeFileOperationExecutor();
+        var missingFile = Path.Combine(temp.RootPath, "non_existent.txt");
+
+        var result = await executor.DeleteToRecycleBinAsync([missingFile], [temp.RootPath]);
+
+        Assert.AreEqual(1, result.TotalCount);
+        Assert.AreEqual(0, result.SucceededCount);
+        Assert.AreEqual(1, result.FailedCount);
+        Assert.AreEqual(FileOperationItemStatus.Failed, result.Items[0].Status);
+        StringAssert.Contains(result.Items[0].Error, "不存在或无法访问");
+    }
+
+    [TestMethod]
+    public async Task DeleteToRecycleBin_SourceOutsideManagedRoots_Fails()
+    {
+        using var temp = TestEnvironment.Create();
+        var executor = new SafeFileOperationExecutor();
+        var outsideDir = Path.Combine(Path.GetTempPath(), $"GuraFile_Outside_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(outsideDir);
+        try
+        {
+            var outsideFile = Path.Combine(outsideDir, "outside.txt");
+            File.WriteAllText(outsideFile, "outside data");
+
+            var result = await executor.DeleteToRecycleBinAsync([outsideFile], [temp.RootPath]);
+
+            Assert.AreEqual(1, result.TotalCount);
+            Assert.AreEqual(0, result.SucceededCount);
+            Assert.AreEqual(1, result.FailedCount);
+            StringAssert.Contains(result.Items[0].Error, "不在任何在线管理根目录范围内");
+            Assert.IsTrue(File.Exists(outsideFile));
+        }
+        finally
+        {
+            if (Directory.Exists(outsideDir))
+            {
+                Directory.Delete(outsideDir, recursive: true);
+            }
+        }
+    }
+
+    [TestMethod]
+    public async Task DeleteToRecycleBin_ProgressCallback_ReceivesUpdates()
+    {
+        using var temp = TestEnvironment.Create();
+        var executor = new SafeFileOperationExecutor();
+        var file1 = temp.CreateFile("prog1.txt", "1");
+        var file2 = temp.CreateFile("prog2.txt", "2");
+
+        var progressUpdates = new List<FileOperationProgress>();
+        var result = await executor.DeleteToRecycleBinAsync(
+            [file1, file2],
+            [temp.RootPath],
+            progress: p => progressUpdates.Add(p));
+
+        Assert.AreEqual(2, result.TotalCount);
+        Assert.AreEqual(2, result.SucceededCount);
+        Assert.IsGreaterThanOrEqualTo(progressUpdates.Count, 2);
+    }
+
     private sealed class TestEnvironment : IDisposable
     {
         public string RootPath { get; }
