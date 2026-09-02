@@ -14,6 +14,8 @@ public partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         _window = new MainWindow();
+        _window.Title = "GuraFile";
+        _window.AppWindow.Title = "GuraFile";
         _window.Activate();
     }
 }
