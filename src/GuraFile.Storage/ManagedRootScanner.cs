@@ -221,6 +221,31 @@ public sealed class ManagedRootScanner
             cancellationToken);
     }
 
+    internal ScanResult ReconcilePathsDirect(
+        long rootId,
+        IReadOnlyCollection<string> paths,
+        int batchSize = 100,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentOutOfRangeException.ThrowIfLessThan(batchSize, 1);
+        return ReconcilePaths(rootId, paths, batchSize, cancellationToken);
+    }
+
+    internal Task<T> ExecuteWriteAsync<T>(Func<T> action, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            _writeGate.Wait(cancellationToken);
+            try
+            {
+                return action();
+            }
+            finally
+            {
+                _writeGate.Release();
+            }
+        }, cancellationToken);
+
     private Task<ScanResult> RunSerialized(Func<ScanResult> action, CancellationToken cancellationToken) =>
         Task.Run(() =>
         {
