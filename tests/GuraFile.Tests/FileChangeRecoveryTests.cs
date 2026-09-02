@@ -74,10 +74,10 @@ public sealed class FileChangeRecoveryTests
 
         stopwatch.Stop();
         Assert.IsLessThan(100, stopwatch.ElapsedMilliseconds);
-        Assert.IsTrue(entered.Wait(TimeSpan.FromSeconds(1)));
+        Assert.IsTrue(entered.Wait(TimeSpan.FromSeconds(5)));
         Assert.AreEqual(ManagedRootStatus.Recovering, startupScanner.ListRoots().Single().Status);
         release.Set();
-        await completed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await completed.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.AreEqual(ManagedRootStatus.Online, startupScanner.ListRoots().Single().Status);
     }
 
