@@ -223,14 +223,16 @@ public sealed partial class MainWindow : Window
         FileActionStatusText.Text = "";
         if (selected.Count != 1)
         {
-            DetailsText.Text = selected.Count == 0 ? "未选择文件" : $"已选择 {selected.Count} 个文件";
+            var model = FileDetailsPresenter.Create(selected, [], []);
+            UpdateDetailsView(model);
             return;
         }
 
         var file = selected[0];
         var cancellation = new CancellationTokenSource();
         _detailCancellation = cancellation;
-        DetailsText.Text = Describe(file, [], []);
+        var initialModel = FileDetailsPresenter.Create([file], [], []);
+        UpdateDetailsView(initialModel);
         try
         {
             var tags = await Task.Run(
@@ -239,7 +241,8 @@ public sealed partial class MainWindow : Window
             cancellation.Token.ThrowIfCancellationRequested();
             if (ReferenceEquals(_detailCancellation, cancellation))
             {
-                DetailsText.Text = Describe(file, tags.Item1, tags.Item2);
+                var loadedModel = FileDetailsPresenter.Create([file], tags.Item1, tags.Item2);
+                UpdateDetailsView(loadedModel);
             }
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
@@ -249,7 +252,7 @@ public sealed partial class MainWindow : Window
         {
             if (ReferenceEquals(_detailCancellation, cancellation))
             {
-                DetailsText.Text = $"{Describe(file, [], [])}\n标签读取失败：{exception.Message}";
+                FileActionStatusText.Text = $"标签读取失败：{exception.Message}";
             }
         }
         finally
@@ -260,6 +263,78 @@ public sealed partial class MainWindow : Window
             }
 
             cancellation.Dispose();
+        }
+    }
+
+    private void UpdateDetailsView(FileDetailsModel model)
+    {
+        DetailsTitleText.Text = model.Title;
+        DetailsText.Text = model.Title;
+
+        if (model.IsSingleFileSelected)
+        {
+            DetailsPathText.Text = model.Path ?? "";
+            DetailsPathText.Visibility = Visibility.Visible;
+
+            DetailsMetaText.Text = $"扩展名：{model.Extension} | 大小：{model.SizeText} | 修改时间：{model.ModifiedText}";
+            DetailsMetaText.Visibility = Visibility.Visible;
+
+            DetailsStatusText.Text = $"在线状态：{model.StatusText}";
+            DetailsStatusText.Visibility = Visibility.Visible;
+
+            DetailsIdentityText.Text = $"身份状态：{model.IdentityStateText}";
+            DetailsIdentityText.Visibility = Visibility.Visible;
+
+            DetailsUserTagsText.Text = $"用户标签：{model.UserTagsText}";
+            DetailsUserTagsText.Visibility = Visibility.Visible;
+
+            DetailsAutoTagsText.Text = $"自动标签：{model.AutomaticTagsText}";
+            DetailsAutoTagsText.Visibility = Visibility.Visible;
+
+            if (!string.IsNullOrWhiteSpace(model.Diagnostic))
+            {
+                DetailsDiagnosticText.Text = $"诊断：{model.Diagnostic}";
+                DetailsDiagnosticText.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                DetailsDiagnosticText.Visibility = Visibility.Collapsed;
+            }
+        }
+        else
+        {
+            DetailsPathText.Visibility = Visibility.Collapsed;
+            DetailsMetaText.Visibility = Visibility.Collapsed;
+            DetailsStatusText.Visibility = Visibility.Collapsed;
+            DetailsIdentityText.Visibility = Visibility.Collapsed;
+            DetailsUserTagsText.Visibility = Visibility.Collapsed;
+            DetailsAutoTagsText.Visibility = Visibility.Collapsed;
+            DetailsDiagnosticText.Visibility = Visibility.Collapsed;
+        }
+
+        OpenFileButton.IsEnabled = model.CanOpen && !_isOperating;
+        RevealFileButton.IsEnabled = model.CanReveal && !_isOperating;
+        ReidentifyTypeButton.IsEnabled = model.CanReidentify && !_isOperating;
+        CopyPathButton.IsEnabled = model.CanCopyPath && !_isOperating;
+    }
+
+    private void CopyPathButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (FilesList.SelectedItems.OfType<IndexedFile>().ToList() is not [var file])
+        {
+            return;
+        }
+
+        try
+        {
+            var package = new DataPackage();
+            package.SetText(file.Path);
+            Clipboard.SetContent(package);
+            FileActionStatusText.Text = "已复制文件完整路径到剪贴板。";
+        }
+        catch (Exception exception)
+        {
+            FileActionStatusText.Text = $"复制路径失败：{exception.Message}";
         }
     }
 
@@ -1323,14 +1398,16 @@ public sealed partial class MainWindow : Window
     {
         var selected = FilesList.SelectedItems.OfType<IndexedFile>().ToList();
         var hasSingleFile = selected.Count == 1;
-        OpenFileButton.IsEnabled = hasSingleFile && !_isOperating;
-        RevealFileButton.IsEnabled = hasSingleFile && !_isOperating;
-        ReidentifyTypeButton.IsEnabled = hasSingleFile && selected[0].IsOnline && !_isOperating;
+        var isSingleOnline = hasSingleFile && selected[0].IsOnline;
+        OpenFileButton.IsEnabled = isSingleOnline && !_isOperating;
+        RevealFileButton.IsEnabled = isSingleOnline && !_isOperating;
+        ReidentifyTypeButton.IsEnabled = isSingleOnline && !_isOperating;
+        CopyPathButton.IsEnabled = hasSingleFile && !_isOperating;
         CopyFileButton.IsEnabled = selected.Count > 0 && !_isOperating;
         CutFileButton.IsEnabled = selected.Count > 0 && !_isOperating;
         PasteToFileButton.IsEnabled = _fileOperations.CanPasteFromClipboard() && !_isOperating;
         MoveToFileButton.IsEnabled = selected.Count > 0 && !_isOperating;
-        RenameFileButton.IsEnabled = hasSingleFile && selected[0].IsOnline && !_isOperating;
+        RenameFileButton.IsEnabled = isSingleOnline && !_isOperating;
         DeleteFileButton.IsEnabled = selected.Count > 0 && !_isOperating;
     }
 
@@ -1345,18 +1422,4 @@ public sealed partial class MainWindow : Window
 
     private string SortLabel(string label, FileSortColumn column) =>
         _sortColumn == column ? $"{label} {(_sortDescending ? '▼' : '▲')}" : label;
-
-    private static string Describe(
-        IndexedFile file,
-        IReadOnlyList<UserTag> userTags,
-        IReadOnlyList<AutomaticTag> automaticTags)
-    {
-        var status = file.IsOnline ? "在线" : "离线";
-        var userTagNames = userTags.Count == 0 ? "无" : string.Join("、", userTags.Select(tag => tag.Name));
-        var automaticTagNames = automaticTags.Count == 0
-            ? "无"
-            : string.Join("、", automaticTags.Select(tag => tag.Name));
-        var diagnostic = string.IsNullOrWhiteSpace(file.Diagnostic) ? "" : $"\n诊断：{file.Diagnostic}";
-        return $"{file.Name}\n{file.Path}\n扩展名：{file.Extension}\n大小：{file.Size:N0} 字节\n修改时间：{file.Modified.LocalDateTime:g}\n状态：{status}\n用户标签：{userTagNames}\n自动标签：{automaticTagNames}{diagnostic}";
-    }
 }

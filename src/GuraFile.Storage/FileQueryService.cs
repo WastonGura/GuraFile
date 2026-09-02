@@ -33,7 +33,8 @@ public sealed record IndexedFile(
     long Size,
     DateTimeOffset Modified,
     bool IsOnline,
-    string? Diagnostic)
+    string? Diagnostic,
+    string IdentityKind = "stable")
 {
     public string Status => IsOnline ? "在线" : "离线";
 }
@@ -127,7 +128,7 @@ public sealed class FileQueryService
             var where = filters.Count == 0 ? "" : $"WHERE {string.Join(" AND ", filters)}";
             command.CommandText =
                 $"""
-                SELECT f.id, f.name, f.path, f.extension, f.size, f.modified_utc, f.is_online, f.identity_diagnostic
+                SELECT f.id, f.name, f.path, f.extension, f.size, f.modified_utc, f.is_online, f.identity_diagnostic, f.identity_kind
                 FROM files f
                 {where}
                 ORDER BY {sortColumn} {direction}, f.id {direction};
@@ -147,7 +148,8 @@ public sealed class FileQueryService
                     reader.GetInt64(4),
                     DateTimeOffset.Parse(reader.GetString(5), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
                     reader.GetInt64(6) != 0,
-                    reader.IsDBNull(7) ? null : reader.GetString(7)));
+                    reader.IsDBNull(7) ? null : reader.GetString(7),
+                    reader.IsDBNull(8) ? "stable" : reader.GetString(8)));
             }
 
             return files;
