@@ -550,6 +550,84 @@ public sealed partial class MainWindow : Window
     private void CancelFileOperationButton_Click(object sender, RoutedEventArgs e) =>
         _fileOpCancellation?.Cancel();
 
+    private void FilesList_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        var focused = FocusManager.GetFocusedElement(Content.XamlRoot);
+        var isTextInput = focused is TextBox;
+
+        var isShift = (Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Shift) &
+                       Windows.UI.Core.CoreVirtualKeyStates.Down) == Windows.UI.Core.CoreVirtualKeyStates.Down;
+        var isCtrl = (Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control) &
+                      Windows.UI.Core.CoreVirtualKeyStates.Down) == Windows.UI.Core.CoreVirtualKeyStates.Down;
+
+        var shortcutKey = e.Key switch
+        {
+            Windows.System.VirtualKey.C => FileShortcutKey.C,
+            Windows.System.VirtualKey.X => FileShortcutKey.X,
+            Windows.System.VirtualKey.V => FileShortcutKey.V,
+            Windows.System.VirtualKey.A => FileShortcutKey.A,
+            Windows.System.VirtualKey.F2 => FileShortcutKey.F2,
+            Windows.System.VirtualKey.F5 => FileShortcutKey.F5,
+            Windows.System.VirtualKey.Delete => FileShortcutKey.Delete,
+            _ => FileShortcutKey.None
+        };
+
+        var cmd = FileKeyboardShortcutRouter.Evaluate(shortcutKey, isCtrl, isShift, isTextInput);
+
+        switch (cmd)
+        {
+            case FileShortcutCommand.Copy:
+                if (CopyFileButton.IsEnabled)
+                {
+                    CopyFileButton_Click(this, new RoutedEventArgs());
+                    e.Handled = true;
+                }
+                break;
+            case FileShortcutCommand.Cut:
+                if (CutFileButton.IsEnabled)
+                {
+                    CutFileButton_Click(this, new RoutedEventArgs());
+                    e.Handled = true;
+                }
+                break;
+            case FileShortcutCommand.Paste:
+                if (PasteToFileButton.IsEnabled)
+                {
+                    PasteToFileButton_Click(this, new RoutedEventArgs());
+                    e.Handled = true;
+                }
+                break;
+            case FileShortcutCommand.Rename:
+                if (RenameFileButton.IsEnabled)
+                {
+                    RenameFileButton_Click(this, new RoutedEventArgs());
+                    e.Handled = true;
+                }
+                break;
+            case FileShortcutCommand.Delete:
+                if (DeleteFileButton.IsEnabled)
+                {
+                    DeleteFileButton_Click(this, new RoutedEventArgs());
+                    e.Handled = true;
+                }
+                break;
+            case FileShortcutCommand.SelectAll:
+                FilesList.SelectAll();
+                e.Handled = true;
+                break;
+            case FileShortcutCommand.Refresh:
+                _ = RefreshFilesAsync();
+                RefreshRoots();
+                e.Handled = true;
+                break;
+        }
+
+        if (isShift && e.Key == Windows.System.VirtualKey.Delete)
+        {
+            e.Handled = true;
+        }
+    }
+
     private void FilesList_DragItemsStarting(object sender, DragItemsStartingEventArgs e)
     {
         if (_isOperating)
