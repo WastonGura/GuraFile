@@ -369,34 +369,6 @@ internal static class RecycleBinTestHelper
                     Thread.Sleep(50);
                 }
 
-                if (!string.IsNullOrWhiteSpace(origDir) && Directory.Exists(origDir))
-                {
-                    var candidates = Directory.GetFileSystemEntries(origDir, name + "*");
-                    bool purged = candidates.Length > 0;
-                    foreach (var entry in candidates)
-                    {
-                        try
-                        {
-                            if (File.Exists(entry))
-                            {
-                                File.Delete(entry);
-                            }
-                            else if (Directory.Exists(entry))
-                            {
-                                Directory.Delete(entry, recursive: true);
-                            }
-                        }
-                        catch
-                        {
-                        }
-
-                        purged &= !File.Exists(entry) && !Directory.Exists(entry);
-                    }
-                    if (purged)
-                    {
-                        return true;
-                    }
-                }
             }
 
             return false;

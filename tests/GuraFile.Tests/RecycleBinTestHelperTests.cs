@@ -102,6 +102,69 @@ public sealed class RecycleBinTestHelperTests
             Directory.Delete(root, recursive: true);
         }
     }
+
+    [TestMethod]
+    public void RestoreAndPurge_WhenRestoreTargetNeverAppears_PreservesExistingSamePrefixFile()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"GuraFile-RecycleHelper-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var existingPath = Path.Combine(root, "missing.txt.user-data");
+        const string existingContent = "keep me";
+        File.WriteAllText(existingPath, existingContent);
+
+        try
+        {
+            var item = new RecycleBinItemStub(
+                Path.Combine(root, "shell-item"),
+                "missing.txt",
+                _ => { });
+            var method = typeof(RecycleBinTestHelper).GetMethod(
+                "RestoreAndPurge",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            var cleaned = (bool)method!.Invoke(
+                null,
+                [item, new RecycleBinStub(root), null])!;
+
+            Assert.IsFalse(cleaned, "A restore with no observable exact target must not be reported as cleaned.");
+            Assert.IsTrue(File.Exists(existingPath), "An existing same-prefix file must not be deleted.");
+            Assert.AreEqual(existingContent, File.ReadAllText(existingPath));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public void RestoreAndPurge_WhenExactRestoreTargetIsDeleted_ReportsSuccess()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"GuraFile-RecycleHelper-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var targetPath = Path.Combine(root, "restored.txt");
+
+        try
+        {
+            var item = new RecycleBinItemStub(
+                Path.Combine(root, "shell-item"),
+                Path.GetFileName(targetPath),
+                _ => File.WriteAllText(targetPath, "restored"));
+            var method = typeof(RecycleBinTestHelper).GetMethod(
+                "RestoreAndPurge",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            var cleaned = (bool)method!.Invoke(
+                null,
+                [item, new RecycleBinStub(root), null])!;
+
+            Assert.IsTrue(cleaned, "An observed exact restore target deleted successfully must be reported as cleaned.");
+            Assert.IsFalse(File.Exists(targetPath));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
 }
 
 internal sealed class RecycleBinItemStub
