@@ -231,6 +231,47 @@ internal static class RecycleBinTestHelper
     {
         try
         {
+            // 1. Direct Recycle Bin payload purge: delete the underlying $R<id> file/folder and $I<id> metadata entry.
+            // This is instantaneous, thread-safe, and avoids any Explorer verb / DDE hangs on headless Windows Server runners.
+            try
+            {
+                string itemPath = (string)item.Path;
+                if (!string.IsNullOrWhiteSpace(itemPath))
+                {
+                    var dir = Path.GetDirectoryName(itemPath);
+                    var leaf = Path.GetFileName(itemPath);
+                    if (leaf.StartsWith("$R", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(dir))
+                    {
+                        var iLeaf = "$I" + leaf.Substring(2);
+                        var iPath = Path.Combine(dir, iLeaf);
+
+                        bool purgedAny = false;
+                        if (File.Exists(itemPath))
+                        {
+                            try { File.Delete(itemPath); purgedAny = true; } catch { }
+                        }
+                        else if (Directory.Exists(itemPath))
+                        {
+                            try { Directory.Delete(itemPath, recursive: true); purgedAny = true; } catch { }
+                        }
+
+                        if (File.Exists(iPath))
+                        {
+                            try { File.Delete(iPath); purgedAny = true; } catch { }
+                        }
+
+                        if (purgedAny)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            // 2. Fallback: Shell verb undelete followed by file removal
             string name = (string)item.Name;
             string origDir = (string)recycleBin.GetDetailsOf(item, 1);
             if (string.IsNullOrWhiteSpace(origDir))
