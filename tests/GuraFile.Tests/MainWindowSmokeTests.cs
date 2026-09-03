@@ -209,5 +209,11 @@ public sealed class MainWindowSmokeTests
         StringAssert.Contains(source, "NewWindowRequested");
         StringAssert.Contains(source, "DownloadStarting");
         StringAssert.Contains(source, "NavigationStarting");
+        StringAssert.Contains(source, "GraphMessageTypes.NodeSelected");
+        StringAssert.Contains(source, "GraphMessageTypes.NodeActivated");
+        StringAssert.Contains(source, "GraphMessageSerializer.SerializeSelectNode");
+        StringAssert.Contains(source, "_graphInteractionCoordinator.EvaluateSelection");
+        StringAssert.Contains(source, "_graphInteractionCoordinator.EvaluateActivation");
+        StringAssert.Contains(source, "RunFileAction(activation.File!, _shell.Open");
     }
 }
