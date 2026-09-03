@@ -72,7 +72,7 @@ dotnet test .\tests\GuraFile.Tests\GuraFile.Tests.csproj --configuration Release
 生成可发布包：
 
 ```powershell
-.\scripts\PackageRelease.ps1 -Version 0.3.1
+.\scripts\PackageRelease.ps1 -Version 0.3.2
 ```
 
 项目按 GitHub Issue、独立 worktree、测试先行、独立审查、PR 和受保护 `main` 分支交付。第三方组件及许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。

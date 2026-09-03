@@ -245,22 +245,21 @@ internal static class RecycleBinTestHelper
                         var iLeaf = "$I" + leaf.Substring(2);
                         var iPath = Path.Combine(dir, iLeaf);
 
-                        bool purgedAny = false;
                         if (File.Exists(itemPath))
                         {
-                            try { File.Delete(itemPath); purgedAny = true; } catch { }
+                            try { File.Delete(itemPath); } catch { }
                         }
                         else if (Directory.Exists(itemPath))
                         {
-                            try { Directory.Delete(itemPath, recursive: true); purgedAny = true; } catch { }
+                            try { Directory.Delete(itemPath, recursive: true); } catch { }
                         }
 
                         if (File.Exists(iPath))
                         {
-                            try { File.Delete(iPath); purgedAny = true; } catch { }
+                            try { File.Delete(iPath); } catch { }
                         }
 
-                        if (purgedAny)
+                        if (!File.Exists(itemPath) && !Directory.Exists(itemPath) && !File.Exists(iPath))
                         {
                             return true;
                         }
