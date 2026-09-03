@@ -99,4 +99,25 @@ public sealed class FileDetailsPresenterTests
         Assert.IsFalse(model.CanReidentify);
         Assert.IsFalse(model.CanCopyPath);
     }
+
+    [TestMethod]
+    public void CreateForTag_PresentsTagDetailsAndDisablesAllFileActions()
+    {
+        var model = FileDetailsPresenter.CreateForTag("工作", "用户标签");
+
+        Assert.AreEqual("标签：工作", model.Title);
+        Assert.AreEqual("工作", model.Name);
+        Assert.IsNull(model.Path);
+        Assert.IsNull(model.Extension);
+        Assert.AreEqual("标签", model.StatusText);
+        Assert.AreEqual("用户标签", model.IdentityStateText);
+        Assert.IsTrue(model.IsTagSelected);
+        Assert.AreEqual("用户标签", model.TagTypeSummary);
+        Assert.IsFalse(model.IsSingleFileSelected);
+        Assert.IsFalse(model.IsMultipleFilesSelected);
+        Assert.IsFalse(model.CanOpen);
+        Assert.IsFalse(model.CanReveal);
+        Assert.IsFalse(model.CanReidentify);
+        Assert.IsFalse(model.CanCopyPath);
+    }
 }

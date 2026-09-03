@@ -51,7 +51,7 @@
       container: document.getElementById("cy"),
       elements: [],
       boxSelectionEnabled: false,
-      autounselectify: true,
+      autounselectify: false,
       style: [
         {
           selector: "node[nodeType = 'file']",
@@ -91,6 +91,17 @@
           }
         },
         {
+          selector: "node:selected, node.selected",
+          style: {
+            "border-width": 3,
+            "border-color": "#0078d4",
+            "border-opacity": 1.0,
+            "overlay-color": "#0078d4",
+            "overlay-padding": 4,
+            "overlay-opacity": 0.25
+          }
+        },
+        {
           selector: "edge",
           style: {
             "width": 1.5,
@@ -108,6 +119,49 @@
           }
         }
       ]
+    });
+
+    let lastTapNodeId = null;
+    let lastTapTime = 0;
+    const DOUBLE_TAP_THRESHOLD_MS = 350;
+
+    cy.on("tap", "node", function (evt) {
+      const node = evt.target;
+      const now = performance.now();
+      const isDoubleTap = (lastTapNodeId === node.id() && (now - lastTapTime) < DOUBLE_TAP_THRESHOLD_MS);
+
+      lastTapNodeId = node.id();
+      lastTapTime = now;
+
+      cy.batch(() => {
+        cy.nodes().unselect().removeClass("selected");
+        node.select().addClass("selected");
+      });
+
+      const data = node.data();
+      const payload = {
+        nodeId: node.id(),
+        kind: data.nodeType,
+        fileId: data.fileId != null ? data.fileId : null,
+        tagId: data.tagId != null ? data.tagId : null,
+        label: data.label || ""
+      };
+
+      if (isDoubleTap) {
+        lastTapNodeId = null;
+        lastTapTime = 0;
+        sendToHost("nodeActivated", payload);
+      } else {
+        sendToHost("nodeSelected", payload);
+      }
+    });
+
+    cy.on("tap", function (evt) {
+      if (evt.target === cy) {
+        lastTapNodeId = null;
+        lastTapTime = 0;
+        hideTooltip();
+      }
     });
 
     cy.on("mouseover", "node", function (evt) {
@@ -252,8 +306,22 @@
 
   function fitViewport() {
     if (cy) {
+      cy.resize();
       cy.fit(null, 30);
     }
+  }
+
+  function selectNode(nodeId) {
+    if (!cy) return;
+    cy.batch(() => {
+      cy.nodes().unselect().removeClass("selected");
+      if (nodeId) {
+        const target = cy.$id(nodeId);
+        if (target && target.length > 0) {
+          target.select().addClass("selected");
+        }
+      }
+    });
   }
 
   function handleMessage(message) {
@@ -266,6 +334,9 @@
           break;
         case "fitViewport":
           fitViewport();
+          break;
+        case "selectNode":
+          selectNode(message.payload && message.payload.nodeId);
           break;
         case "setBroadTagsVisible":
           setBroadTagsVisible(message.payload && message.payload.visible);
@@ -282,6 +353,12 @@
   // Initialize
   try {
     initCytoscape();
+
+    window.addEventListener("resize", function () {
+      if (cy) {
+        cy.resize();
+      }
+    });
 
     if (window.chrome && window.chrome.webview) {
       window.chrome.webview.addEventListener("message", function (event) {

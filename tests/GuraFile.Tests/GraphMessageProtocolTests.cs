@@ -12,6 +12,9 @@ public sealed class GraphMessageProtocolTests
         string render = GraphMessageTypes.RenderSnapshot;
         string fit = GraphMessageTypes.FitViewport;
         string broad = GraphMessageTypes.SetBroadTagsVisible;
+        string select = GraphMessageTypes.SelectNode;
+        string nodeSelected = GraphMessageTypes.NodeSelected;
+        string nodeActivated = GraphMessageTypes.NodeActivated;
         string ready = GraphMessageTypes.Ready;
         string frame = GraphMessageTypes.FirstFrameRendered;
         string err = GraphMessageTypes.Error;
@@ -20,6 +23,9 @@ public sealed class GraphMessageProtocolTests
         Assert.AreEqual("renderSnapshot", render);
         Assert.AreEqual("fitViewport", fit);
         Assert.AreEqual("setBroadTagsVisible", broad);
+        Assert.AreEqual("selectNode", select);
+        Assert.AreEqual("nodeSelected", nodeSelected);
+        Assert.AreEqual("nodeActivated", nodeActivated);
         Assert.AreEqual("ready", ready);
         Assert.AreEqual("firstFrameRendered", frame);
         Assert.AreEqual("error", err);
@@ -142,5 +148,123 @@ public sealed class GraphMessageProtocolTests
         Assert.AreEqual("error", message.Type);
         var error = GraphMessageSerializer.ParseErrorMessage(message);
         Assert.AreEqual("Cytoscape layout failed", error);
+    }
+
+    [TestMethod]
+    public void OutboundSelectNodeSerializesCorrectly()
+    {
+        var jsonWithNode = GraphMessageSerializer.SerializeSelectNode("file:42");
+        using (var doc = JsonDocument.Parse(jsonWithNode))
+        {
+            var root = doc.RootElement;
+            Assert.AreEqual("selectNode", root.GetProperty("type").GetString());
+            Assert.AreEqual("1.0", root.GetProperty("version").GetString());
+            Assert.AreEqual("file:42", root.GetProperty("payload").GetProperty("nodeId").GetString());
+        }
+
+        var jsonWithNull = GraphMessageSerializer.SerializeSelectNode(null);
+        using (var doc = JsonDocument.Parse(jsonWithNull))
+        {
+            var root = doc.RootElement;
+            Assert.AreEqual("selectNode", root.GetProperty("type").GetString());
+            Assert.AreEqual("1.0", root.GetProperty("version").GetString());
+            Assert.AreEqual(JsonValueKind.Null, root.GetProperty("payload").GetProperty("nodeId").ValueKind);
+        }
+    }
+
+    [TestMethod]
+    public void SelectNodePayloadDeserializesCorrectly()
+    {
+        var json = """
+            {
+                "type": "selectNode",
+                "version": "1.0",
+                "payload": {
+                    "nodeId": "file:100"
+                }
+            }
+            """;
+        var message = GraphMessageSerializer.Deserialize(json);
+        Assert.AreEqual("selectNode", message.Type);
+
+        var payload = GraphMessageSerializer.ParseSelectNode(message);
+        Assert.AreEqual("file:100", payload.NodeId);
+    }
+
+    [TestMethod]
+    public void InboundNodeSelectedDeserializesWithFullPayload()
+    {
+        var json = """
+            {
+                "type": "nodeSelected",
+                "version": "1.0",
+                "payload": {
+                    "nodeId": "file:12",
+                    "kind": "file",
+                    "fileId": 12,
+                    "tagId": null,
+                    "label": "Document.docx"
+                }
+            }
+            """;
+        var message = GraphMessageSerializer.Deserialize(json);
+        Assert.AreEqual("nodeSelected", message.Type);
+
+        var action = GraphMessageSerializer.ParseNodeAction(message);
+        Assert.AreEqual("file:12", action.NodeId);
+        Assert.AreEqual("file", action.Kind);
+        Assert.AreEqual(12L, action.FileId);
+        Assert.IsNull(action.TagId);
+        Assert.AreEqual("Document.docx", action.Label);
+    }
+
+    [TestMethod]
+    public void InboundNodeActivatedDeserializesWithFullPayload()
+    {
+        var json = """
+            {
+                "type": "nodeActivated",
+                "version": "1.0",
+                "payload": {
+                    "nodeId": "file:99",
+                    "kind": "file",
+                    "fileId": 99,
+                    "tagId": null,
+                    "label": "Music.mp3"
+                }
+            }
+            """;
+        var message = GraphMessageSerializer.Deserialize(json);
+        Assert.AreEqual("nodeActivated", message.Type);
+
+        var action = GraphMessageSerializer.ParseNodeAction(message);
+        Assert.AreEqual("file:99", action.NodeId);
+        Assert.AreEqual("file", action.Kind);
+        Assert.AreEqual(99L, action.FileId);
+        Assert.IsNull(action.TagId);
+        Assert.AreEqual("Music.mp3", action.Label);
+    }
+
+    [TestMethod]
+    public void OutboundNodeActionSerializesCorrectly()
+    {
+        var payload = new GraphNodeActionPayload("tag:5", "tag", null, 5L, "工作");
+        var jsonSelected = GraphMessageSerializer.SerializeNodeSelected(payload);
+        using (var doc = JsonDocument.Parse(jsonSelected))
+        {
+            var root = doc.RootElement;
+            Assert.AreEqual("nodeSelected", root.GetProperty("type").GetString());
+            Assert.AreEqual("tag:5", root.GetProperty("payload").GetProperty("nodeId").GetString());
+            Assert.AreEqual("tag", root.GetProperty("payload").GetProperty("kind").GetString());
+            Assert.AreEqual(5L, root.GetProperty("payload").GetProperty("tagId").GetInt64());
+            Assert.AreEqual("工作", root.GetProperty("payload").GetProperty("label").GetString());
+        }
+
+        var jsonActivated = GraphMessageSerializer.SerializeNodeActivated(payload);
+        using (var doc = JsonDocument.Parse(jsonActivated))
+        {
+            var root = doc.RootElement;
+            Assert.AreEqual("nodeActivated", root.GetProperty("type").GetString());
+        }
     }
 }

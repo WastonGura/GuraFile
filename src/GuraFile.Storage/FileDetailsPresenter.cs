@@ -18,10 +18,39 @@ public sealed record FileDetailsModel(
     bool CanOpen,
     bool CanReveal,
     bool CanReidentify,
-    bool CanCopyPath);
+    bool CanCopyPath,
+    bool IsTagSelected = false,
+    string? TagTypeSummary = null);
 
 public static class FileDetailsPresenter
 {
+    public static FileDetailsModel CreateForTag(string tagName, string tagTypeSummary)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(tagName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(tagTypeSummary);
+
+        return new FileDetailsModel(
+            Title: $"标签：{tagName}",
+            Name: tagName,
+            Path: null,
+            Extension: null,
+            SizeText: null,
+            ModifiedText: null,
+            StatusText: "标签",
+            IdentityStateText: tagTypeSummary,
+            UserTagsText: "无",
+            AutomaticTagsText: "无",
+            Diagnostic: null,
+            IsSingleFileSelected: false,
+            IsMultipleFilesSelected: false,
+            SelectedCount: 0,
+            CanOpen: false,
+            CanReveal: false,
+            CanReidentify: false,
+            CanCopyPath: false,
+            IsTagSelected: true,
+            TagTypeSummary: tagTypeSummary);
+    }
     public static FileDetailsModel Create(
         IReadOnlyList<IndexedFile> selectedFiles,
         IReadOnlyList<UserTag> userTags,

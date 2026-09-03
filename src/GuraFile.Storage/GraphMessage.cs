@@ -9,10 +9,25 @@ public static class GraphMessageTypes
     public const string RenderSnapshot = "renderSnapshot";
     public const string FitViewport = "fitViewport";
     public const string SetBroadTagsVisible = "setBroadTagsVisible";
+    public const string SelectNode = "selectNode";
+    public const string NodeSelected = "nodeSelected";
+    public const string NodeActivated = "nodeActivated";
     public const string Ready = "ready";
     public const string FirstFrameRendered = "firstFrameRendered";
     public const string Error = "error";
 }
+
+public sealed record SelectNodePayload(
+    [property: JsonPropertyName("nodeId")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    string? NodeId);
+
+public sealed record GraphNodeActionPayload(
+    [property: JsonPropertyName("nodeId")] string NodeId,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("fileId")] long? FileId = null,
+    [property: JsonPropertyName("tagId")] long? TagId = null,
+    [property: JsonPropertyName("label")] string? Label = null);
 
 public sealed record GraphMessage(
     [property: JsonPropertyName("type")] string Type,
@@ -155,5 +170,68 @@ public static class GraphMessageSerializer
 
         var error = message.Payload.Value.Deserialize<ErrorPayload>(JsonOptions);
         return error?.Message ?? "Unknown error";
+    }
+
+    public static string SerializeSelectNode(string? nodeId)
+    {
+        var payload = new SelectNodePayload(nodeId);
+        var payloadElement = JsonSerializer.SerializeToElement(payload, JsonOptions);
+
+        var message = new GraphMessage(
+            GraphMessageTypes.SelectNode,
+            GraphMessage.CurrentVersion,
+            payloadElement);
+
+        return JsonSerializer.Serialize(message, JsonOptions);
+    }
+
+    public static string SerializeNodeSelected(GraphNodeActionPayload payload)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+        var payloadElement = JsonSerializer.SerializeToElement(payload, JsonOptions);
+
+        var message = new GraphMessage(
+            GraphMessageTypes.NodeSelected,
+            GraphMessage.CurrentVersion,
+            payloadElement);
+
+        return JsonSerializer.Serialize(message, JsonOptions);
+    }
+
+    public static string SerializeNodeActivated(GraphNodeActionPayload payload)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+        var payloadElement = JsonSerializer.SerializeToElement(payload, JsonOptions);
+
+        var message = new GraphMessage(
+            GraphMessageTypes.NodeActivated,
+            GraphMessage.CurrentVersion,
+            payloadElement);
+
+        return JsonSerializer.Serialize(message, JsonOptions);
+    }
+
+    public static SelectNodePayload ParseSelectNode(GraphMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        if (message.Payload is null)
+        {
+            return new SelectNodePayload(null);
+        }
+
+        return message.Payload.Value.Deserialize<SelectNodePayload>(JsonOptions)
+               ?? new SelectNodePayload(null);
+    }
+
+    public static GraphNodeActionPayload ParseNodeAction(GraphMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        if (message.Payload is null)
+        {
+            throw new ArgumentException("Payload is missing in node action message.", nameof(message));
+        }
+
+        return message.Payload.Value.Deserialize<GraphNodeActionPayload>(JsonOptions)
+               ?? throw new JsonException("Failed to deserialize GraphNodeActionPayload.");
     }
 }

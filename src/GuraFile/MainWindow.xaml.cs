@@ -26,6 +26,8 @@ public sealed partial class MainWindow : Window
     private CancellationTokenSource? _fileQueryCancellation;
     private CancellationTokenSource? _detailCancellation;
     private CancellationTokenSource? _fileOpCancellation;
+    private CancellationTokenSource? _graphRefreshCancellation;
+    private readonly GraphInteractionCoordinator _graphInteractionCoordinator = new();
     private FileSortColumn _sortColumn = FileSortColumn.Name;
     private bool _sortDescending;
     private bool _initialized;
@@ -38,6 +40,7 @@ public sealed partial class MainWindow : Window
     private List<string>? _draggedFilePaths;
     private bool _webViewInitialized;
     private bool _webPageReady;
+    private bool _isSyncingSelectionFromGraph;
     private IReadOnlyList<IndexedFile> _currentFiles = [];
     private GraphSnapshot? _pendingSnapshot;
 
@@ -68,6 +71,7 @@ public sealed partial class MainWindow : Window
             _fileQueryCancellation?.Cancel();
             _detailCancellation?.Cancel();
             _fileOpCancellation?.Cancel();
+            _graphRefreshCancellation?.Cancel();
             await _fileChanges.DisposeAsync();
         };
         RefreshRoots();
@@ -222,12 +226,20 @@ public sealed partial class MainWindow : Window
         await RefreshFilesAsync();
     }
 
-    private async void FilesList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void FilesList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         _detailCancellation?.Cancel();
         var selected = FilesList.SelectedItems.OfType<IndexedFile>().ToList();
         UpdateFileButtonsState();
         FileActionStatusText.Text = "";
+
+        if (!_isSyncingSelectionFromGraph && ViewModeBox.SelectedIndex == 1 && _webPageReady && GraphWebView.CoreWebView2 is not null)
+        {
+            var selectedFile = selected.Count == 1 ? selected[0] : null;
+            var nodeId = selectedFile is not null ? $"file:{selectedFile.Id}" : null;
+            GraphWebView.CoreWebView2.PostWebMessageAsJson(GraphMessageSerializer.SerializeSelectNode(nodeId));
+        }
+
         if (selected.Count != 1)
         {
             var model = FileDetailsPresenter.Create(selected, [], []);
@@ -235,7 +247,12 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var file = selected[0];
+        _ = LoadFileDetailsAsync(selected[0]);
+    }
+
+    private async Task LoadFileDetailsAsync(IndexedFile file)
+    {
+        _detailCancellation?.Cancel();
         var cancellation = new CancellationTokenSource();
         _detailCancellation = cancellation;
         var initialModel = FileDetailsPresenter.Create([file], [], []);
@@ -278,7 +295,18 @@ public sealed partial class MainWindow : Window
         DetailsTitleText.Text = model.Title;
         DetailsText.Text = model.Title;
 
-        if (model.IsSingleFileSelected)
+        if (model.IsTagSelected)
+        {
+            DetailsPathText.Visibility = Visibility.Collapsed;
+            DetailsMetaText.Text = $"类型：{model.TagTypeSummary}";
+            DetailsMetaText.Visibility = Visibility.Visible;
+            DetailsStatusText.Visibility = Visibility.Collapsed;
+            DetailsIdentityText.Visibility = Visibility.Collapsed;
+            DetailsUserTagsText.Visibility = Visibility.Collapsed;
+            DetailsAutoTagsText.Visibility = Visibility.Collapsed;
+            DetailsDiagnosticText.Visibility = Visibility.Collapsed;
+        }
+        else if (model.IsSingleFileSelected)
         {
             DetailsPathText.Text = model.Path ?? "";
             DetailsPathText.Visibility = Visibility.Visible;
@@ -1320,6 +1348,7 @@ public sealed partial class MainWindow : Window
 
     private async Task RefreshFilesAsync(bool debounce = false)
     {
+        var generation = _graphInteractionCoordinator.BeginQuery();
         var cancellation = new CancellationTokenSource();
         var previous = _fileQueryCancellation;
         _fileQueryCancellation = cancellation;
@@ -1332,7 +1361,7 @@ public sealed partial class MainWindow : Window
                 await Task.Delay(200, cancellation.Token);
             }
 
-            if (!ReferenceEquals(_fileQueryCancellation, cancellation))
+            if (!_graphInteractionCoordinator.CanCommitQuery(generation) || !ReferenceEquals(_fileQueryCancellation, cancellation))
             {
                 return;
             }
@@ -1352,6 +1381,12 @@ public sealed partial class MainWindow : Window
                     TagMatch: TagMatchBox.SelectedIndex == 1 ? TagMatchMode.All : TagMatchMode.Any),
                 cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
+
+            if (!_graphInteractionCoordinator.CommitQuery(generation, files) || !ReferenceEquals(_fileQueryCancellation, cancellation))
+            {
+                return;
+            }
+
             _currentFiles = files;
             FilesList.ItemsSource = files;
             FilesStateText.Text = files.Count == 0 ? "没有匹配的文件" : $"{files.Count:N0} 个文件";
@@ -1365,8 +1400,9 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception exception)
         {
-            if (ReferenceEquals(_fileQueryCancellation, cancellation))
+            if (_graphInteractionCoordinator.CanCommitQuery(generation) && ReferenceEquals(_fileQueryCancellation, cancellation))
             {
+                _graphInteractionCoordinator.CommitQuery(generation, []);
                 _currentFiles = [];
                 FilesList.ItemsSource = null;
                 FilesStateText.Text = $"文件列表加载失败：{exception.Message}";
@@ -1456,6 +1492,14 @@ public sealed partial class MainWindow : Window
         if (isGraph)
         {
             _ = RefreshGraphAsync();
+            if (_webPageReady && GraphWebView.CoreWebView2 is not null)
+            {
+                GraphWebView.CoreWebView2.PostWebMessageAsJson(GraphMessageSerializer.SerializeFitViewport());
+                var selected = FilesList.SelectedItems.OfType<IndexedFile>().ToList();
+                var selectedFile = selected.Count == 1 ? selected[0] : null;
+                var nodeId = selectedFile is not null ? $"file:{selectedFile.Id}" : null;
+                GraphWebView.CoreWebView2.PostWebMessageAsJson(GraphMessageSerializer.SerializeSelectNode(nodeId));
+            }
         }
     }
 
@@ -1549,11 +1593,24 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        var graphGen = _graphInteractionCoordinator.BeginGraphRefresh();
+        var cancellation = new CancellationTokenSource();
+        var previous = _graphRefreshCancellation;
+        _graphRefreshCancellation = cancellation;
+        previous?.Cancel();
+
         try
         {
             UpdateGraphState(GraphViewState.Loading());
 
             var snapshot = await _graphSnapshotService.CreateAsync(files, includeBroad);
+            cancellation.Token.ThrowIfCancellationRequested();
+
+            if (!_graphInteractionCoordinator.CommitSnapshot(graphGen, snapshot) || !ReferenceEquals(_graphRefreshCancellation, cancellation))
+            {
+                return;
+            }
+
             var state = GraphViewState.FromSnapshot(snapshot);
             if (state.Mode != GraphViewDisplayMode.Ready)
             {
@@ -1564,9 +1621,24 @@ public sealed partial class MainWindow : Window
             UpdateGraphState(state);
             PostSnapshotToWeb(snapshot);
         }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+        }
         catch (Exception exception)
         {
-            UpdateGraphState(GraphViewState.Error(exception.Message));
+            if (_graphInteractionCoordinator.CanCommitSnapshot(graphGen) && ReferenceEquals(_graphRefreshCancellation, cancellation))
+            {
+                UpdateGraphState(GraphViewState.Error(exception.Message));
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_graphRefreshCancellation, cancellation))
+            {
+                _graphRefreshCancellation = null;
+            }
+
+            cancellation.Dispose();
         }
     }
 
@@ -1603,6 +1675,62 @@ public sealed partial class MainWindow : Window
                     GraphLoadingRing.IsActive = false;
                     GraphLoadingRing.Visibility = Visibility.Collapsed;
                     GraphInfoText.Text = $"节点 {metrics.NodeCount}，边 {metrics.EdgeCount}（耗时 {metrics.RenderDurationMs:F0} ms）";
+                    if (_webPageReady && GraphWebView.CoreWebView2 is not null)
+                    {
+                        var selected = FilesList.SelectedItems.OfType<IndexedFile>().ToList();
+                        var selectedFile = selected.Count == 1 ? selected[0] : null;
+                        var nodeId = selectedFile is not null ? $"file:{selectedFile.Id}" : null;
+                        GraphWebView.CoreWebView2.PostWebMessageAsJson(GraphMessageSerializer.SerializeSelectNode(nodeId));
+                    }
+                    break;
+
+                case GraphMessageTypes.NodeSelected:
+                    var selectAction = GraphMessageSerializer.ParseNodeAction(message);
+                    var selection = _graphInteractionCoordinator.EvaluateSelection(selectAction);
+                    if (selection.Kind == GraphSelectionKind.File && selection.File is not null)
+                    {
+                        _isSyncingSelectionFromGraph = true;
+                        try
+                        {
+                            FilesList.SelectedItem = selection.File;
+                            FilesList.ScrollIntoView(selection.File);
+                        }
+                        finally
+                        {
+                            _isSyncingSelectionFromGraph = false;
+                        }
+                        _ = LoadFileDetailsAsync(selection.File);
+                    }
+                    else if (selection.Kind == GraphSelectionKind.Tag)
+                    {
+                        _detailCancellation?.Cancel();
+                        var tagModel = FileDetailsPresenter.CreateForTag(
+                            selection.TagName ?? selectAction.Label ?? "标签",
+                            selection.TagTypeSummary ?? "标签");
+                        UpdateDetailsView(tagModel);
+                        FileActionStatusText.Text = "";
+                    }
+                    break;
+
+                case GraphMessageTypes.NodeActivated:
+                    var activateAction = GraphMessageSerializer.ParseNodeAction(message);
+                    var activation = _graphInteractionCoordinator.EvaluateActivation(activateAction);
+                    switch (activation.Status)
+                    {
+                        case GraphActivationStatus.Success:
+                            RunFileAction(activation.File!, _shell.Open, "已交给系统默认应用打开。");
+                            break;
+                        case GraphActivationStatus.RejectedOffline:
+                            FileActionStatusText.Text = activation.ErrorMessage ?? "文件处于离线状态，无法打开。";
+                            break;
+                        case GraphActivationStatus.RejectedNotFile:
+                        case GraphActivationStatus.RejectedFileNotFound:
+                            if (!string.IsNullOrWhiteSpace(activation.ErrorMessage))
+                            {
+                                FileActionStatusText.Text = activation.ErrorMessage;
+                            }
+                            break;
+                    }
                     break;
 
                 case GraphMessageTypes.Error:
