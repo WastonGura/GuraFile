@@ -10,6 +10,7 @@ GuraFile v0.3.2 的 Windows x64 自包含发布包包含下列第三方组件。
 | Microsoft.Data.Sqlite / Microsoft.Data.Sqlite.Core | 10.0.11 | MIT |
 | SQLitePCLRaw bundle, core, provider and native e_sqlite3 package | 2.1.12 | Apache-2.0；SQLite 本体为 public domain |
 | System.Numerics.Tensors | 9.0.0 | MIT |
+| Cytoscape.js | 3.30.2 | MIT |
 
 来源：
 
@@ -19,5 +20,6 @@ GuraFile v0.3.2 的 Windows x64 自包含发布包包含下列第三方组件。
 - <https://github.com/ericsink/SQLitePCL.raw>
 - <https://www.sqlite.org/copyright.html>
 - <https://dotnet.microsoft.com/en-us/dotnet_library_license.htm>
+- <https://github.com/cytoscape/cytoscape.js>
 
 标准 MIT 和 Apache-2.0 文本分别位于包内 `licenses/MIT.txt` 与 `licenses/Apache-2.0.txt`。

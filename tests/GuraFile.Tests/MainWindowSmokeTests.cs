@@ -173,4 +173,41 @@ public sealed class MainWindowSmokeTests
         StringAssert.Contains(handler, "ProgressText.Text = \"添加根目录失败\"");
         StringAssert.Contains(handler, "FailureList.ItemsSource = new[] { exception.Message }");
     }
+
+    [TestMethod]
+    public void MainWindowExposesGraphHostControlsAndSafeHandlers()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "GuraFile", "MainWindow.xaml"));
+        var document = XDocument.Load(path);
+        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var names = document.Descendants()
+            .Select(element => element.Attribute(x + "Name")?.Value)
+            .Where(name => name is not null)
+            .ToHashSet();
+
+        CollectionAssert.IsSubsetOf(
+            new[]
+            {
+                "ViewModeBox",
+                "GraphHostContainer",
+                "GraphWebView",
+                "FitViewportButton",
+                "BroadTagsCheckBox",
+                "GraphLoadingRing",
+                "GraphMessagePanel",
+                "GraphStateText",
+                "GraphInfoText"
+            },
+            names.ToArray());
+
+        var source = File.ReadAllText(Path.ChangeExtension(path, ".xaml.cs"));
+        StringAssert.Contains(source, "SetVirtualHostNameToFolderMapping");
+        StringAssert.Contains(source, "GraphSecurityPolicy.VirtualHostName");
+        StringAssert.Contains(source, "GraphSecurityPolicy.IsAllowedUri");
+        StringAssert.Contains(source, "PostWebMessageAsJson");
+        StringAssert.Contains(source, "NewWindowRequested");
+        StringAssert.Contains(source, "DownloadStarting");
+        StringAssert.Contains(source, "NavigationStarting");
+    }
 }
