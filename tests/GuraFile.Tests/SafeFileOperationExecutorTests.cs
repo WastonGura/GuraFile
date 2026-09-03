@@ -453,6 +453,9 @@ public sealed class SafeFileOperationExecutorTests
         Assert.AreEqual(FileOperationItemStatus.Completed, item.Status);
         Assert.IsFalse(File.Exists(sourceFile));
         Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(fileName, temp.RootPath), "Deleted file was not found in Recycle Bin.");
+
+        temp.Dispose();
+        Assert.IsFalse(RecycleBinTestHelper.ExistsInRecycleBin(fileName, temp.RootPath), "Deleted file was not cleaned from Recycle Bin after disposal.");
     }
 
     [TestMethod]
@@ -480,6 +483,11 @@ public sealed class SafeFileOperationExecutorTests
         Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(name1, temp.RootPath), "File 1 was not found in Recycle Bin.");
         Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(name2, temp.RootPath), "File 2 was not found in Recycle Bin.");
         Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(name3, temp.RootPath), "File 3 was not found in Recycle Bin.");
+
+        temp.Dispose();
+        Assert.IsFalse(RecycleBinTestHelper.ExistsInRecycleBin(name1, temp.RootPath));
+        Assert.IsFalse(RecycleBinTestHelper.ExistsInRecycleBin(name2, temp.RootPath));
+        Assert.IsFalse(RecycleBinTestHelper.ExistsInRecycleBin(name3, temp.RootPath));
     }
 
     [TestMethod]
@@ -499,6 +507,9 @@ public sealed class SafeFileOperationExecutorTests
         Assert.IsFalse(Directory.Exists(dir));
         Assert.IsFalse(File.Exists(childFile));
         Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(dirName, temp.RootPath), "Deleted directory was not found in Recycle Bin.");
+
+        temp.Dispose();
+        Assert.IsFalse(RecycleBinTestHelper.ExistsInRecycleBin(dirName, temp.RootPath));
     }
 
     [TestMethod]
@@ -578,6 +589,68 @@ public sealed class SafeFileOperationExecutorTests
         var flags = SafeFileOperationExecutor.DeleteOperationFlags;
         Assert.AreNotEqual(0u, flags & (uint)FileOperationFlags.FOFX_RECYCLEONDELETE, "DeleteOperationFlags must include FOFX_RECYCLEONDELETE to prevent permanent deletion fallback.");
         Assert.AreNotEqual(0u, flags & (uint)FileOperationFlags.FOF_ALLOWUNDO, "DeleteOperationFlags must include FOF_ALLOWUNDO.");
+    }
+
+    [TestMethod]
+    public async Task CleanupRecycleBinItem_WhenItemExists_RestoresAndPurgesSuccessfully()
+    {
+        using var temp = TestEnvironment.Create();
+        var executor = new SafeFileOperationExecutor();
+        var fileName = $"cleanup_file_{Guid.NewGuid():N}.txt";
+        var sourceFile = temp.CreateFile(fileName, "content to clean up");
+
+        var result = await executor.DeleteToRecycleBinAsync([sourceFile], [temp.RootPath]);
+        Assert.AreEqual(1, result.SucceededCount);
+        Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(fileName, temp.RootPath), "File must be in Recycle Bin before cleanup.");
+
+        var cleaned = RecycleBinTestHelper.CleanupRecycleBinItem(fileName, temp.RootPath);
+        Assert.AreEqual(1, cleaned);
+        Assert.IsFalse(RecycleBinTestHelper.ExistsInRecycleBin(fileName, temp.RootPath), "File must be removed from Recycle Bin after cleanup.");
+    }
+
+    [TestMethod]
+    public async Task CleanupRecycleBinItemsForDirectory_AccuratelyPurgesRecycledItemsForDirectory()
+    {
+        using var temp = TestEnvironment.Create();
+        var executor = new SafeFileOperationExecutor();
+        var name1 = $"clean_dir_f1_{Guid.NewGuid():N}.txt";
+        var name2 = $"clean_dir_f2_{Guid.NewGuid():N}.txt";
+        var file1 = temp.CreateFile(name1, "content 1");
+        var file2 = temp.CreateFile(name2, "content 2");
+
+        var result = await executor.DeleteToRecycleBinAsync([file1, file2], [temp.RootPath]);
+        Assert.AreEqual(2, result.SucceededCount);
+        Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(name1, temp.RootPath));
+        Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(name2, temp.RootPath));
+
+        var cleaned = RecycleBinTestHelper.CleanupRecycleBinItemsForDirectory(temp.RootPath);
+        Assert.AreEqual(2, cleaned, $"Expected 2 cleaned items, got {cleaned}");
+        Assert.IsFalse(RecycleBinTestHelper.ExistsInRecycleBin(name1, temp.RootPath));
+        Assert.IsFalse(RecycleBinTestHelper.ExistsInRecycleBin(name2, temp.RootPath));
+    }
+
+    [TestMethod]
+    public async Task DeleteToRecycleBin_WhenFileLockedExclusively_ReportsFailureAndLeavesSourceFileIntact()
+    {
+        using var temp = TestEnvironment.Create();
+        var executor = new SafeFileOperationExecutor();
+        var fileName = $"locked_{Guid.NewGuid():N}.txt";
+        const string originalContent = "critical locked file content that must remain intact";
+        var sourceFile = temp.CreateFile(fileName, originalContent);
+
+        using (var lockStream = File.Open(sourceFile, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var result = await executor.DeleteToRecycleBinAsync([sourceFile], [temp.RootPath]);
+
+            Assert.AreEqual(1, result.TotalCount);
+            Assert.AreEqual(0, result.SucceededCount);
+            Assert.AreEqual(1, result.FailedCount);
+            Assert.AreEqual(FileOperationItemStatus.Failed, result.Items[0].Status);
+            Assert.IsFalse(string.IsNullOrWhiteSpace(result.Items[0].Error));
+        }
+
+        Assert.IsTrue(File.Exists(sourceFile), "Locked file must remain on disk.");
+        Assert.AreEqual(originalContent, File.ReadAllText(sourceFile), "File content must not be modified or truncated.");
     }
 
     private sealed class TestEnvironment : IDisposable

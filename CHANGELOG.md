@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.2 — Patch
+
+### 回收站测试产物精准清理（#53）
+
+- 真实实现回收站测试产物精准清理：在 `RecycleBinTestHelper` 中实现 `CleanupRecycleBinItem` 与 `CleanupRecycleBinItemsForDirectory`，通过 STA Shell COM 精准匹配测试目录与 GUID 文件名，调用 `undelete` 恢复至原路径后物理删除。
+- 绝不弹窗、绝不挂起无头 STA 线程，绝不触碰非本次测试的历史项目。
+- 在 `TestEnvironment.Dispose()` 与 `TempDirectory.Dispose()` 中自动触发精准清理，保证相关测试运行后无 GUID 测试残留。
+
+### 真实 Shell 失败路径端到端防护验证（#53）
+
+- 补齐真实 Shell / 回收站失败路径端到端测试：在 `SafeFileOperationExecutorTests` 中排他锁定文件调用真实 `DeleteToRecycleBinAsync`，实测 Shell 报告失败且源文件物理存在、内容未被破坏或截断。
+- 在 `FileOperationIndexCommitterTests` 中实测排他锁定文件执行删除时，源文件保留、数据库节点保持在线状态（`is_online = 1`）且已有用户标签不受损。
+
+### 升级与风险
+
+- 原生兼容 v0.2.0、v0.3.0 与 v0.3.1 schema v5 数据库；升级无须数据迁移，建议在升级前导出用户标签 JSON。
+- 本版本取代 v0.3.1，彻底解决测试产物残留问题并补齐端到端失败路径防护实测。
+- 发布包未签名，仅支持 Windows x64；不包含永久删除或图谱视图。
+
 ## 0.3.1 — Patch
 
 ### 回收站安全契约修复（#47）

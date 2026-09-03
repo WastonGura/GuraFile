@@ -328,6 +328,9 @@ public sealed class ReleaseAcceptanceTests
         Assert.HasCount(1, offlineAfterRestart);
         Assert.AreEqual(renamedDb.Id, offlineAfterRestart[0].Id);
         Assert.AreEqual("v0.3 Acceptance Tag", tagService.ListTagsForFile(offlineAfterRestart[0].Id).Single().Name);
+
+        temp.Dispose();
+        Assert.IsFalse(RecycleBinTestHelper.ExistsInRecycleBin(renamedFileName, Path.GetDirectoryName(renamedPath)), "Recycled file must be cleaned up from Recycle Bin after test disposal.");
     }
 
     private static async Task<IndexedFile> WaitForFileWithinTwoSecondsAsync(
@@ -398,6 +401,11 @@ public sealed class ReleaseAcceptanceTests
 
         public void Dispose()
         {
+            if (!Directory.Exists(Path))
+            {
+                return;
+            }
+
             try
             {
                 RecycleBinTestHelper.CleanupRecycleBinItemsForDirectory(Path);
@@ -406,18 +414,21 @@ public sealed class ReleaseAcceptanceTests
             {
             }
 
-            foreach (var offlinePath in Directory.GetDirectories(Path, "*-offline"))
-            {
-                var restoredPath = offlinePath[..^"-offline".Length];
-                if (!Directory.Exists(restoredPath))
-                {
-                    Directory.Move(offlinePath, restoredPath);
-                }
-            }
-
             if (Directory.Exists(Path))
             {
-                Directory.Delete(Path, recursive: true);
+                foreach (var offlinePath in Directory.GetDirectories(Path, "*-offline"))
+                {
+                    var restoredPath = offlinePath[..^"-offline".Length];
+                    if (!Directory.Exists(restoredPath))
+                    {
+                        Directory.Move(offlinePath, restoredPath);
+                    }
+                }
+
+                if (Directory.Exists(Path))
+                {
+                    Directory.Delete(Path, recursive: true);
+                }
             }
         }
     }

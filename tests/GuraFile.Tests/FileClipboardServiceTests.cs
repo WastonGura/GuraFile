@@ -102,6 +102,7 @@ public sealed class FileClipboardServiceTests
         {
             try
             {
+                RecycleBinTestHelper.CleanupRecycleBinItemsForDirectory(RootPath);
                 if (Directory.Exists(RootPath))
                 {
                     Directory.Delete(RootPath, recursive: true);
