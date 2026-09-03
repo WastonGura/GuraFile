@@ -43,11 +43,11 @@ internal static class RecycleBinTestHelper
             thread.SetApartmentState(ApartmentState.STA);
             thread.IsBackground = true;
             thread.Start();
-            var joined = thread.Join(TimeSpan.FromSeconds(5));
+            var joined = thread.Join(TimeSpan.FromSeconds(15));
 
             if (!joined)
             {
-                throw new TimeoutException("Shell COM inspection on STA thread timed out after 5 seconds.");
+                throw new TimeoutException("Shell COM operation on STA thread timed out after 15 seconds.");
             }
 
             if (error != null)
@@ -85,14 +85,280 @@ internal static class RecycleBinTestHelper
 
     public static int CleanupRecycleBinItemsForDirectory(string directoryPath)
     {
-        // Safe no-op: test items are uniquely GUID-tagged and harmless; avoiding interactive Explorer verb hangs.
-        return 0;
+        if (string.IsNullOrWhiteSpace(directoryPath))
+        {
+            return 0;
+        }
+
+        var normalizedExpectedDir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directoryPath));
+
+        return RunInSta(() =>
+        {
+            var type = Type.GetTypeFromProgID("Shell.Application");
+            if (type == null)
+            {
+                return 0;
+            }
+
+            dynamic shell = Activator.CreateInstance(type)!;
+            dynamic recycleBin = shell.NameSpace(ssfBITBUCKET);
+            if (recycleBin == null)
+            {
+                return 0;
+            }
+
+            var matchingItems = new List<dynamic>();
+
+            foreach (dynamic item in recycleBin.Items())
+            {
+                try
+                {
+                    string origDir = recycleBin.GetDetailsOf(item, 1);
+                    if (string.IsNullOrWhiteSpace(origDir))
+                    {
+                        continue;
+                    }
+
+                    var normalizedOrig = Path.TrimEndingDirectorySeparator(Path.GetFullPath(origDir));
+                    if (string.Equals(normalizedOrig, normalizedExpectedDir, StringComparison.OrdinalIgnoreCase) ||
+                        normalizedOrig.StartsWith(normalizedExpectedDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                    {
+                        matchingItems.Add(item);
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            int count = 0;
+            foreach (var item in matchingItems)
+            {
+                if (RestoreAndPurge(item, recycleBin, normalizedExpectedDir))
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        });
     }
 
     public static int CleanupRecycleBinItem(string fileName, string? expectedOriginalDirectory = null)
     {
-        // Safe no-op: test items are uniquely GUID-tagged and harmless; avoiding interactive Explorer verb hangs.
-        return 0;
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return 0;
+        }
+
+        string? normalizedExpectedDir = expectedOriginalDirectory != null
+            ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(expectedOriginalDirectory))
+            : null;
+
+        return RunInSta(() =>
+        {
+            var type = Type.GetTypeFromProgID("Shell.Application");
+            if (type == null)
+            {
+                return 0;
+            }
+
+            dynamic shell = Activator.CreateInstance(type)!;
+            dynamic recycleBin = shell.NameSpace(ssfBITBUCKET);
+            if (recycleBin == null)
+            {
+                return 0;
+            }
+
+            var matchingItems = new List<dynamic>();
+            var nameWithoutExt = Path.GetFileNameWithoutExtension(fileName);
+
+            foreach (dynamic item in recycleBin.Items())
+            {
+                try
+                {
+                    string name = item.Name;
+                    bool nameMatches = string.Equals(name, fileName, StringComparison.OrdinalIgnoreCase) ||
+                                       string.Equals(name, nameWithoutExt, StringComparison.OrdinalIgnoreCase) ||
+                                       (fileName.StartsWith(name, StringComparison.OrdinalIgnoreCase) && name.Length >= (nameWithoutExt?.Length ?? 0));
+                    if (!nameMatches)
+                    {
+                        continue;
+                    }
+
+                    if (normalizedExpectedDir != null)
+                    {
+                        string origDir = recycleBin.GetDetailsOf(item, 1);
+                        if (!string.IsNullOrWhiteSpace(origDir))
+                        {
+                            var normalizedOrig = Path.TrimEndingDirectorySeparator(Path.GetFullPath(origDir));
+                            if (string.Equals(normalizedOrig, normalizedExpectedDir, StringComparison.OrdinalIgnoreCase) ||
+                                normalizedOrig.StartsWith(normalizedExpectedDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                                normalizedExpectedDir.StartsWith(normalizedOrig + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                            {
+                                matchingItems.Add(item);
+                            }
+                        }
+                        else
+                        {
+                            matchingItems.Add(item);
+                        }
+                    }
+                    else
+                    {
+                        matchingItems.Add(item);
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            int count = 0;
+            foreach (var item in matchingItems)
+            {
+                if (RestoreAndPurge(item, recycleBin, normalizedExpectedDir))
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        });
+    }
+
+    private static bool RestoreAndPurge(dynamic item, dynamic recycleBin, string? fallbackDir)
+    {
+        try
+        {
+            string name = (string)item.Name;
+            string origDir = (string)recycleBin.GetDetailsOf(item, 1);
+            if (string.IsNullOrWhiteSpace(origDir))
+            {
+                origDir = fallbackDir ?? "";
+            }
+
+            string? targetPath = !string.IsNullOrWhiteSpace(origDir) ? Path.Combine(origDir, name) : null;
+            if (targetPath != null)
+            {
+                if (File.Exists(targetPath))
+                {
+                    try { File.Delete(targetPath); } catch { }
+                }
+                else if (Directory.Exists(targetPath))
+                {
+                    try { Directory.Delete(targetPath, recursive: true); } catch { }
+                }
+            }
+
+            bool invoked = false;
+            try
+            {
+                item.InvokeVerb("undelete");
+                invoked = true;
+            }
+            catch
+            {
+            }
+
+            if (targetPath != null)
+            {
+                for (int i = 0; i < 4; i++)
+                {
+                    if (File.Exists(targetPath) || Directory.Exists(targetPath))
+                    {
+                        break;
+                    }
+                    Thread.Sleep(50);
+                }
+            }
+
+            if (targetPath != null && !File.Exists(targetPath) && !Directory.Exists(targetPath))
+            {
+                try
+                {
+                    dynamic verbs = item.Verbs();
+                    if (verbs != null)
+                    {
+                        for (int v = 0; v < verbs.Count; v++)
+                        {
+                            dynamic verb = verbs.Item(v);
+                            string vName = verb.Name?.ToString() ?? "";
+                            var clean = vName.Replace("&", "").Trim();
+                            if (string.Equals(clean, "Restore", StringComparison.OrdinalIgnoreCase) ||
+                                clean.Contains("还原", StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(vName, "&E", StringComparison.OrdinalIgnoreCase))
+                            {
+                                verb.DoIt();
+                                invoked = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            if (!invoked)
+            {
+                return false;
+            }
+
+            if (targetPath != null)
+            {
+                for (int i = 0; i < 20; i++)
+                {
+                    if (File.Exists(targetPath))
+                    {
+                        try { File.Delete(targetPath); } catch { }
+                        return true;
+                    }
+                    if (Directory.Exists(targetPath))
+                    {
+                        try { Directory.Delete(targetPath, recursive: true); } catch { }
+                        return true;
+                    }
+                    Thread.Sleep(50);
+                }
+
+                if (!string.IsNullOrWhiteSpace(origDir) && Directory.Exists(origDir))
+                {
+                    var candidates = Directory.GetFileSystemEntries(origDir, name + "*");
+                    bool purged = false;
+                    foreach (var entry in candidates)
+                    {
+                        try
+                        {
+                            if (File.Exists(entry))
+                            {
+                                File.Delete(entry);
+                                purged = true;
+                            }
+                            else if (Directory.Exists(entry))
+                            {
+                                Directory.Delete(entry, recursive: true);
+                                purged = true;
+                            }
+                        }
+                        catch
+                        {
+                        }
+                    }
+                    if (purged)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static dynamic? FindRecycleBinItem(string fileName, string? expectedOriginalDirectory = null)

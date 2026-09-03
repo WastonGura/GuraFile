@@ -900,6 +900,9 @@ public sealed class FileOperationIndexCommitterTests
         var preservedTags = tagService.ListTagsForFile(fileId);
         Assert.HasCount(1, preservedTags);
         Assert.AreEqual("PreservedTag", preservedTags[0].Name);
+
+        env.Dispose();
+        Assert.IsFalse(RecycleBinTestHelper.ExistsInRecycleBin(fileName, env.RootPath), "Recycled file must be cleaned from Recycle Bin after disposal.");
     }
 
     [TestMethod]
@@ -945,6 +948,9 @@ public sealed class FileOperationIndexCommitterTests
         var f2DbId = initFiles.Single(f => f.Path == file2).Id;
         Assert.AreEqual("TagF1", tagService.ListTagsForFile(f1DbId).Single().Name);
         Assert.AreEqual("TagF2", tagService.ListTagsForFile(f2DbId).Single().Name);
+
+        env.Dispose();
+        Assert.IsFalse(RecycleBinTestHelper.ExistsInRecycleBin(folderName, env.RootPath), "Recycled folder must be cleaned from Recycle Bin after disposal.");
     }
 
     [TestMethod]
@@ -1084,6 +1090,56 @@ public sealed class FileOperationIndexCommitterTests
 
         // Physical file on disk must still exist
         Assert.IsTrue(File.Exists(sourcePath));
+    }
+
+    [TestMethod]
+    public async Task DeleteToRecycleBin_WhenFileIsLockedExclusively_ReportsFailureAndPreservesOnlineStateAndUserTags()
+    {
+        using var env = TestEnvironment.Create();
+        var fileName = $"locked_commit_{Guid.NewGuid():N}.txt";
+        const string originalContent = "locked undeletable content";
+        var sourcePath = env.CreateFile(fileName, originalContent);
+        var root = env.Scanner.AddRoot(env.RootPath);
+        await env.Scanner.ScanAsync(root.Id);
+
+        var queryService = new FileQueryService(env.DatabasePath);
+        var initialFiles = await queryService.QueryAsync(new());
+        Assert.HasCount(1, initialFiles);
+        var fileId = initialFiles[0].Id;
+
+        var tagService = new TagService(env.DatabasePath);
+        var tag = tagService.CreateTag("LockedTag");
+        tagService.AddTagToFiles(tag.Id, [fileId]);
+
+        var committer = new FileOperationIndexCommitter(env.Scanner);
+
+        using (var lockStream = File.Open(sourcePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var result = await committer.DeleteToRecycleBinAsync([sourcePath], [root.Path]);
+
+            Assert.AreEqual(0, result.SucceededCount);
+            Assert.AreEqual(1, result.FailedCount);
+            Assert.AreEqual(FileOperationItemStatus.Failed, result.Items[0].Status);
+        }
+
+        // Database record must still be online = 1
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT is_online FROM files WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$id", fileId);
+            var isOnline = (long)cmd.ExecuteScalar()!;
+            Assert.AreEqual(1, isOnline);
+        }
+
+        // Tag must still exist on the file
+        var tags = tagService.ListTagsForFile(fileId);
+        Assert.HasCount(1, tags);
+        Assert.AreEqual("LockedTag", tags[0].Name);
+
+        // Physical file on disk must still exist and be intact
+        Assert.IsTrue(File.Exists(sourcePath));
+        Assert.AreEqual(originalContent, File.ReadAllText(sourcePath));
     }
 
     [TestMethod]
@@ -1261,10 +1317,7 @@ public sealed class FileOperationIndexCommitterTests
         {
             try
             {
-                if (HasRecycledItems)
-                {
-                    RecycleBinTestHelper.CleanupRecycleBinItemsForDirectory(RootPath);
-                }
+                RecycleBinTestHelper.CleanupRecycleBinItemsForDirectory(RootPath);
 
                 if (Directory.Exists(RootPath))
                 {

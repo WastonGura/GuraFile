@@ -178,6 +178,7 @@ public sealed class DragAndDropServiceTests
         {
             try
             {
+                RecycleBinTestHelper.CleanupRecycleBinItemsForDirectory(RootPath);
                 if (Directory.Exists(RootPath))
                 {
                     Directory.Delete(RootPath, recursive: true);
