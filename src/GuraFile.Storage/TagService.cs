@@ -5,6 +5,7 @@ namespace GuraFile.Storage;
 
 public sealed record UserTag(long Id, string Name);
 public sealed record AutomaticTag(long Id, string Name);
+internal sealed record FileTagRelation(long FileId, long TagId, string Name, bool IsAutomatic);
 
 public sealed class TagService
 {
@@ -119,6 +120,59 @@ public sealed class TagService
         }
 
         return tags;
+    }
+
+    internal IReadOnlyList<FileTagRelation> ListTagRelationsForFiles(
+        IReadOnlyCollection<long> fileIds,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(fileIds);
+        var ids = fileIds.Distinct().ToArray();
+        if (ids.Length == 0)
+        {
+            return [];
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        using var connection = SqliteDatabase.Open(DatabasePath);
+        using var command = connection.CreateCommand();
+        var placeholders = new string[ids.Length];
+        for (var index = 0; index < ids.Length; index++)
+        {
+            placeholders[index] = $"$file{index}";
+            command.Parameters.AddWithValue(placeholders[index], ids[index]);
+        }
+
+        command.CommandText =
+            $"""
+            SELECT ft.file_id, t.id, t.name, t.source
+            FROM file_tags ft
+            JOIN tags t ON t.id = ft.tag_id AND t.source = ft.source
+            WHERE ft.file_id IN ({string.Join(", ", placeholders)})
+            ORDER BY ft.file_id, t.id;
+            """;
+
+        try
+        {
+            using var registration = cancellationToken.Register(command.Cancel);
+            using var reader = command.ExecuteReader();
+            var relations = new List<FileTagRelation>();
+            while (reader.Read())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                relations.Add(new(
+                    reader.GetInt64(0),
+                    reader.GetInt64(1),
+                    reader.GetString(2),
+                    reader.GetString(3) == "automatic"));
+            }
+
+            return relations;
+        }
+        catch (SqliteException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
     }
 
     public FileTypeClassification ReclassifyFile(long fileId)
