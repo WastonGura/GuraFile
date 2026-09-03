@@ -22,4 +22,9 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
     <ProjectReference Include="..\GuraFile.Storage\GuraFile.Storage.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Content Include="Assets\graph\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
 </Project>

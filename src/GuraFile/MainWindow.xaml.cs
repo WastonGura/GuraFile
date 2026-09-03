@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.Web.WebView2.Core;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage.Pickers;
 using WinRT.Interop;
@@ -20,6 +21,7 @@ public sealed partial class MainWindow : Window
     private readonly ShellFileActions _shell = new();
     private readonly IFileClipboardService _clipboard;
     private readonly FileListOperationService _fileOperations;
+    private readonly GraphSnapshotService _graphSnapshotService;
     private CancellationTokenSource? _scanCancellation;
     private CancellationTokenSource? _fileQueryCancellation;
     private CancellationTokenSource? _detailCancellation;
@@ -34,6 +36,10 @@ public sealed partial class MainWindow : Window
     private bool _isScanning;
     private bool _isOperating;
     private List<string>? _draggedFilePaths;
+    private bool _webViewInitialized;
+    private bool _webPageReady;
+    private IReadOnlyList<IndexedFile> _currentFiles = [];
+    private GraphSnapshot? _pendingSnapshot;
 
     public MainWindow()
     {
@@ -52,6 +58,7 @@ public sealed partial class MainWindow : Window
         _fileQuery = new(databasePath);
         _tags = new(databasePath);
         _tagBackup = new(databasePath);
+        _graphSnapshotService = new(databasePath);
         _clipboard = new FileClipboardService();
         _fileOperations = new FileListOperationService(new FileOperationIndexCommitter(_scanner), _scanner, _clipboard);
         _initialized = true;
@@ -1345,8 +1352,13 @@ public sealed partial class MainWindow : Window
                     TagMatch: TagMatchBox.SelectedIndex == 1 ? TagMatchMode.All : TagMatchMode.Any),
                 cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
+            _currentFiles = files;
             FilesList.ItemsSource = files;
             FilesStateText.Text = files.Count == 0 ? "没有匹配的文件" : $"{files.Count:N0} 个文件";
+            if (ViewModeBox.SelectedIndex == 1)
+            {
+                await RefreshGraphAsync();
+            }
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
@@ -1355,8 +1367,13 @@ public sealed partial class MainWindow : Window
         {
             if (ReferenceEquals(_fileQueryCancellation, cancellation))
             {
+                _currentFiles = [];
                 FilesList.ItemsSource = null;
                 FilesStateText.Text = $"文件列表加载失败：{exception.Message}";
+                if (ViewModeBox.SelectedIndex == 1)
+                {
+                    UpdateGraphState(GraphViewState.Error(exception.Message));
+                }
             }
         }
         finally
@@ -1422,4 +1439,222 @@ public sealed partial class MainWindow : Window
 
     private string SortLabel(string label, FileSortColumn column) =>
         _sortColumn == column ? $"{label} {(_sortDescending ? '▼' : '▲')}" : label;
+
+    private void ViewModeBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_initialized)
+        {
+            return;
+        }
+
+        var isGraph = ViewModeBox.SelectedIndex == 1;
+        SortBarGrid.Visibility = isGraph ? Visibility.Collapsed : Visibility.Visible;
+        FileActionsPanel.Visibility = isGraph ? Visibility.Collapsed : Visibility.Visible;
+        FilesList.Visibility = isGraph ? Visibility.Collapsed : Visibility.Visible;
+        GraphHostContainer.Visibility = isGraph ? Visibility.Visible : Visibility.Collapsed;
+
+        if (isGraph)
+        {
+            _ = RefreshGraphAsync();
+        }
+    }
+
+    private void FitViewportButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_webPageReady && GraphWebView.CoreWebView2 is not null)
+        {
+            GraphWebView.CoreWebView2.PostWebMessageAsJson(GraphMessageSerializer.SerializeFitViewport());
+        }
+    }
+
+    private void BroadTagsCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        _ = RefreshGraphAsync();
+    }
+
+    private async Task InitializeGraphWebViewAsync()
+    {
+        if (_webViewInitialized)
+        {
+            return;
+        }
+
+        try
+        {
+            UpdateGraphState(GraphViewState.Loading());
+
+            await GraphWebView.EnsureCoreWebView2Async();
+            var assetsPath = Path.Combine(AppContext.BaseDirectory, "Assets", "graph");
+            GraphWebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+                GraphSecurityPolicy.VirtualHostName,
+                assetsPath,
+                CoreWebView2HostResourceAccessKind.Allow);
+
+            GraphWebView.CoreWebView2.NavigationStarting += (_, args) =>
+            {
+                if (!GraphSecurityPolicy.IsAllowedUri(args.Uri))
+                {
+                    args.Cancel = true;
+                }
+            };
+
+            GraphWebView.CoreWebView2.NewWindowRequested += (_, args) =>
+            {
+                args.Handled = true;
+            };
+
+            GraphWebView.CoreWebView2.DownloadStarting += (_, args) =>
+            {
+                args.Cancel = true;
+            };
+
+            GraphWebView.CoreWebView2.WebMessageReceived += (_, args) =>
+            {
+                DispatcherQueue.TryEnqueue(() => HandleWebMessage(args.WebMessageAsJson));
+            };
+
+            _webViewInitialized = true;
+            GraphWebView.CoreWebView2.Navigate(GraphSecurityPolicy.EntryUrl);
+        }
+        catch (Exception exception)
+        {
+            UpdateGraphState(GraphViewState.Error(exception.Message));
+        }
+    }
+
+    private async Task RefreshGraphAsync()
+    {
+        if (ViewModeBox.SelectedIndex != 1)
+        {
+            return;
+        }
+
+        if (!_webViewInitialized)
+        {
+            await InitializeGraphWebViewAsync();
+        }
+
+        var files = _currentFiles;
+        var includeBroad = BroadTagsCheckBox.IsChecked == true;
+
+        if (files.Count == 0)
+        {
+            UpdateGraphState(GraphViewState.Empty());
+            return;
+        }
+
+        if (files.Count > GraphSnapshotService.MaxFileNodes)
+        {
+            UpdateGraphState(GraphViewState.LimitExceeded(files.Count));
+            return;
+        }
+
+        try
+        {
+            UpdateGraphState(GraphViewState.Loading());
+
+            var snapshot = await _graphSnapshotService.CreateAsync(files, includeBroad);
+            var state = GraphViewState.FromSnapshot(snapshot);
+            if (state.Mode != GraphViewDisplayMode.Ready)
+            {
+                UpdateGraphState(state);
+                return;
+            }
+
+            UpdateGraphState(state);
+            PostSnapshotToWeb(snapshot);
+        }
+        catch (Exception exception)
+        {
+            UpdateGraphState(GraphViewState.Error(exception.Message));
+        }
+    }
+
+    private void PostSnapshotToWeb(GraphSnapshot snapshot)
+    {
+        if (!_webPageReady || GraphWebView.CoreWebView2 is null)
+        {
+            _pendingSnapshot = snapshot;
+            return;
+        }
+
+        var json = GraphMessageSerializer.SerializeRenderSnapshot(snapshot);
+        GraphWebView.CoreWebView2.PostWebMessageAsJson(json);
+    }
+
+    private void HandleWebMessage(string json)
+    {
+        try
+        {
+            var message = GraphMessageSerializer.Deserialize(json);
+            switch (message.Type)
+            {
+                case GraphMessageTypes.Ready:
+                    _webPageReady = true;
+                    if (_pendingSnapshot is not null)
+                    {
+                        PostSnapshotToWeb(_pendingSnapshot);
+                        _pendingSnapshot = null;
+                    }
+                    break;
+
+                case GraphMessageTypes.FirstFrameRendered:
+                    var metrics = GraphMessageSerializer.ParseFirstFrameMetrics(message);
+                    GraphLoadingRing.IsActive = false;
+                    GraphLoadingRing.Visibility = Visibility.Collapsed;
+                    GraphInfoText.Text = $"节点 {metrics.NodeCount}，边 {metrics.EdgeCount}（耗时 {metrics.RenderDurationMs:F0} ms）";
+                    break;
+
+                case GraphMessageTypes.Error:
+                    var error = GraphMessageSerializer.ParseErrorMessage(message);
+                    UpdateGraphState(GraphViewState.Error(error));
+                    break;
+            }
+        }
+        catch (Exception exception)
+        {
+            UpdateGraphState(GraphViewState.Error(exception.Message));
+        }
+    }
+
+    private void UpdateGraphState(GraphViewState state)
+    {
+        switch (state.Mode)
+        {
+            case GraphViewDisplayMode.Loading:
+                GraphLoadingRing.IsActive = true;
+                GraphLoadingRing.Visibility = Visibility.Visible;
+                GraphMessagePanel.Visibility = Visibility.Visible;
+                GraphStateText.Text = state.Message ?? "正在加载图谱…";
+                GraphWebView.Visibility = Visibility.Collapsed;
+                GraphInfoText.Text = string.Empty;
+                break;
+
+            case GraphViewDisplayMode.Empty:
+            case GraphViewDisplayMode.LimitExceeded:
+                GraphLoadingRing.IsActive = false;
+                GraphLoadingRing.Visibility = Visibility.Collapsed;
+                GraphMessagePanel.Visibility = Visibility.Visible;
+                GraphStateText.Text = state.Message ?? string.Empty;
+                GraphWebView.Visibility = Visibility.Collapsed;
+                GraphInfoText.Text = string.Empty;
+                break;
+
+            case GraphViewDisplayMode.Ready:
+                GraphLoadingRing.IsActive = false;
+                GraphLoadingRing.Visibility = Visibility.Collapsed;
+                GraphMessagePanel.Visibility = Visibility.Collapsed;
+                GraphWebView.Visibility = Visibility.Visible;
+                break;
+
+            case GraphViewDisplayMode.Error:
+                GraphLoadingRing.IsActive = false;
+                GraphLoadingRing.Visibility = Visibility.Collapsed;
+                GraphMessagePanel.Visibility = Visibility.Visible;
+                GraphStateText.Text = state.Message ?? "图谱加载失败";
+                GraphWebView.Visibility = Visibility.Collapsed;
+                GraphInfoText.Text = string.Empty;
+                break;
+        }
+    }
 }

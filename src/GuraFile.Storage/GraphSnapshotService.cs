@@ -12,7 +12,7 @@ public enum GraphTagSource
     Automatic
 }
 
-public sealed record GraphFileNode(string Id, long FileId, string Label);
+public sealed record GraphFileNode(string Id, long FileId, string Label, string Category = "其他");
 
 public sealed record GraphTagNode(
     string Id,
@@ -80,7 +80,11 @@ public sealed class GraphSnapshotService
         }
 
         var fileNodes = orderedFiles
-            .Select(file => new GraphFileNode(FileNodeId(file.Id), file.Id, file.Name))
+            .Select(file => new GraphFileNode(
+                FileNodeId(file.Id),
+                file.Id,
+                file.Name,
+                GraphCategoryResolver.Resolve(file.Extension)))
             .ToArray();
         var relations = _tags.ListTagRelationsForFiles(
                 orderedFiles.Select(file => file.Id).ToArray(),

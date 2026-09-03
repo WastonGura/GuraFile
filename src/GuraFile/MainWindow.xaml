@@ -73,8 +73,18 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
-            <TextBox x:Name="SearchBox" AutomationProperties.Name="筛选文件" PlaceholderText="按名称、路径或扩展名筛选" TextChanged="SearchBox_TextChanged" />
-            <Grid Grid.Row="1" ColumnSpacing="4">
+            <Grid Grid.Row="0" ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="SearchBox" AutomationProperties.Name="筛选文件" PlaceholderText="按名称、路径或扩展名筛选" TextChanged="SearchBox_TextChanged" />
+                <ComboBox x:Name="ViewModeBox" Grid.Column="1" AutomationProperties.Name="视图模式" SelectedIndex="0" SelectionChanged="ViewModeBox_SelectionChanged">
+                    <ComboBoxItem Content="列表" />
+                    <ComboBoxItem Content="图谱" />
+                </ComboBox>
+            </Grid>
+            <Grid x:Name="SortBarGrid" Grid.Row="1" ColumnSpacing="4">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="120" />
                     <ColumnDefinition Width="*" />
@@ -90,7 +100,7 @@
                 <Button x:Name="SortModifiedButton" Grid.Column="4" AutomationProperties.Name="按修改时间排序" Click="SortButton_Click" Content="修改时间" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Tag="Modified" />
                 <TextBlock Grid.Column="5" VerticalAlignment="Center" Text="状态" />
             </Grid>
-            <StackPanel Grid.Row="2" Spacing="6">
+            <StackPanel x:Name="FileActionsPanel" Grid.Row="2" Spacing="6">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <Button x:Name="CopyFileButton" AutomationProperties.Name="复制所选文件" ToolTipService.ToolTip="复制 (Ctrl+C)" Click="CopyFileButton_Click" Content="复制" IsEnabled="False" />
                     <Button x:Name="CutFileButton" AutomationProperties.Name="剪切所选文件" ToolTipService.ToolTip="剪切 (Ctrl+X)" Click="CutFileButton_Click" Content="剪切" IsEnabled="False" />
@@ -173,6 +183,29 @@
                     </DataTemplate>
                 </ListView.ItemTemplate>
             </ListView>
+            <Grid x:Name="GraphHostContainer" Grid.Row="3" Visibility="Collapsed" RowSpacing="6">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Grid Grid.Row="0" ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Button x:Name="FitViewportButton" AutomationProperties.Name="适配图谱视口" Content="适配视口" Click="FitViewportButton_Click" />
+                    <CheckBox x:Name="BroadTagsCheckBox" Grid.Column="1" AutomationProperties.Name="显示宽泛类型标签" Content="显示宽泛类型标签" Click="BroadTagsCheckBox_Click" IsChecked="False" />
+                    <TextBlock x:Name="GraphInfoText" Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </Grid>
+                <Grid Grid.Row="1">
+                    <WebView2 x:Name="GraphWebView" AutomationProperties.Name="关系图谱宿主" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" />
+                    <ProgressRing x:Name="GraphLoadingRing" Width="36" Height="36" HorizontalAlignment="Center" VerticalAlignment="Center" IsActive="False" Visibility="Collapsed" />
+                    <StackPanel x:Name="GraphMessagePanel" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8" Visibility="Collapsed">
+                        <TextBlock x:Name="GraphStateText" AutomationProperties.Name="图谱状态提示" FontSize="14" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </Grid>
+            </Grid>
         </Grid>
 
         <Grid Grid.Column="2" RowSpacing="12">
