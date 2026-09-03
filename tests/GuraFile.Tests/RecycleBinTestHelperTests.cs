@@ -38,23 +38,106 @@ public sealed class RecycleBinTestHelperTests
             Directory.Delete(root, recursive: true);
         }
     }
+
+    [TestMethod]
+    public void RestoreAndPurge_WhenRestoredTargetDeletionFails_DoesNotReportSuccess()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"GuraFile-RecycleHelper-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var targetPath = Path.Combine(root, "restored.txt");
+        FileStream? targetLock = null;
+
+        try
+        {
+            var item = new RecycleBinItemStub(
+                Path.Combine(root, "shell-item"),
+                Path.GetFileName(targetPath),
+                _ =>
+                {
+                    File.WriteAllText(targetPath, "restored");
+                    targetLock = File.Open(targetPath, FileMode.Open, FileAccess.Read, FileShare.None);
+                });
+            var method = typeof(RecycleBinTestHelper).GetMethod(
+                "RestoreAndPurge",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            var cleaned = (bool)method!.Invoke(
+                null,
+                [item, new RecycleBinStub(root), null])!;
+
+            Assert.IsFalse(cleaned, "A restored target that could not be deleted must not be reported as cleaned.");
+            Assert.IsTrue(File.Exists(targetPath));
+        }
+        finally
+        {
+            targetLock?.Dispose();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public void RestoreAndPurge_WhenRestoreTargetNeverAppears_DoesNotReportSuccess()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"GuraFile-RecycleHelper-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var item = new RecycleBinItemStub(
+                Path.Combine(root, "shell-item"),
+                "missing.txt",
+                _ => { });
+            var method = typeof(RecycleBinTestHelper).GetMethod(
+                "RestoreAndPurge",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            var cleaned = (bool)method!.Invoke(
+                null,
+                [item, new RecycleBinStub(root), null])!;
+
+            Assert.IsFalse(cleaned, "A restore with no observable target must not be reported as cleaned.");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
 }
 
 internal sealed class RecycleBinItemStub
 {
-    public RecycleBinItemStub(string path)
+    private readonly Action<string>? _invokeVerb;
+
+    public RecycleBinItemStub(string path, string? name = null, Action<string>? invokeVerb = null)
     {
         Path = path;
+        Name = name ?? System.IO.Path.GetFileName(path);
+        _invokeVerb = invokeVerb;
     }
 
     public string Path { get; }
 
-    public string Name => System.IO.Path.GetFileName(Path);
+    public string Name { get; }
 
-    public void InvokeVerb(string verb) => throw new InvalidOperationException(verb);
+    public void InvokeVerb(string verb)
+    {
+        if (_invokeVerb == null)
+        {
+            throw new InvalidOperationException(verb);
+        }
+
+        _invokeVerb(verb);
+    }
 }
 
 internal sealed class RecycleBinStub
 {
-    public string GetDetailsOf(object item, int column) => string.Empty;
+    private readonly string _originalDirectory;
+
+    public RecycleBinStub(string originalDirectory = "")
+    {
+        _originalDirectory = originalDirectory;
+    }
+
+    public string GetDetailsOf(object item, int column) => _originalDirectory;
 }

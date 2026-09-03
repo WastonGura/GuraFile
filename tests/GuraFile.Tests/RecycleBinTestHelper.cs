@@ -353,12 +353,18 @@ internal static class RecycleBinTestHelper
                     if (File.Exists(targetPath))
                     {
                         try { File.Delete(targetPath); } catch { }
-                        return true;
+                        if (!File.Exists(targetPath))
+                        {
+                            return true;
+                        }
                     }
-                    if (Directory.Exists(targetPath))
+                    else if (Directory.Exists(targetPath))
                     {
                         try { Directory.Delete(targetPath, recursive: true); } catch { }
-                        return true;
+                        if (!Directory.Exists(targetPath))
+                        {
+                            return true;
+                        }
                     }
                     Thread.Sleep(50);
                 }
@@ -366,7 +372,7 @@ internal static class RecycleBinTestHelper
                 if (!string.IsNullOrWhiteSpace(origDir) && Directory.Exists(origDir))
                 {
                     var candidates = Directory.GetFileSystemEntries(origDir, name + "*");
-                    bool purged = false;
+                    bool purged = candidates.Length > 0;
                     foreach (var entry in candidates)
                     {
                         try
@@ -374,17 +380,17 @@ internal static class RecycleBinTestHelper
                             if (File.Exists(entry))
                             {
                                 File.Delete(entry);
-                                purged = true;
                             }
                             else if (Directory.Exists(entry))
                             {
                                 Directory.Delete(entry, recursive: true);
-                                purged = true;
                             }
                         }
                         catch
                         {
                         }
+
+                        purged &= !File.Exists(entry) && !Directory.Exists(entry);
                     }
                     if (purged)
                     {
@@ -393,7 +399,7 @@ internal static class RecycleBinTestHelper
                 }
             }
 
-            return true;
+            return false;
         }
         catch
         {
