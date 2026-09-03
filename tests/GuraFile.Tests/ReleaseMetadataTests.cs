@@ -26,6 +26,7 @@ public sealed class ReleaseMetadataTests
         StringAssert.Contains(readme, "删除操作仅支持删除到 Windows 回收站");
         StringAssert.Contains(readme, "尚未提供图谱");
         StringAssert.Contains(readme, "GuraFile-v0.3.2-win-x64.zip");
+        StringAssert.Contains(readme, @".\scripts\PackageRelease.ps1 -Version 0.3.2");
 
         StringAssert.Contains(File.ReadAllText(Path.Combine(root, "CHANGELOG.md")), "## 0.3.2");
         StringAssert.Contains(File.ReadAllText(Path.Combine(root, "THIRD_PARTY_NOTICES.md")), "GuraFile v0.3.2");

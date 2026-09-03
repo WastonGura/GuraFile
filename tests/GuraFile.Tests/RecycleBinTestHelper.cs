@@ -245,22 +245,21 @@ internal static class RecycleBinTestHelper
                         var iLeaf = "$I" + leaf.Substring(2);
                         var iPath = Path.Combine(dir, iLeaf);
 
-                        bool purgedAny = false;
                         if (File.Exists(itemPath))
                         {
-                            try { File.Delete(itemPath); purgedAny = true; } catch { }
+                            try { File.Delete(itemPath); } catch { }
                         }
                         else if (Directory.Exists(itemPath))
                         {
-                            try { Directory.Delete(itemPath, recursive: true); purgedAny = true; } catch { }
+                            try { Directory.Delete(itemPath, recursive: true); } catch { }
                         }
 
                         if (File.Exists(iPath))
                         {
-                            try { File.Delete(iPath); purgedAny = true; } catch { }
+                            try { File.Delete(iPath); } catch { }
                         }
 
-                        if (purgedAny)
+                        if (!File.Exists(itemPath) && !Directory.Exists(itemPath) && !File.Exists(iPath))
                         {
                             return true;
                         }
@@ -354,47 +353,25 @@ internal static class RecycleBinTestHelper
                     if (File.Exists(targetPath))
                     {
                         try { File.Delete(targetPath); } catch { }
-                        return true;
+                        if (!File.Exists(targetPath))
+                        {
+                            return true;
+                        }
                     }
-                    if (Directory.Exists(targetPath))
+                    else if (Directory.Exists(targetPath))
                     {
                         try { Directory.Delete(targetPath, recursive: true); } catch { }
-                        return true;
+                        if (!Directory.Exists(targetPath))
+                        {
+                            return true;
+                        }
                     }
                     Thread.Sleep(50);
                 }
 
-                if (!string.IsNullOrWhiteSpace(origDir) && Directory.Exists(origDir))
-                {
-                    var candidates = Directory.GetFileSystemEntries(origDir, name + "*");
-                    bool purged = false;
-                    foreach (var entry in candidates)
-                    {
-                        try
-                        {
-                            if (File.Exists(entry))
-                            {
-                                File.Delete(entry);
-                                purged = true;
-                            }
-                            else if (Directory.Exists(entry))
-                            {
-                                Directory.Delete(entry, recursive: true);
-                                purged = true;
-                            }
-                        }
-                        catch
-                        {
-                        }
-                    }
-                    if (purged)
-                    {
-                        return true;
-                    }
-                }
             }
 
-            return true;
+            return false;
         }
         catch
         {
