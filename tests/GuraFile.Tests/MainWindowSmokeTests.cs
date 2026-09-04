@@ -216,4 +216,31 @@ public sealed class MainWindowSmokeTests
         StringAssert.Contains(source, "_graphInteractionCoordinator.EvaluateActivation");
         StringAssert.Contains(source, "RunFileAction(activation.File!, _shell.Open");
     }
+
+    [TestMethod]
+    public void MainWindowExposesGraphBoxSelectionAndBatchTaggingHandlers()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "GuraFile", "MainWindow.xaml"));
+        var document = XDocument.Load(path);
+        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var names = document.Descendants()
+            .Select(element => element.Attribute(x + "Name")?.Value)
+            .Where(name => name is not null)
+            .ToHashSet();
+
+        CollectionAssert.IsSubsetOf(
+            new[] { "GraphWebView", "FilesList", "ApplyTagButton", "RemoveTagButton" },
+            names.ToArray());
+
+        var source = File.ReadAllText(Path.ChangeExtension(path, ".xaml.cs"));
+        StringAssert.Contains(source, "GraphMessageTypes.SelectionChanged");
+        StringAssert.Contains(source, "_graphInteractionCoordinator.EvaluateBatchSelection");
+        StringAssert.Contains(source, "GraphMessageSerializer.SerializeSetSelection");
+        StringAssert.Contains(source, "GraphMessageSerializer.ParseSelectionChanged");
+        StringAssert.Contains(source, "_isSyncingSelectionFromGraph");
+        StringAssert.Contains(source, "_tags.AddTagToFiles");
+        StringAssert.Contains(source, "_tags.RemoveTagFromFiles");
+        StringAssert.Contains(source, "_tags.ListCommonUserTagsForFiles");
+    }
 }

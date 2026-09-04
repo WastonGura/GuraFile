@@ -85,6 +85,13 @@ public static class FileDetailsPresenter
 
         if (selectedFiles.Count > 1)
         {
+            var multiUserTagsText = userTags.Count == 0
+                ? "无"
+                : string.Join("、", userTags.Select(t => t.Name));
+            var multiAutoTagsText = automaticTags.Count == 0
+                ? "无"
+                : string.Join("、", automaticTags.Select(t => t.Name));
+
             return new FileDetailsModel(
                 Title: $"已选择 {selectedFiles.Count} 个文件",
                 Name: null,
@@ -94,8 +101,8 @@ public static class FileDetailsPresenter
                 ModifiedText: null,
                 StatusText: "多选",
                 IdentityStateText: "多选",
-                UserTagsText: "多选批量操作",
-                AutomaticTagsText: "多选批量操作",
+                UserTagsText: multiUserTagsText,
+                AutomaticTagsText: multiAutoTagsText,
                 Diagnostic: null,
                 IsSingleFileSelected: false,
                 IsMultipleFilesSelected: true,

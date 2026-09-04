@@ -1,4 +1,4 @@
-﻿namespace GuraFile.Storage;
+namespace GuraFile.Storage;
 
 public enum GraphSelectionKind
 {
@@ -130,6 +130,46 @@ public sealed class GraphInteractionCoordinator
         }
 
         return new GraphSelectionResult(GraphSelectionKind.Unknown, NodeId: payload.NodeId);
+    }
+
+    public IReadOnlyList<IndexedFile> EvaluateBatchSelection(IReadOnlyList<long>? fileIds, long? expectedGeneration = null)
+    {
+        if (expectedGeneration.HasValue && expectedGeneration.Value != Volatile.Read(ref _queryGeneration))
+        {
+            return [];
+        }
+
+        if (fileIds is null || fileIds.Count == 0)
+        {
+            return [];
+        }
+
+        lock (_lock)
+        {
+            if (expectedGeneration.HasValue && expectedGeneration.Value != _queryGeneration)
+            {
+                return [];
+            }
+
+            var distinctIds = fileIds.Distinct().ToHashSet();
+            var snapshotFileIds = CurrentSnapshot is not null
+                ? CurrentSnapshot.FileNodes.Select(f => f.FileId).ToHashSet()
+                : null;
+
+            var validFiles = new List<IndexedFile>();
+            foreach (var file in CurrentFiles)
+            {
+                if (distinctIds.Contains(file.Id))
+                {
+                    if (snapshotFileIds is null || snapshotFileIds.Contains(file.Id))
+                    {
+                        validFiles.Add(file);
+                    }
+                }
+            }
+
+            return validFiles;
+        }
     }
 
     public GraphActivationResult EvaluateActivation(GraphNodeActionPayload payload)

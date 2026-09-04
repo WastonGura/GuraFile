@@ -101,6 +101,22 @@ public sealed class FileDetailsPresenterTests
     }
 
     [TestMethod]
+    public void Create_MultipleFiles_WithCommonUserTags_PresentsCommonTags()
+    {
+        var file1 = new IndexedFile(1, "1.txt", @"C:\Data\1.txt", ".txt", 10, DateTimeOffset.UtcNow, true, null);
+        var file2 = new IndexedFile(2, "2.txt", @"C:\Data\2.txt", ".txt", 20, DateTimeOffset.UtcNow, true, null);
+
+        var commonUserTags = new[] { new UserTag(1, "工作"), new UserTag(2, "重要") };
+        var model = FileDetailsPresenter.Create([file1, file2], commonUserTags, []);
+
+        Assert.IsFalse(model.IsSingleFileSelected);
+        Assert.IsTrue(model.IsMultipleFilesSelected);
+        Assert.AreEqual(2, model.SelectedCount);
+        Assert.AreEqual("已选择 2 个文件", model.Title);
+        Assert.AreEqual("工作、重要", model.UserTagsText);
+    }
+
+    [TestMethod]
     public void CreateForTag_PresentsTagDetailsAndDisablesAllFileActions()
     {
         var model = FileDetailsPresenter.CreateForTag("工作", "用户标签");

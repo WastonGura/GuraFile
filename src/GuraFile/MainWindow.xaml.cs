@@ -235,19 +235,67 @@ public sealed partial class MainWindow : Window
 
         if (!_isSyncingSelectionFromGraph && ViewModeBox.SelectedIndex == 1 && _webPageReady && GraphWebView.CoreWebView2 is not null)
         {
-            var selectedFile = selected.Count == 1 ? selected[0] : null;
-            var nodeId = selectedFile is not null ? $"file:{selectedFile.Id}" : null;
-            GraphWebView.CoreWebView2.PostWebMessageAsJson(GraphMessageSerializer.SerializeSelectNode(nodeId));
+            var fileIds = selected.Select(f => f.Id).ToArray();
+            GraphWebView.CoreWebView2.PostWebMessageAsJson(GraphMessageSerializer.SerializeSetSelection(fileIds));
+            var nodeId = selected.Count == 1 ? $"file:{selected[0].Id}" : null;
+            _ = GraphMessageSerializer.SerializeSelectNode(nodeId);
         }
 
-        if (selected.Count != 1)
+        if (selected.Count == 0)
         {
-            var model = FileDetailsPresenter.Create(selected, [], []);
+            var model = FileDetailsPresenter.Create([], [], []);
             UpdateDetailsView(model);
             return;
         }
 
-        _ = LoadFileDetailsAsync(selected[0]);
+        if (selected.Count == 1)
+        {
+            _ = LoadFileDetailsAsync(selected[0]);
+            return;
+        }
+
+        _ = LoadMultipleFilesDetailsAsync(selected);
+    }
+
+    private async Task LoadMultipleFilesDetailsAsync(IReadOnlyList<IndexedFile> files)
+    {
+        _detailCancellation?.Cancel();
+        var cancellation = new CancellationTokenSource();
+        _detailCancellation = cancellation;
+        var initialModel = FileDetailsPresenter.Create(files, [], []);
+        UpdateDetailsView(initialModel);
+        try
+        {
+            var fileIds = files.Select(f => f.Id).ToArray();
+            var commonUserTags = await Task.Run(
+                () => _tags.ListCommonUserTagsForFiles(fileIds),
+                cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (ReferenceEquals(_detailCancellation, cancellation))
+            {
+                var loadedModel = FileDetailsPresenter.Create(files, commonUserTags, []);
+                UpdateDetailsView(loadedModel);
+            }
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            if (ReferenceEquals(_detailCancellation, cancellation))
+            {
+                FileActionStatusText.Text = $"标签读取失败：{exception.Message}";
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_detailCancellation, cancellation))
+            {
+                _detailCancellation = null;
+            }
+
+            cancellation.Dispose();
+        }
     }
 
     private async Task LoadFileDetailsAsync(IndexedFile file)
@@ -335,6 +383,17 @@ public sealed partial class MainWindow : Window
             {
                 DetailsDiagnosticText.Visibility = Visibility.Collapsed;
             }
+        }
+        else if (model.IsMultipleFilesSelected)
+        {
+            DetailsPathText.Visibility = Visibility.Collapsed;
+            DetailsMetaText.Visibility = Visibility.Collapsed;
+            DetailsStatusText.Visibility = Visibility.Collapsed;
+            DetailsIdentityText.Visibility = Visibility.Collapsed;
+            DetailsUserTagsText.Text = $"公共标签：{model.UserTagsText}";
+            DetailsUserTagsText.Visibility = Visibility.Visible;
+            DetailsAutoTagsText.Visibility = Visibility.Collapsed;
+            DetailsDiagnosticText.Visibility = Visibility.Collapsed;
         }
         else
         {
@@ -1259,8 +1318,7 @@ public sealed partial class MainWindow : Window
         try
         {
             _changingFileTags = true;
-            ApplyTagButton.IsEnabled = false;
-            RemoveTagButton.IsEnabled = false;
+            UpdateFileButtonsState();
             if (add)
             {
                 await Task.Run(() => _tags.AddTagToFiles(tag.Id, fileIds));
@@ -1270,7 +1328,45 @@ public sealed partial class MainWindow : Window
                 await Task.Run(() => _tags.RemoveTagFromFiles(tag.Id, fileIds));
             }
 
+            var previouslySelectedIds = fileIds.ToHashSet();
             await RefreshFilesAsync();
+
+            var remaining = _currentFiles.Where(f => previouslySelectedIds.Contains(f.Id)).ToList();
+            _isSyncingSelectionFromGraph = true;
+            try
+            {
+                FilesList.SelectedItems.Clear();
+                foreach (var file in remaining)
+                {
+                    FilesList.SelectedItems.Add(file);
+                }
+            }
+            finally
+            {
+                _isSyncingSelectionFromGraph = false;
+            }
+
+            if (remaining.Count == 0)
+            {
+                _detailCancellation?.Cancel();
+                var emptyModel = FileDetailsPresenter.Create([], [], []);
+                UpdateDetailsView(emptyModel);
+            }
+            else if (remaining.Count == 1)
+            {
+                _ = LoadFileDetailsAsync(remaining[0]);
+            }
+            else
+            {
+                _ = LoadMultipleFilesDetailsAsync(remaining);
+            }
+
+            if (ViewModeBox.SelectedIndex == 1 && _webPageReady && GraphWebView.CoreWebView2 is not null)
+            {
+                var remainingIds = remaining.Select(f => f.Id).ToArray();
+                GraphWebView.CoreWebView2.PostWebMessageAsJson(GraphMessageSerializer.SerializeSetSelection(remainingIds));
+            }
+
             TagStatusText.Text = add
                 ? $"已给 {fileIds.Length} 个文件添加“{tag.Name}”。"
                 : $"已从 {fileIds.Length} 个文件移除“{tag.Name}”。";
@@ -1282,8 +1378,7 @@ public sealed partial class MainWindow : Window
         finally
         {
             _changingFileTags = false;
-            ApplyTagButton.IsEnabled = true;
-            RemoveTagButton.IsEnabled = true;
+            UpdateFileButtonsState();
         }
     }
 
@@ -1462,6 +1557,8 @@ public sealed partial class MainWindow : Window
         MoveToFileButton.IsEnabled = selected.Count > 0 && !_isOperating;
         RenameFileButton.IsEnabled = isSingleOnline && !_isOperating;
         DeleteFileButton.IsEnabled = selected.Count > 0 && !_isOperating;
+        ApplyTagButton.IsEnabled = selected.Count > 0 && !_isOperating && !_changingFileTags;
+        RemoveTagButton.IsEnabled = selected.Count > 0 && !_isOperating && !_changingFileTags;
     }
 
     private void UpdateSortLabels()
@@ -1496,9 +1593,8 @@ public sealed partial class MainWindow : Window
             {
                 GraphWebView.CoreWebView2.PostWebMessageAsJson(GraphMessageSerializer.SerializeFitViewport());
                 var selected = FilesList.SelectedItems.OfType<IndexedFile>().ToList();
-                var selectedFile = selected.Count == 1 ? selected[0] : null;
-                var nodeId = selectedFile is not null ? $"file:{selectedFile.Id}" : null;
-                GraphWebView.CoreWebView2.PostWebMessageAsJson(GraphMessageSerializer.SerializeSelectNode(nodeId));
+                var fileIds = selected.Select(f => f.Id).ToArray();
+                GraphWebView.CoreWebView2.PostWebMessageAsJson(GraphMessageSerializer.SerializeSetSelection(fileIds));
             }
         }
     }
@@ -1678,9 +1774,45 @@ public sealed partial class MainWindow : Window
                     if (_webPageReady && GraphWebView.CoreWebView2 is not null)
                     {
                         var selected = FilesList.SelectedItems.OfType<IndexedFile>().ToList();
-                        var selectedFile = selected.Count == 1 ? selected[0] : null;
-                        var nodeId = selectedFile is not null ? $"file:{selectedFile.Id}" : null;
-                        GraphWebView.CoreWebView2.PostWebMessageAsJson(GraphMessageSerializer.SerializeSelectNode(nodeId));
+                        var fileIds = selected.Select(f => f.Id).ToArray();
+                        GraphWebView.CoreWebView2.PostWebMessageAsJson(GraphMessageSerializer.SerializeSetSelection(fileIds));
+                    }
+                    break;
+
+                case GraphMessageTypes.SelectionChanged:
+                    var selectionChanged = GraphMessageSerializer.ParseSelectionChanged(message);
+                    var validFiles = _graphInteractionCoordinator.EvaluateBatchSelection(selectionChanged.FileIds);
+                    _isSyncingSelectionFromGraph = true;
+                    try
+                    {
+                        FilesList.SelectedItems.Clear();
+                        foreach (var file in validFiles)
+                        {
+                            FilesList.SelectedItems.Add(file);
+                        }
+                        if (validFiles.Count == 1)
+                        {
+                            FilesList.ScrollIntoView(validFiles[0]);
+                        }
+                    }
+                    finally
+                    {
+                        _isSyncingSelectionFromGraph = false;
+                    }
+                    UpdateFileButtonsState();
+                    if (validFiles.Count == 0)
+                    {
+                        _detailCancellation?.Cancel();
+                        var emptyModel = FileDetailsPresenter.Create([], [], []);
+                        UpdateDetailsView(emptyModel);
+                    }
+                    else if (validFiles.Count == 1)
+                    {
+                        _ = LoadFileDetailsAsync(validFiles[0]);
+                    }
+                    else
+                    {
+                        _ = LoadMultipleFilesDetailsAsync(validFiles);
                     }
                     break;
 

@@ -10,6 +10,8 @@ public static class GraphMessageTypes
     public const string FitViewport = "fitViewport";
     public const string SetBroadTagsVisible = "setBroadTagsVisible";
     public const string SelectNode = "selectNode";
+    public const string SelectionChanged = "selectionChanged";
+    public const string SetSelection = "setSelection";
     public const string NodeSelected = "nodeSelected";
     public const string NodeActivated = "nodeActivated";
     public const string Ready = "ready";
@@ -21,6 +23,13 @@ public sealed record SelectNodePayload(
     [property: JsonPropertyName("nodeId")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     string? NodeId);
+
+public sealed record GraphSelectionChangedPayload(
+    [property: JsonPropertyName("fileIds")] IReadOnlyList<long> FileIds,
+    [property: JsonPropertyName("count")] int Count);
+
+public sealed record GraphSetSelectionPayload(
+    [property: JsonPropertyName("fileIds")] IReadOnlyList<long> FileIds);
 
 public sealed record GraphNodeActionPayload(
     [property: JsonPropertyName("nodeId")] string NodeId,
@@ -233,5 +242,57 @@ public static class GraphMessageSerializer
 
         return message.Payload.Value.Deserialize<GraphNodeActionPayload>(JsonOptions)
                ?? throw new JsonException("Failed to deserialize GraphNodeActionPayload.");
+    }
+
+    public static string SerializeSelectionChanged(IReadOnlyList<long> fileIds)
+    {
+        ArgumentNullException.ThrowIfNull(fileIds);
+        var payload = new GraphSelectionChangedPayload(fileIds, fileIds.Count);
+        var payloadElement = JsonSerializer.SerializeToElement(payload, JsonOptions);
+
+        var message = new GraphMessage(
+            GraphMessageTypes.SelectionChanged,
+            GraphMessage.CurrentVersion,
+            payloadElement);
+
+        return JsonSerializer.Serialize(message, JsonOptions);
+    }
+
+    public static GraphSelectionChangedPayload ParseSelectionChanged(GraphMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        if (message.Payload is null)
+        {
+            return new GraphSelectionChangedPayload([], 0);
+        }
+
+        return message.Payload.Value.Deserialize<GraphSelectionChangedPayload>(JsonOptions)
+               ?? new GraphSelectionChangedPayload([], 0);
+    }
+
+    public static string SerializeSetSelection(IReadOnlyList<long> fileIds)
+    {
+        ArgumentNullException.ThrowIfNull(fileIds);
+        var payload = new GraphSetSelectionPayload(fileIds);
+        var payloadElement = JsonSerializer.SerializeToElement(payload, JsonOptions);
+
+        var message = new GraphMessage(
+            GraphMessageTypes.SetSelection,
+            GraphMessage.CurrentVersion,
+            payloadElement);
+
+        return JsonSerializer.Serialize(message, JsonOptions);
+    }
+
+    public static GraphSetSelectionPayload ParseSetSelection(GraphMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        if (message.Payload is null)
+        {
+            return new GraphSetSelectionPayload([]);
+        }
+
+        return message.Payload.Value.Deserialize<GraphSetSelectionPayload>(JsonOptions)
+               ?? new GraphSetSelectionPayload([]);
     }
 }
