@@ -11,21 +11,23 @@ public sealed class TagService
 {
     private readonly Func<string, FileTypeClassification> _classify;
     private readonly Func<string, FileIdentity> _readIdentity;
+    private readonly RollingTagBackupService? _rollingBackup;
 
-    public TagService(string databasePath) :
-        this(databasePath, new FileTypeClassifier().Classify, FileIdentityReader.Read)
+    public TagService(string databasePath, RollingTagBackupService? rollingBackup = null) :
+        this(databasePath, new FileTypeClassifier().Classify, FileIdentityReader.Read, rollingBackup)
     {
     }
 
-    internal TagService(string databasePath, Func<string, FileTypeClassification> classify) :
-        this(databasePath, classify, FileIdentityReader.Read)
+    internal TagService(string databasePath, Func<string, FileTypeClassification> classify, RollingTagBackupService? rollingBackup = null) :
+        this(databasePath, classify, FileIdentityReader.Read, rollingBackup)
     {
     }
 
     internal TagService(
         string databasePath,
         Func<string, FileTypeClassification> classify,
-        Func<string, FileIdentity> readIdentity)
+        Func<string, FileIdentity> readIdentity,
+        RollingTagBackupService? rollingBackup = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(classify);
@@ -33,6 +35,7 @@ public sealed class TagService
         DatabasePath = Path.GetFullPath(databasePath);
         _classify = classify;
         _readIdentity = readIdentity;
+        _rollingBackup = rollingBackup;
         using var _ = SqliteDatabase.Open(DatabasePath);
     }
 
@@ -288,6 +291,7 @@ public sealed class TagService
         {
             var tag = new UserTag((long)command.ExecuteScalar()!, displayName);
             transaction.Commit();
+            NotifyBackup();
             return tag;
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode == 19)
@@ -316,6 +320,7 @@ public sealed class TagService
             }
 
             transaction.Commit();
+            NotifyBackup();
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode == 19)
         {
@@ -335,6 +340,11 @@ public sealed class TagService
         command.Parameters.AddWithValue("$tagId", tagId);
         var deleted = command.ExecuteNonQuery() == 1;
         transaction.Commit();
+        if (deleted)
+        {
+            NotifyBackup();
+        }
+
         return deleted;
     }
 
@@ -370,6 +380,19 @@ public sealed class TagService
         }
 
         transaction.Commit();
+        NotifyBackup();
+    }
+
+    private void NotifyBackup()
+    {
+        try
+        {
+            _rollingBackup?.SafeTriggerBackup();
+        }
+        catch
+        {
+            // Fault isolation: Never block core tag operations
+        }
     }
 
     private static void EnsureExists(

@@ -83,7 +83,7 @@ public sealed class MainWindowSmokeTests
             .ToHashSet();
 
         CollectionAssert.IsSubsetOf(
-            new[] { "TagsList", "AutomaticTagsList", "TagNameBox", "CreateTagButton", "RenameTagButton", "DeleteTagButton", "ApplyTagButton", "RemoveTagButton", "TagFilterToggle", "TagMatchBox", "ExportTagsButton", "ImportTagsButton", "TagStatusText", "ReidentifyTypeButton" },
+            new[] { "TagsList", "AutomaticTagsList", "TagNameBox", "CreateTagButton", "RenameTagButton", "DeleteTagButton", "ApplyTagButton", "RemoveTagButton", "TagFilterToggle", "TagMatchBox", "ExportTagsButton", "ImportTagsButton", "BackupNowButton", "RollingBackupsButton", "TagStatusText", "ReidentifyTypeButton" },
             names.ToArray());
         var tagsList = document.Descendants()
             .Single(element => element.Attribute(x + "Name")?.Value == "TagsList");
@@ -92,6 +92,10 @@ public sealed class MainWindowSmokeTests
             .Single(element => element.Attribute(x + "Name")?.Value == "AutomaticTagsList");
         Assert.AreEqual("Extended", automaticTags.Attribute("SelectionMode")?.Value);
         Assert.AreEqual("自动标签（只读）", automaticTags.Attribute("Header")?.Value);
+        var source = File.ReadAllText(Path.ChangeExtension(path, ".xaml.cs"));
+        StringAssert.Contains(source, "_rollingBackup");
+        StringAssert.Contains(source, "BackupNowButton_Click");
+        StringAssert.Contains(source, "RollingBackupsButton_Click");
     }
 
     [TestMethod]

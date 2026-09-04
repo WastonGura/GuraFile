@@ -174,9 +174,16 @@ public static class SqliteDatabase
         ArgumentOutOfRangeException.ThrowIfLessThan(targetVersion, 0);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(targetVersion, CurrentVersion);
 
+        var fullPath = Path.GetFullPath(databasePath);
+        var directory = Path.GetDirectoryName(fullPath);
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
-            DataSource = databasePath,
+            DataSource = fullPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
             Pooling = false
         }.ToString());

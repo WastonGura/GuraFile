@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
@@ -60,6 +61,50 @@ public sealed class UserTagBackupService
         }
 
         return json;
+    }
+
+    public static bool TryValidate(string? json, [NotNullWhen(false)] out string? errorMessage)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            errorMessage = "备份内容为空。";
+            return false;
+        }
+
+        if (Encoding.UTF8.GetByteCount(json) > MaximumBackupBytes)
+        {
+            errorMessage = "备份文件过大。";
+            return false;
+        }
+
+        try
+        {
+            var document = JsonSerializer.Deserialize<BackupDocument>(json, JsonOptions);
+            if (document is null)
+            {
+                errorMessage = "备份内容为空。";
+                return false;
+            }
+
+            _ = Validate(document);
+            errorMessage = null;
+            return true;
+        }
+        catch (JsonException exception)
+        {
+            errorMessage = $"备份 JSON 无效：{exception.Message}";
+            return false;
+        }
+        catch (InvalidDataException exception)
+        {
+            errorMessage = exception.Message;
+            return false;
+        }
+        catch (Exception exception)
+        {
+            errorMessage = $"备份校验失败：{exception.Message}";
+            return false;
+        }
     }
 
     public TagImportResult Import(string json)
