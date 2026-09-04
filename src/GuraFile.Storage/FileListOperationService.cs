@@ -9,17 +9,20 @@ public sealed class FileListOperationService
     private readonly ManagedRootScanner _scanner;
     private readonly IFileClipboardService _clipboard;
     private readonly Func<IReadOnlyList<ManagedRoot>> _getRoots;
+    private readonly DiagnosticLogger _logger;
 
     public FileListOperationService(
         FileOperationIndexCommitter committer,
         ManagedRootScanner scanner,
         IFileClipboardService? clipboard = null,
-        Func<IReadOnlyList<ManagedRoot>>? getRoots = null)
+        Func<IReadOnlyList<ManagedRoot>>? getRoots = null,
+        DiagnosticLogger? logger = null)
     {
         _committer = committer ?? throw new ArgumentNullException(nameof(committer));
         _scanner = scanner ?? throw new ArgumentNullException(nameof(scanner));
         _clipboard = clipboard ?? new FileClipboardService();
         _getRoots = getRoots ?? scanner.ListRoots;
+        _logger = logger ?? DiagnosticLogger.Default;
     }
 
     public void CopyToClipboard(IReadOnlyList<string> sourcePaths)
@@ -80,7 +83,7 @@ public sealed class FileListOperationService
         return trimmed;
     }
 
-    public Task<FileOperationCommitItemResult> RenameAsync(
+    public async Task<FileOperationCommitItemResult> RenameAsync(
         string sourcePath,
         string newName,
         FileCollisionPolicy collisionPolicy = FileCollisionPolicy.AutoRename,
@@ -90,17 +93,47 @@ public sealed class FileListOperationService
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
         var validName = ValidateNewFileName(newName);
         var onlineRoots = GetOnlineRootPaths();
+        var correlationId = $"op-rename-{Guid.NewGuid():N}";
 
-        return _committer.RenameAsync(
+        _logger.LogInfo(
+            DiagnosticCategory.FileOperation,
+            "RenameStarted",
+            correlationId: correlationId,
+            status: DiagnosticResultStatus.Started,
+            message: $"Renaming '{sourcePath}' to '{validName}'");
+
+        var result = await _committer.RenameAsync(
             sourcePath,
             validName,
             onlineRoots,
             collisionPolicy,
             ownerWindow,
             cancellationToken);
+
+        if (result.Succeeded)
+        {
+            _logger.LogInfo(
+                DiagnosticCategory.FileOperation,
+                "RenameCompleted",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Success,
+                message: $"Renamed to '{result.ActualTargetPath}'");
+        }
+        else
+        {
+            _logger.LogError(
+                DiagnosticCategory.FileOperation,
+                "RenameFailed",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Failed,
+                message: result.Error,
+                errorCode: "RENAME_FAILED");
+        }
+
+        return result;
     }
 
-    public Task<FileOperationCommitBatchResult> MoveToAsync(
+    public async Task<FileOperationCommitBatchResult> MoveToAsync(
         IReadOnlyList<string> sourcePaths,
         string destinationDirectory,
         FileCollisionPolicy collisionPolicy = FileCollisionPolicy.AutoRename,
@@ -116,8 +149,16 @@ public sealed class FileListOperationService
 
         ValidateDestination(destinationDirectory);
         var onlineRoots = GetOnlineRootPaths();
+        var correlationId = $"op-move-{Guid.NewGuid():N}";
 
-        return _committer.MoveAsync(
+        _logger.LogInfo(
+            DiagnosticCategory.FileOperation,
+            "MoveBatchStarted",
+            correlationId: correlationId,
+            status: DiagnosticResultStatus.Started,
+            message: $"Moving {sourcePaths.Count} files to '{destinationDirectory}'");
+
+        var result = await _committer.MoveAsync(
             sourcePaths,
             destinationDirectory,
             onlineRoots,
@@ -125,9 +166,18 @@ public sealed class FileListOperationService
             ownerWindow,
             progress,
             cancellationToken);
+
+        _logger.LogInfo(
+            DiagnosticCategory.FileOperation,
+            "MoveBatchCompleted",
+            correlationId: correlationId,
+            status: result.FailedCount == 0 ? DiagnosticResultStatus.Success : DiagnosticResultStatus.Failed,
+            message: $"Move completed: {result.SucceededCount} succeeded, {result.FailedCount} failed, {result.SkippedCount} skipped.");
+
+        return result;
     }
 
-    public Task<FileOperationCommitBatchResult> DeleteToRecycleBinAsync(
+    public async Task<FileOperationCommitBatchResult> DeleteToRecycleBinAsync(
         IReadOnlyList<string> sourcePaths,
         IntPtr ownerWindow = default,
         Action<FileOperationProgress>? progress = null,
@@ -167,12 +217,29 @@ public sealed class FileListOperationService
             }
         }
 
-        return _committer.DeleteToRecycleBinAsync(
+        var correlationId = $"op-delete-{Guid.NewGuid():N}";
+        _logger.LogInfo(
+            DiagnosticCategory.FileOperation,
+            "DeleteBatchStarted",
+            correlationId: correlationId,
+            status: DiagnosticResultStatus.Started,
+            message: $"Deleting {sourcePaths.Count} files to Recycle Bin");
+
+        var result = await _committer.DeleteToRecycleBinAsync(
             sourcePaths,
             onlineRoots,
             ownerWindow,
             progress,
             cancellationToken);
+
+        _logger.LogInfo(
+            DiagnosticCategory.FileOperation,
+            "DeleteBatchCompleted",
+            correlationId: correlationId,
+            status: result.FailedCount == 0 ? DiagnosticResultStatus.Success : DiagnosticResultStatus.Failed,
+            message: $"Delete completed: {result.SucceededCount} succeeded, {result.FailedCount} failed.");
+
+        return result;
     }
 
     public async Task<FileOperationCommitBatchResult> PasteFromClipboardAsync(
@@ -190,10 +257,19 @@ public sealed class FileListOperationService
 
         ValidateDestination(destinationDirectory);
         var onlineRoots = GetOnlineRootPaths();
+        var correlationId = $"op-paste-{Guid.NewGuid():N}";
 
+        _logger.LogInfo(
+            DiagnosticCategory.FileOperation,
+            "PasteStarted",
+            correlationId: correlationId,
+            status: DiagnosticResultStatus.Started,
+            message: $"Pasting {content.Files.Count} files ({content.Effect}) to '{destinationDirectory}'");
+
+        FileOperationCommitBatchResult result;
         if (content.Effect == FileClipboardEffect.Move)
         {
-            var result = await _committer.MoveAsync(
+            result = await _committer.MoveAsync(
                 content.Files,
                 destinationDirectory,
                 onlineRoots,
@@ -206,12 +282,10 @@ public sealed class FileListOperationService
             {
                 _clipboard.Clear();
             }
-
-            return result;
         }
         else
         {
-            return await _committer.CopyAsync(
+            result = await _committer.CopyAsync(
                 content.Files,
                 destinationDirectory,
                 onlineRoots,
@@ -220,6 +294,15 @@ public sealed class FileListOperationService
                 progress,
                 cancellationToken);
         }
+
+        _logger.LogInfo(
+            DiagnosticCategory.FileOperation,
+            "PasteCompleted",
+            correlationId: correlationId,
+            status: result.FailedCount == 0 ? DiagnosticResultStatus.Success : DiagnosticResultStatus.Failed,
+            message: $"Paste completed: {result.SucceededCount} succeeded, {result.FailedCount} failed.");
+
+        return result;
     }
 
     public async Task<FileOperationCommitBatchResult> ExecuteDropAsync(

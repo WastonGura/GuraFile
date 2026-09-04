@@ -247,4 +247,54 @@ public sealed class MainWindowSmokeTests
         StringAssert.Contains(source, "_tags.RemoveTagFromFiles");
         StringAssert.Contains(source, "_tags.ListCommonUserTagsForFiles");
     }
+
+    [TestMethod]
+    public void MainWindowExposesDiagnosticExportControls()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "GuraFile", "MainWindow.xaml"));
+        var document = XDocument.Load(path);
+        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var names = document.Descendants()
+            .Select(element => element.Attribute(x + "Name")?.Value)
+            .Where(name => name is not null)
+            .ToHashSet();
+
+        Assert.Contains("ExportDiagnosticsButton", names);
+
+        var source = File.ReadAllText(Path.ChangeExtension(path, ".xaml.cs"));
+        StringAssert.Contains(source, "ExportDiagnosticsButton_Click");
+        StringAssert.Contains(source, "DiagnosticExportService");
+        StringAssert.Contains(source, "DiagnosticLogger.Default");
+    }
+
+    [TestMethod]
+    public void MainWindowLogsGraphHostAndBackupDiagnostics()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "GuraFile", "MainWindow.xaml.cs"));
+        var source = File.ReadAllText(path);
+
+        StringAssert.Contains(source, "DiagnosticCategory.GraphHost");
+        StringAssert.Contains(source, "WebViewInitializationStarted");
+        StringAssert.Contains(source, "NavigationBlocked");
+        StringAssert.Contains(source, "NewWindowBlocked");
+        StringAssert.Contains(source, "DownloadBlocked");
+        StringAssert.Contains(source, "GraphRefreshStarted");
+        StringAssert.Contains(source, "GraphSnapshotEmpty");
+        StringAssert.Contains(source, "GraphLimitExceeded");
+        StringAssert.Contains(source, "GraphSnapshotRendered");
+        StringAssert.Contains(source, "NodeActivationRejected");
+        StringAssert.Contains(source, "WebGraphError");
+        StringAssert.Contains(source, "WebMessageHandlingError");
+
+        StringAssert.Contains(source, "DiagnosticCategory.Backup");
+        StringAssert.Contains(source, "TagExportStarted");
+        StringAssert.Contains(source, "TagExportCompleted");
+        StringAssert.Contains(source, "TagImportStarted");
+        StringAssert.Contains(source, "TagImportCompleted");
+        StringAssert.Contains(source, "ManualBackupRequested");
+        StringAssert.Contains(source, "RollingBackupDialogOpened");
+        StringAssert.Contains(source, "RollingBackupRestoreRequested");
+    }
 }

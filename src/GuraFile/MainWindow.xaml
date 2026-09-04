@@ -68,6 +68,7 @@
                     <Button x:Name="BackupNowButton" AutomationProperties.Name="立即备份用户标签" Click="BackupNowButton_Click" Content="立即备份" />
                     <Button x:Name="RollingBackupsButton" AutomationProperties.Name="自动备份与恢复" Click="RollingBackupsButton_Click" Content="历史备份..." />
                 </StackPanel>
+                <Button x:Name="ExportDiagnosticsButton" AutomationProperties.Name="导出诊断日志" Click="ExportDiagnosticsButton_Click" Content="导出诊断日志..." />
             </StackPanel>
             <TextBlock x:Name="TagStatusText" Grid.Row="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
         </Grid>

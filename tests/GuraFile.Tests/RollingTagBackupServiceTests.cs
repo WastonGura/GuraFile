@@ -342,6 +342,57 @@ public sealed class RollingTagBackupServiceTests
         }
     }
 
+    [TestMethod]
+    public void RollingTagBackupService_WritesStructuredDiagnosticLogsForBackupAndRestore()
+    {
+        using var tempDir = new TempDirectory();
+        using var logsDir = new TempDirectory();
+        using var db = TestDatabase.Create();
+        db.SeedFile(1, @"C:\Root\file1.txt", "VOL-1", "FILE-1", "stable");
+
+        var logger = new DiagnosticLogger(logsDir.Path);
+        var rollingBackup = new RollingTagBackupService(
+            db.Path,
+            tempDir.Path,
+            clock: () => new DateTimeOffset(2026, 9, 5, 12, 0, 0, TimeSpan.Zero),
+            logger: logger);
+
+        var tags = new TagService(db.Path, rollingBackup);
+        tags.CreateTag("DocTag");
+
+        // List backups
+        var backups = rollingBackup.ListBackups();
+        Assert.HasCount(1, backups);
+
+        // Restore backup
+        var restoreResult = rollingBackup.RestoreBackup(backups[0].Path);
+        Assert.IsNotNull(restoreResult);
+
+        // Verify diagnostic logs
+        var logFiles = Directory.GetFiles(logsDir.Path, "gurafile_*.log");
+        Assert.HasCount(1, logFiles);
+
+        var lines = File.ReadAllLines(logFiles[0]);
+        Assert.IsGreaterThan(2, lines.Length);
+
+        var events = new List<(string Event, string Category, string Status)>();
+        foreach (var line in lines)
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(line);
+            var root = doc.RootElement;
+            events.Add((
+                root.GetProperty("event").GetString()!,
+                root.GetProperty("category").GetString()!,
+                root.TryGetProperty("status", out var s) ? s.GetString()! : ""));
+        }
+
+        Assert.IsTrue(events.Any(e => e.Category == "Backup" && e.Event == "TagBackupStarted" && e.Status == "Started"));
+        Assert.IsTrue(events.Any(e => e.Category == "Backup" && e.Event == "TagBackupCreated" && e.Status == "Success"));
+        Assert.IsTrue(events.Any(e => e.Category == "Backup" && e.Event == "TagBackupListQueried" && e.Status == "Success"));
+        Assert.IsTrue(events.Any(e => e.Category == "Backup" && e.Event == "TagRestoreStarted" && e.Status == "Started"));
+        Assert.IsTrue(events.Any(e => e.Category == "Backup" && e.Event == "TagRestoreCompleted" && e.Status == "Success"));
+    }
+
     private sealed class TempDirectory : IDisposable
     {
         public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"GuraFile.BackupTests.{Guid.NewGuid():N}");

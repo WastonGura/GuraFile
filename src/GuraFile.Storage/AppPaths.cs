@@ -12,4 +12,7 @@ public static class AppPaths
 
     public static string DefaultTagBackupDirectory =>
         Path.Combine(DefaultUserDataDirectory, "backups", "tags");
+
+    public static string DefaultLogsDirectory =>
+        Path.Combine(DefaultUserDataDirectory, "logs");
 }

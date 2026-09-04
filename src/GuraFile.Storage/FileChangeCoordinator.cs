@@ -44,6 +44,11 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
             var result = await scanner.ReconcilePathsAsync(rootId, paths, cancellationToken: cancellationToken);
             if (!result.Canceled)
             {
+                DiagnosticLogger.Default.LogInfo(
+                    DiagnosticCategory.Watcher,
+                    "ReconciliationCompleted",
+                    status: DiagnosticResultStatus.Success,
+                    message: $"Reconciled {paths.Count} path(s) for root {rootId} (Committed: {result.CommittedFiles}, Missing: {result.MissingFiles}).");
                 NotifyChanged(result);
             }
         };
@@ -121,6 +126,14 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
         watcher.Error += (_, eventArgs) =>
         {
             var exception = eventArgs.GetException();
+            DiagnosticLogger.Default.LogError(
+                DiagnosticCategory.Watcher,
+                "WatcherError",
+                status: DiagnosticResultStatus.Failed,
+                message: $"Watcher error on root '{root.Path}': {exception.Message}",
+                errorCode: "WATCHER_ERROR",
+                exception: exception);
+
             if (RequestRecoveryFromWatcher(root, watcher, exception))
             {
                 ReportError(exception);
@@ -131,10 +144,22 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
             watcher.EnableRaisingEvents = true;
             _watchers.Add(root.Id, watcher);
             _disabledRoots.Remove(root.Id);
+            DiagnosticLogger.Default.LogInfo(
+                DiagnosticCategory.Watcher,
+                "WatcherStarted",
+                status: DiagnosticResultStatus.Success,
+                message: $"Watcher active for '{root.Path}' (Id={root.Id})");
             return true;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            DiagnosticLogger.Default.LogError(
+                DiagnosticCategory.Watcher,
+                "WatcherStartFailed",
+                status: DiagnosticResultStatus.Failed,
+                message: $"Failed to start watcher for '{root.Path}': {exception.Message}",
+                errorCode: "WATCHER_START_FAILED",
+                exception: exception);
             watcher.Dispose();
             ReportError(exception);
             return false;

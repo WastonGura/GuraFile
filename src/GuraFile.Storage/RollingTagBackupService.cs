@@ -65,12 +65,14 @@ public sealed class RollingTagBackupService
     private readonly object _syncLock = new();
     private readonly Func<DateTimeOffset> _clock;
     private readonly UserTagBackupService _backupService;
+    private readonly DiagnosticLogger _logger;
 
     public RollingTagBackupService(
         string databasePath,
         string? backupDirectory = null,
         int retentionLimit = DefaultRetentionLimit,
-        Func<DateTimeOffset>? clock = null)
+        Func<DateTimeOffset>? clock = null,
+        DiagnosticLogger? logger = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         DatabasePath = Path.GetFullPath(databasePath);
@@ -79,6 +81,7 @@ public sealed class RollingTagBackupService
             : Path.GetFullPath(backupDirectory);
         RetentionLimit = retentionLimit > 0 ? retentionLimit : DefaultRetentionLimit;
         _clock = clock ?? (() => DateTimeOffset.Now);
+        _logger = logger ?? DiagnosticLogger.Default;
         _backupService = new UserTagBackupService(DatabasePath);
     }
 
@@ -86,13 +89,15 @@ public sealed class RollingTagBackupService
         UserTagBackupService backupService,
         string backupDirectory,
         int retentionLimit = DefaultRetentionLimit,
-        Func<DateTimeOffset>? clock = null)
+        Func<DateTimeOffset>? clock = null,
+        DiagnosticLogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(backupService);
         DatabasePath = backupService.DatabasePath;
         BackupDirectory = Path.GetFullPath(backupDirectory);
         RetentionLimit = retentionLimit > 0 ? retentionLimit : DefaultRetentionLimit;
         _clock = clock ?? (() => DateTimeOffset.Now);
+        _logger = logger ?? DiagnosticLogger.Default;
         _backupService = backupService;
     }
 
@@ -125,6 +130,14 @@ public sealed class RollingTagBackupService
 
     public BackupResult TriggerBackup()
     {
+        var correlationId = Guid.NewGuid().ToString("N");
+        _logger.LogInfo(
+            DiagnosticCategory.Backup,
+            "TagBackupStarted",
+            correlationId: correlationId,
+            status: DiagnosticResultStatus.Started,
+            message: "Triggering rolling tag backup.");
+
         lock (_syncLock)
         {
             try
@@ -137,6 +150,14 @@ public sealed class RollingTagBackupService
             catch (Exception exception)
             {
                 LastError = exception.Message;
+                _logger.LogError(
+                    DiagnosticCategory.Backup,
+                    "TagBackupFailed",
+                    correlationId: correlationId,
+                    status: DiagnosticResultStatus.Failed,
+                    message: $"创建备份目录失败：{exception.Message}",
+                    errorCode: "ERR_BACKUP_DIR",
+                    exception: exception);
                 return BackupResult.Failed($"创建备份目录失败：{exception.Message}");
             }
 
@@ -148,6 +169,14 @@ public sealed class RollingTagBackupService
             catch (Exception exception)
             {
                 LastError = exception.Message;
+                _logger.LogError(
+                    DiagnosticCategory.Backup,
+                    "TagBackupFailed",
+                    correlationId: correlationId,
+                    status: DiagnosticResultStatus.Failed,
+                    message: $"导出用户标签失败：{exception.Message}",
+                    errorCode: "ERR_BACKUP_EXPORT",
+                    exception: exception);
                 return BackupResult.Failed($"导出用户标签失败：{exception.Message}");
             }
 
@@ -167,6 +196,13 @@ public sealed class RollingTagBackupService
                     if (string.Equals(existingJson, currentJson, StringComparison.Ordinal))
                     {
                         PruneOldBackups();
+                        _logger.LogInfo(
+                            DiagnosticCategory.Backup,
+                            "TagBackupUnchanged",
+                            correlationId: correlationId,
+                            status: DiagnosticResultStatus.Skipped,
+                            message: "Tag backup snapshot is identical to existing backup; skipped write.",
+                            properties: new Dictionary<string, object?> { ["targetPath"] = targetPath });
                         return BackupResult.Unchanged(targetPath);
                     }
                 }
@@ -211,10 +247,32 @@ public sealed class RollingTagBackupService
                 }
 
                 LastError = exception.Message;
+                _logger.LogError(
+                    DiagnosticCategory.Backup,
+                    "TagBackupFailed",
+                    correlationId: correlationId,
+                    status: DiagnosticResultStatus.Failed,
+                    message: $"写入备份文件失败：{exception.Message}",
+                    errorCode: "ERR_BACKUP_WRITE",
+                    exception: exception,
+                    properties: new Dictionary<string, object?> { ["targetPath"] = targetPath });
                 return BackupResult.Failed($"写入备份文件失败：{exception.Message}", targetPath);
             }
 
             PruneOldBackups();
+            var eventName = fileExists ? "TagBackupUpdated" : "TagBackupCreated";
+            _logger.LogInfo(
+                DiagnosticCategory.Backup,
+                eventName,
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Success,
+                message: $"Successfully {(fileExists ? "updated" : "created")} tag backup.",
+                properties: new Dictionary<string, object?>
+                {
+                    ["targetPath"] = targetPath,
+                    ["bytes"] = currentJson.Length
+                });
+
             return fileExists ? BackupResult.Updated(targetPath) : BackupResult.Created(targetPath);
         }
     }
@@ -225,6 +283,12 @@ public sealed class RollingTagBackupService
         {
             if (!Directory.Exists(BackupDirectory))
             {
+                _logger.LogInfo(
+                    DiagnosticCategory.Backup,
+                    "TagBackupListQueried",
+                    status: DiagnosticResultStatus.Success,
+                    message: "Queried rolling backups (directory does not exist).",
+                    properties: new Dictionary<string, object?> { ["count"] = 0 });
                 return [];
             }
 
@@ -234,8 +298,15 @@ public sealed class RollingTagBackupService
             {
                 filePaths = Directory.GetFiles(BackupDirectory, $"{BackupFileNamePrefix}*{BackupFileNameExtension}");
             }
-            catch
+            catch (Exception exception)
             {
+                _logger.LogError(
+                    DiagnosticCategory.Backup,
+                    "TagBackupListQueried",
+                    status: DiagnosticResultStatus.Failed,
+                    message: $"Failed to list backups: {exception.Message}",
+                    errorCode: "ERR_BACKUP_LIST",
+                    exception: exception);
                 return [];
             }
 
@@ -304,29 +375,98 @@ public sealed class RollingTagBackupService
                     BackupDate: backupDate));
             }
 
-            return results
+            var sorted = results
                 .OrderByDescending(b => b.BackupDate ?? b.LastModifiedTime.Date)
                 .ThenByDescending(b => b.LastModifiedTime)
                 .ToList();
+
+            _logger.LogInfo(
+                DiagnosticCategory.Backup,
+                "TagBackupListQueried",
+                status: DiagnosticResultStatus.Success,
+                message: $"Queried rolling backups, found {sorted.Count} backups.",
+                properties: new Dictionary<string, object?> { ["count"] = sorted.Count });
+
+            return sorted;
         }
     }
 
     public TagImportResult RestoreBackup(string backupPath)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(backupPath);
-        if (!File.Exists(backupPath))
-        {
-            throw new FileNotFoundException("备份文件不存在。", backupPath);
-        }
+        var correlationId = Guid.NewGuid().ToString("N");
+        _logger.LogInfo(
+            DiagnosticCategory.Backup,
+            "TagRestoreStarted",
+            correlationId: correlationId,
+            status: DiagnosticResultStatus.Started,
+            message: "Starting tag backup restore.",
+            properties: new Dictionary<string, object?> { ["backupPath"] = backupPath });
 
-        var fileInfo = new FileInfo(backupPath);
-        if (fileInfo.Length > UserTagBackupService.MaximumBackupBytes)
+        try
         {
-            throw new InvalidDataException("备份文件过大。");
-        }
+            ArgumentException.ThrowIfNullOrWhiteSpace(backupPath);
+            if (!File.Exists(backupPath))
+            {
+                var ex = new FileNotFoundException("备份文件不存在。", backupPath);
+                _logger.LogError(
+                    DiagnosticCategory.Backup,
+                    "TagRestoreFailed",
+                    correlationId: correlationId,
+                    status: DiagnosticResultStatus.Failed,
+                    message: "Backup file does not exist.",
+                    errorCode: "ERR_FILE_NOT_FOUND",
+                    exception: ex);
+                throw ex;
+            }
 
-        var json = File.ReadAllText(backupPath, Encoding.UTF8);
-        return _backupService.Import(json);
+            var fileInfo = new FileInfo(backupPath);
+            if (fileInfo.Length > UserTagBackupService.MaximumBackupBytes)
+            {
+                var ex = new InvalidDataException("备份文件过大。");
+                _logger.LogError(
+                    DiagnosticCategory.Backup,
+                    "TagRestoreFailed",
+                    correlationId: correlationId,
+                    status: DiagnosticResultStatus.Failed,
+                    message: "Backup file exceeds maximum allowed size.",
+                    errorCode: "ERR_BACKUP_TOO_LARGE",
+                    exception: ex);
+                throw ex;
+            }
+
+            var json = File.ReadAllText(backupPath, Encoding.UTF8);
+            var result = _backupService.Import(json);
+
+            _logger.LogInfo(
+                DiagnosticCategory.Backup,
+                "TagRestoreCompleted",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Success,
+                message: "Tag backup restore completed successfully.",
+                properties: new Dictionary<string, object?>
+                {
+                    ["backupPath"] = backupPath,
+                    ["createdTags"] = result.CreatedTags,
+                    ["reusedTags"] = result.ReusedTags,
+                    ["restoredRelations"] = result.RestoredRelations,
+                    ["conflicts"] = result.Conflicts.Count,
+                    ["missingFiles"] = result.MissingFiles.Count
+                });
+
+            return result;
+        }
+        catch (Exception exception) when (exception is not FileNotFoundException && exception is not InvalidDataException)
+        {
+            _logger.LogError(
+                DiagnosticCategory.Backup,
+                "TagRestoreFailed",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Failed,
+                message: $"Failed to restore tag backup: {exception.Message}",
+                errorCode: "ERR_BACKUP_RESTORE",
+                exception: exception);
+            throw;
+        }
     }
 
     public TagImportResult? RestoreLatestValidBackup()
@@ -334,6 +474,11 @@ public sealed class RollingTagBackupService
         var latest = ListBackups().FirstOrDefault(b => b.IsValid);
         if (latest is null)
         {
+            _logger.LogWarning(
+                DiagnosticCategory.Backup,
+                "TagRestoreSkipped",
+                status: DiagnosticResultStatus.Skipped,
+                message: "No valid backup available to restore.");
             return null;
         }
 
