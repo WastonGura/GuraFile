@@ -224,4 +224,26 @@ public sealed class DiagnosticLoggerTests
         // Lines count should be bounded (significantly less than 1000, around ~10-12 due to throttling)
         Assert.IsLessThanOrEqualTo(25, lines.Length);
     }
+
+    [TestMethod]
+    public void DiagnosticLogger_InitializesAndCleansUpExpiredLogFiles()
+    {
+        // Pre-create some old log files in _tempDir
+        var oldFile1 = Path.Combine(_tempDir, "gurafile_2020-01-01.log");
+        var oldFile2 = Path.Combine(_tempDir, "gurafile_2020-01-02.log");
+        File.WriteAllText(oldFile1, "old log");
+        File.WriteAllText(oldFile2, "old log");
+        File.SetLastWriteTimeUtc(oldFile1, new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+        File.SetLastWriteTimeUtc(oldFile2, new DateTime(2020, 1, 2, 0, 0, 0, DateTimeKind.Utc));
+
+        // Constructing DiagnosticLogger should clean up expired logs on init
+        var logger = new DiagnosticLogger(
+            _tempDir,
+            maxFileCount: 5,
+            retentionDays: 14,
+            clock: () => new DateTime(2026, 9, 5, 0, 0, 0, DateTimeKind.Utc));
+
+        Assert.IsFalse(File.Exists(oldFile1));
+        Assert.IsFalse(File.Exists(oldFile2));
+    }
 }

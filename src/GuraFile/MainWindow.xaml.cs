@@ -1516,15 +1516,45 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        var correlationId = Guid.NewGuid().ToString("N");
+        DiagnosticLogger.Default.LogInfo(
+            DiagnosticCategory.Backup,
+            "TagExportStarted",
+            correlationId: correlationId,
+            status: DiagnosticResultStatus.Started,
+            message: "Starting user tag export.",
+            properties: new Dictionary<string, object?> { ["targetPath"] = file.Path });
+
         SetTagTransfer(true);
         try
         {
             var json = await Task.Run(_tagBackup.Export);
             await File.WriteAllTextAsync(file.Path, json);
             TagStatusText.Text = $"已导出用户标签备份：{file.Name}";
+
+            DiagnosticLogger.Default.LogInfo(
+                DiagnosticCategory.Backup,
+                "TagExportCompleted",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Success,
+                message: $"User tags exported to {file.Path}.",
+                properties: new Dictionary<string, object?>
+                {
+                    ["targetPath"] = file.Path,
+                    ["bytes"] = json.Length
+                });
         }
         catch (Exception exception)
         {
+            DiagnosticLogger.Default.LogError(
+                DiagnosticCategory.Backup,
+                "TagExportFailed",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Failed,
+                message: $"Failed to export tags: {exception.Message}",
+                errorCode: "ERR_TAG_EXPORT",
+                exception: exception);
+
             TagStatusText.Text = $"导出失败：{exception.Message}";
         }
         finally
@@ -1549,6 +1579,15 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        var correlationId = Guid.NewGuid().ToString("N");
+        DiagnosticLogger.Default.LogInfo(
+            DiagnosticCategory.Backup,
+            "TagImportStarted",
+            correlationId: correlationId,
+            status: DiagnosticResultStatus.Started,
+            message: "Starting user tag import.",
+            properties: new Dictionary<string, object?> { ["sourcePath"] = file.Path });
+
         SetTagTransfer(true);
         try
         {
@@ -1564,9 +1603,33 @@ public sealed partial class MainWindow : Window
             TagStatusText.Text =
                 $"导入完成：新建 {result.CreatedTags} 个标签，复用 {result.ReusedTags} 个，恢复 {result.RestoredRelations} 条关系；" +
                 $"名称冲突 {result.Conflicts.Count}，未匹配文件 {result.MissingFiles.Count}。";
+
+            DiagnosticLogger.Default.LogInfo(
+                DiagnosticCategory.Backup,
+                "TagImportCompleted",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Success,
+                message: "User tags imported successfully.",
+                properties: new Dictionary<string, object?>
+                {
+                    ["createdTags"] = result.CreatedTags,
+                    ["reusedTags"] = result.ReusedTags,
+                    ["restoredRelations"] = result.RestoredRelations,
+                    ["conflicts"] = result.Conflicts.Count,
+                    ["missingFiles"] = result.MissingFiles.Count
+                });
         }
         catch (Exception exception)
         {
+            DiagnosticLogger.Default.LogError(
+                DiagnosticCategory.Backup,
+                "TagImportFailed",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Failed,
+                message: $"Failed to import tags: {exception.Message}",
+                errorCode: "ERR_TAG_IMPORT",
+                exception: exception);
+
             TagStatusText.Text = $"导入失败：{exception.Message}";
         }
         finally
@@ -1582,6 +1645,14 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        var correlationId = Guid.NewGuid().ToString("N");
+        DiagnosticLogger.Default.LogInfo(
+            DiagnosticCategory.Backup,
+            "ManualBackupRequested",
+            correlationId: correlationId,
+            status: DiagnosticResultStatus.Started,
+            message: "User triggered manual rolling backup.");
+
         SetTagTransfer(true);
         try
         {
@@ -1589,22 +1660,59 @@ public sealed partial class MainWindow : Window
             if (result.Status == BackupWriteStatus.Created)
             {
                 TagStatusText.Text = $"已生成用户标签备份：{Path.GetFileName(result.BackupPath)}";
+                DiagnosticLogger.Default.LogInfo(
+                    DiagnosticCategory.Backup,
+                    "ManualBackupCompleted",
+                    correlationId: correlationId,
+                    status: DiagnosticResultStatus.Success,
+                    message: "Manual rolling backup created.",
+                    properties: new Dictionary<string, object?> { ["backupPath"] = result.BackupPath });
             }
             else if (result.Status == BackupWriteStatus.Updated)
             {
                 TagStatusText.Text = $"已更新今日用户标签备份：{Path.GetFileName(result.BackupPath)}";
+                DiagnosticLogger.Default.LogInfo(
+                    DiagnosticCategory.Backup,
+                    "ManualBackupCompleted",
+                    correlationId: correlationId,
+                    status: DiagnosticResultStatus.Success,
+                    message: "Manual rolling backup updated.",
+                    properties: new Dictionary<string, object?> { ["backupPath"] = result.BackupPath });
             }
             else if (result.Status == BackupWriteStatus.Unchanged)
             {
                 TagStatusText.Text = "当前用户标签与今日备份一致，无需重复写入。";
+                DiagnosticLogger.Default.LogInfo(
+                    DiagnosticCategory.Backup,
+                    "ManualBackupCompleted",
+                    correlationId: correlationId,
+                    status: DiagnosticResultStatus.Skipped,
+                    message: "Manual rolling backup unchanged; existing snapshot matches current state.",
+                    properties: new Dictionary<string, object?> { ["backupPath"] = result.BackupPath });
             }
             else
             {
                 TagStatusText.Text = $"备份失败：{result.ErrorMessage}";
+                DiagnosticLogger.Default.LogError(
+                    DiagnosticCategory.Backup,
+                    "ManualBackupFailed",
+                    correlationId: correlationId,
+                    status: DiagnosticResultStatus.Failed,
+                    message: $"Manual rolling backup failed: {result.ErrorMessage}",
+                    errorCode: "ERR_MANUAL_BACKUP");
             }
         }
         catch (Exception exception)
         {
+            DiagnosticLogger.Default.LogError(
+                DiagnosticCategory.Backup,
+                "ManualBackupFailed",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Failed,
+                message: $"Manual rolling backup exception: {exception.Message}",
+                errorCode: "ERR_MANUAL_BACKUP_EX",
+                exception: exception);
+
             TagStatusText.Text = $"备份失败：{exception.Message}";
         }
         finally
@@ -1619,6 +1727,14 @@ public sealed partial class MainWindow : Window
         {
             return;
         }
+
+        var correlationId = Guid.NewGuid().ToString("N");
+        DiagnosticLogger.Default.LogInfo(
+            DiagnosticCategory.Backup,
+            "RollingBackupDialogOpened",
+            correlationId: correlationId,
+            status: DiagnosticResultStatus.Started,
+            message: "User opened rolling backups dialog.");
 
         var backups = await Task.Run(() => _rollingBackup.ListBackups());
         if (backups.Count == 0)
@@ -1682,8 +1798,23 @@ public sealed partial class MainWindow : Window
         if (!selected.IsValid)
         {
             TagStatusText.Text = $"无法恢复损坏的备份：{selected.ValidationErrorMessage}";
+            DiagnosticLogger.Default.LogWarning(
+                DiagnosticCategory.Backup,
+                "RollingBackupRestoreRejected",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Rejected,
+                message: $"Selected backup is invalid: {selected.ValidationErrorMessage}",
+                properties: new Dictionary<string, object?> { ["backupPath"] = selected.Path });
             return;
         }
+
+        DiagnosticLogger.Default.LogInfo(
+            DiagnosticCategory.Backup,
+            "RollingBackupRestoreRequested",
+            correlationId: correlationId,
+            status: DiagnosticResultStatus.Started,
+            message: $"Restoring rolling backup from {selected.Path}.",
+            properties: new Dictionary<string, object?> { ["backupPath"] = selected.Path });
 
         SetTagTransfer(true);
         try
@@ -1694,9 +1825,33 @@ public sealed partial class MainWindow : Window
             TagStatusText.Text =
                 $"恢复完成：新建 {result.CreatedTags} 个标签，复用 {result.ReusedTags} 个，恢复 {result.RestoredRelations} 条关系；" +
                 $"名称冲突 {result.Conflicts.Count}，未匹配文件 {result.MissingFiles.Count}。";
+
+            DiagnosticLogger.Default.LogInfo(
+                DiagnosticCategory.Backup,
+                "RollingBackupRestoreCompleted",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Success,
+                message: "Rolling backup restored successfully.",
+                properties: new Dictionary<string, object?>
+                {
+                    ["createdTags"] = result.CreatedTags,
+                    ["reusedTags"] = result.ReusedTags,
+                    ["restoredRelations"] = result.RestoredRelations,
+                    ["conflicts"] = result.Conflicts.Count,
+                    ["missingFiles"] = result.MissingFiles.Count
+                });
         }
         catch (Exception exception)
         {
+            DiagnosticLogger.Default.LogError(
+                DiagnosticCategory.Backup,
+                "RollingBackupRestoreFailed",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Failed,
+                message: $"Failed to restore rolling backup: {exception.Message}",
+                errorCode: "ERR_RESTORE_FAILED",
+                exception: exception);
+
             TagStatusText.Text = $"恢复失败：{exception.Message}";
         }
         finally
@@ -2153,6 +2308,14 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        var correlationId = Guid.NewGuid().ToString("N");
+        DiagnosticLogger.Default.LogInfo(
+            DiagnosticCategory.GraphHost,
+            "WebViewInitializationStarted",
+            correlationId: correlationId,
+            status: DiagnosticResultStatus.Started,
+            message: "Initializing WebView2 control for graph view.");
+
         try
         {
             UpdateGraphState(GraphViewState.Loading());
@@ -2169,17 +2332,35 @@ public sealed partial class MainWindow : Window
                 if (!GraphSecurityPolicy.IsAllowedUri(args.Uri))
                 {
                     args.Cancel = true;
+                    DiagnosticLogger.Default.LogWarning(
+                        DiagnosticCategory.GraphHost,
+                        "NavigationBlocked",
+                        status: DiagnosticResultStatus.Blocked,
+                        message: $"Blocked untrusted navigation to {args.Uri}.",
+                        properties: new Dictionary<string, object?> { ["uri"] = args.Uri });
                 }
             };
 
             GraphWebView.CoreWebView2.NewWindowRequested += (_, args) =>
             {
                 args.Handled = true;
+                DiagnosticLogger.Default.LogWarning(
+                    DiagnosticCategory.GraphHost,
+                    "NewWindowBlocked",
+                    status: DiagnosticResultStatus.Blocked,
+                    message: $"Blocked untrusted new window request for {args.Uri}.",
+                    properties: new Dictionary<string, object?> { ["uri"] = args.Uri });
             };
 
             GraphWebView.CoreWebView2.DownloadStarting += (_, args) =>
             {
                 args.Cancel = true;
+                DiagnosticLogger.Default.LogWarning(
+                    DiagnosticCategory.GraphHost,
+                    "DownloadBlocked",
+                    status: DiagnosticResultStatus.Blocked,
+                    message: $"Blocked untrusted download request for {args.ResultFilePath}.",
+                    properties: new Dictionary<string, object?> { ["resultFilePath"] = args.ResultFilePath });
             };
 
             GraphWebView.CoreWebView2.WebMessageReceived += (_, args) =>
@@ -2189,9 +2370,25 @@ public sealed partial class MainWindow : Window
 
             _webViewInitialized = true;
             GraphWebView.CoreWebView2.Navigate(GraphSecurityPolicy.EntryUrl);
+
+            DiagnosticLogger.Default.LogInfo(
+                DiagnosticCategory.GraphHost,
+                "WebViewInitializationCompleted",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Success,
+                message: "WebView2 control initialized successfully.");
         }
         catch (Exception exception)
         {
+            DiagnosticLogger.Default.LogError(
+                DiagnosticCategory.GraphHost,
+                "WebViewInitializationFailed",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Failed,
+                message: $"WebView2 initialization failed: {exception.Message}",
+                errorCode: "ERR_WEBVIEW_INIT",
+                exception: exception);
+
             UpdateGraphState(GraphViewState.Error(exception.Message));
         }
     }
@@ -2211,14 +2408,46 @@ public sealed partial class MainWindow : Window
         var files = _currentFiles;
         var includeBroad = BroadTagsCheckBox.IsChecked == true;
 
+        var correlationId = Guid.NewGuid().ToString("N");
+        DiagnosticLogger.Default.LogInfo(
+            DiagnosticCategory.GraphHost,
+            "GraphRefreshStarted",
+            correlationId: correlationId,
+            status: DiagnosticResultStatus.Started,
+            message: $"Starting graph refresh with {files.Count} files (includeBroad={includeBroad}).",
+            properties: new Dictionary<string, object?>
+            {
+                ["fileCount"] = files.Count,
+                ["includeBroad"] = includeBroad
+            });
+
         if (files.Count == 0)
         {
+            DiagnosticLogger.Default.LogInfo(
+                DiagnosticCategory.GraphHost,
+                "GraphSnapshotEmpty",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Success,
+                message: "No files available for graph visualization.");
+
             UpdateGraphState(GraphViewState.Empty());
             return;
         }
 
         if (files.Count > GraphSnapshotService.MaxFileNodes)
         {
+            DiagnosticLogger.Default.LogWarning(
+                DiagnosticCategory.GraphHost,
+                "GraphLimitExceeded",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Blocked,
+                message: $"File count ({files.Count}) exceeds maximum allowed node limit ({GraphSnapshotService.MaxFileNodes}).",
+                properties: new Dictionary<string, object?>
+                {
+                    ["fileCount"] = files.Count,
+                    ["maxLimit"] = GraphSnapshotService.MaxFileNodes
+                });
+
             UpdateGraphState(GraphViewState.LimitExceeded(files.Count));
             return;
         }
@@ -2250,12 +2479,36 @@ public sealed partial class MainWindow : Window
 
             UpdateGraphState(state);
             PostSnapshotToWeb(snapshot);
+
+            var totalNodes = snapshot.FileNodes.Count + snapshot.TagNodes.Count;
+            DiagnosticLogger.Default.LogInfo(
+                DiagnosticCategory.GraphHost,
+                "GraphSnapshotRendered",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Success,
+                message: $"Graph snapshot rendered with {totalNodes} nodes and {snapshot.Edges.Count} edges.",
+                properties: new Dictionary<string, object?>
+                {
+                    ["nodeCount"] = totalNodes,
+                    ["fileNodes"] = snapshot.FileNodes.Count,
+                    ["tagNodes"] = snapshot.TagNodes.Count,
+                    ["edgeCount"] = snapshot.Edges.Count
+                });
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
         }
         catch (Exception exception)
         {
+            DiagnosticLogger.Default.LogError(
+                DiagnosticCategory.GraphHost,
+                "GraphRefreshFailed",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Failed,
+                message: $"Graph refresh failed: {exception.Message}",
+                errorCode: "ERR_GRAPH_REFRESH",
+                exception: exception);
+
             if (_graphInteractionCoordinator.CanCommitSnapshot(graphGen) && ReferenceEquals(_graphRefreshCancellation, cancellation))
             {
                 UpdateGraphState(GraphViewState.Error(exception.Message));
@@ -2388,6 +2641,12 @@ public sealed partial class MainWindow : Window
                             break;
                         case GraphActivationStatus.RejectedOffline:
                             FileActionStatusText.Text = activation.ErrorMessage ?? "文件处于离线状态，无法打开。";
+                            DiagnosticLogger.Default.LogWarning(
+                                DiagnosticCategory.GraphHost,
+                                "NodeActivationRejected",
+                                status: DiagnosticResultStatus.Rejected,
+                                message: "File is offline, activation rejected.",
+                                properties: new Dictionary<string, object?> { ["nodeId"] = activateAction.NodeId });
                             break;
                         case GraphActivationStatus.RejectedNotFile:
                         case GraphActivationStatus.RejectedFileNotFound:
@@ -2395,18 +2654,42 @@ public sealed partial class MainWindow : Window
                             {
                                 FileActionStatusText.Text = activation.ErrorMessage;
                             }
+                            DiagnosticLogger.Default.LogWarning(
+                                DiagnosticCategory.GraphHost,
+                                "NodeActivationRejected",
+                                status: DiagnosticResultStatus.Rejected,
+                                message: activation.ErrorMessage ?? "Node activation rejected.",
+                                properties: new Dictionary<string, object?>
+                                {
+                                    ["nodeId"] = activateAction.NodeId,
+                                    ["status"] = activation.Status.ToString()
+                                });
                             break;
                     }
                     break;
 
                 case GraphMessageTypes.Error:
                     var error = GraphMessageSerializer.ParseErrorMessage(message);
+                    DiagnosticLogger.Default.LogError(
+                        DiagnosticCategory.GraphHost,
+                        "WebGraphError",
+                        status: DiagnosticResultStatus.Failed,
+                        message: $"Graph frontend reported error: {error}",
+                        errorCode: "ERR_WEB_GRAPH");
                     UpdateGraphState(GraphViewState.Error(error));
                     break;
             }
         }
         catch (Exception exception)
         {
+            DiagnosticLogger.Default.LogError(
+                DiagnosticCategory.GraphHost,
+                "WebMessageHandlingError",
+                status: DiagnosticResultStatus.Failed,
+                message: $"Failed to process web message from graph: {exception.Message}",
+                errorCode: "ERR_WEB_MESSAGE",
+                exception: exception);
+
             UpdateGraphState(GraphViewState.Error(exception.Message));
         }
     }

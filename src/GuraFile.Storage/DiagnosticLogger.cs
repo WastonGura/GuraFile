@@ -31,7 +31,9 @@ public enum DiagnosticResultStatus
     Started,
     Success,
     Failed,
-    Skipped
+    Skipped,
+    Blocked,
+    Rejected
 }
 
 public sealed record DiagnosticLogEntry(
@@ -108,6 +110,9 @@ public class DiagnosticLogger
     // Flood guard state: key -> (currentSecond, eventCount, suppressedCount)
     private readonly Dictionary<string, (long Second, int Count, int Suppressed)> _floodTracker = [];
 
+    private string? _lastTargetFile;
+    private DateTime _lastRetentionCheckUtc = DateTime.MinValue;
+
     public DiagnosticLogger(
         string logsDirectory,
         long maxFileSizeBytes = DefaultMaxFileSizeBytes,
@@ -124,6 +129,12 @@ public class DiagnosticLogger
         _enableFloodProtection = enableFloodProtection;
         _floodThresholdPerSecond = floodThresholdPerSecond > 0 ? floodThresholdPerSecond : DefaultFloodThresholdPerSecond;
         _clock = clock ?? (() => DateTime.UtcNow);
+
+        if (Directory.Exists(_logsDirectory))
+        {
+            CleanUpRetention(_clock());
+            _lastRetentionCheckUtc = _clock();
+        }
     }
 
     public string LogsDirectory => _logsDirectory;
@@ -295,7 +306,14 @@ public class DiagnosticLogger
                     writer.WriteLine(jsonLine);
                 }
 
-                CleanUpRetention(entry.TimestampUtc);
+                if (_lastTargetFile == null ||
+                    !string.Equals(_lastTargetFile, targetFile, StringComparison.OrdinalIgnoreCase) ||
+                    (entry.TimestampUtc - _lastRetentionCheckUtc) >= TimeSpan.FromMinutes(10))
+                {
+                    CleanUpRetention(entry.TimestampUtc);
+                    _lastRetentionCheckUtc = entry.TimestampUtc;
+                    _lastTargetFile = targetFile;
+                }
             }
             catch
             {
@@ -358,7 +376,8 @@ public class DiagnosticLogger
             // 1. Purge by retention days
             foreach (var file in files.ToList())
             {
-                if (file.LastWriteTimeUtc < cutoffDate)
+                var fileDate = TryExtractDateFromFileName(file.Name) ?? file.LastWriteTimeUtc;
+                if (fileDate < cutoffDate)
                 {
                     try
                     {
@@ -375,7 +394,10 @@ public class DiagnosticLogger
             // 2. Purge by maximum file count
             if (files.Count > _maxFileCount)
             {
-                var sorted = files.OrderBy(f => f.LastWriteTimeUtc).ToList();
+                var sorted = files
+                    .OrderBy(f => TryExtractDateFromFileName(f.Name) ?? f.LastWriteTimeUtc)
+                    .ThenBy(f => f.LastWriteTimeUtc)
+                    .ToList();
                 var toRemove = sorted.Take(sorted.Count - _maxFileCount);
                 foreach (var file in toRemove)
                 {
@@ -394,6 +416,21 @@ public class DiagnosticLogger
         {
             // Ignore retention cleanup errors
         }
+    }
+
+    private static DateTime? TryExtractDateFromFileName(string fileName)
+    {
+        // Format: gurafile_yyyy-MM-dd...
+        if (fileName.StartsWith("gurafile_", StringComparison.OrdinalIgnoreCase) && fileName.Length >= 19)
+        {
+            var dateSpan = fileName.Substring(9, 10);
+            if (DateTime.TryParseExact(dateSpan, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
+            {
+                return DateTime.SpecifyKind(date, DateTimeKind.Utc);
+            }
+        }
+
+        return null;
     }
 
     public static string SanitizePath(string? path)
