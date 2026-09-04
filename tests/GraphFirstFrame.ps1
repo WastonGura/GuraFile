@@ -48,7 +48,10 @@ try {
                 $process.WaitForExit()
                 throw "Graph first-frame run $run timed out after $TimeoutSeconds seconds."
             }
-            Write-Host "RUN $run EXIT $($process.ExitCode) RESULT $((Get-Content -LiteralPath $results | Select-Object -Last 1))"
+            $exitCode = $process.ExitCode
+            Write-Host "RUN $run EXIT $exitCode"
+            if ($exitCode -ne 0) { throw "Graph first-frame run $run exited with code $exitCode." }
+            Write-Host "RUN $run RESULT $((Get-Content -LiteralPath $results | Select-Object -Last 1))"
         }
         finally {
             if (-not $process.HasExited) {
