@@ -199,6 +199,7 @@ public sealed partial class MainWindow : Window
         MoveToFileButton.IsEnabled = false;
         RenameFileButton.IsEnabled = false;
         DeleteFileButton.IsEnabled = false;
+        ExportDiagnosticsButton.IsEnabled = true;
     }
 
     private void EnableControlsForHealthyDatabase()
@@ -211,6 +212,7 @@ public sealed partial class MainWindow : Window
         ImportTagsButton.IsEnabled = true;
         BackupNowButton.IsEnabled = true;
         RollingBackupsButton.IsEnabled = true;
+        ExportDiagnosticsButton.IsEnabled = true;
     }
 
     private async void DatabaseNoticeActionButton_Click(object sender, RoutedEventArgs e)
@@ -276,6 +278,14 @@ public sealed partial class MainWindow : Window
         _isRecoveringDatabase = true;
         ProgressText.Text = "正在执行数据库恢复...";
         ScanProgressRing.Visibility = Visibility.Visible;
+        var correlationId = $"dbrecovery-{Guid.NewGuid():N}";
+
+        DiagnosticLogger.Default.LogInfo(
+            DiagnosticCategory.Database,
+            "RecoveryStarted",
+            correlationId: correlationId,
+            status: DiagnosticResultStatus.Started,
+            message: $"Starting database rebuild for {_databasePath}");
 
         try
         {
@@ -289,6 +299,14 @@ public sealed partial class MainWindow : Window
 
             if (!report.Succeeded)
             {
+                DiagnosticLogger.Default.LogError(
+                    DiagnosticCategory.Database,
+                    "RecoveryFailed",
+                    correlationId: correlationId,
+                    status: DiagnosticResultStatus.Failed,
+                    message: report.ErrorMessage,
+                    errorCode: "DB_RECOVERY_FAILED");
+
                 ProgressText.Text = "数据库恢复失败";
                 FailureList.ItemsSource = new[] { report.ErrorMessage ?? "未知错误" };
 
@@ -307,6 +325,13 @@ public sealed partial class MainWindow : Window
                 await failureDialog.ShowAsync();
                 return;
             }
+
+            DiagnosticLogger.Default.LogInfo(
+                DiagnosticCategory.Database,
+                "RecoveryCompleted",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Success,
+                message: $"Recovered {report.IndexedFiles} files, {report.RestoredTags} tags.");
 
             // Successfully recovered!
             InitializeDatabaseAndServices();
@@ -1687,6 +1712,118 @@ public sealed partial class MainWindow : Window
         ImportTagsButton.IsEnabled = !transferring && !_isOperating;
         BackupNowButton.IsEnabled = !transferring && !_isOperating;
         RollingBackupsButton.IsEnabled = !transferring && !_isOperating;
+        ExportDiagnosticsButton.IsEnabled = !transferring && !_isOperating;
+    }
+
+    private async void ExportDiagnosticsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_transferringTags || _isOperating)
+        {
+            return;
+        }
+
+        var xamlRoot = (Content as FrameworkElement)?.XamlRoot;
+        if (xamlRoot == null)
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            Title = "导出诊断日志",
+            Content = new TextBlock
+            {
+                TextWrapping = TextWrapping.Wrap,
+                Text = "即将导出系统诊断包（ZIP 压缩文件），用于排查应用故障。\n\n" +
+                       "【包含项说明】（严格白名单）：\n" +
+                       "• 运行环境信息（environment.json）：操作系统、.NET 版本、运行架构等；\n" +
+                       "• 配置摘要信息（config_summary.json）：脱敏的管理根目录、数据库架构版本、备份元数据；\n" +
+                       "• 本地诊断日志（logs/*.log）：已自动对所有绝对路径执行用户名脱敏；\n\n" +
+                       "【安全保证】：\n" +
+                       "诊断包严格不包含索引数据库（index.db）、标签备份数据、您的个人文件内容或任何私钥凭据。"
+            },
+            PrimaryButtonText = "选择保存位置并导出",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = xamlRoot
+        };
+
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        var picker = new FileSavePicker
+        {
+            SuggestedFileName = $"GuraFile_Diagnostics_{DateTime.Now:yyyyMMdd_HHmmss}"
+        };
+        picker.FileTypeChoices.Add("ZIP 压缩文件", [".zip"]);
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        var file = await picker.PickSaveFileAsync();
+        if (file is null)
+        {
+            return;
+        }
+
+        SetTagTransfer(true);
+        var correlationId = $"diag-export-{Guid.NewGuid():N}";
+        try
+        {
+            DiagnosticLogger.Default.LogInfo(
+                DiagnosticCategory.App,
+                "DiagnosticExportStarted",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Started,
+                message: $"Exporting diagnostics to {file.Path}");
+
+            var exportService = new DiagnosticExportService(
+                databasePath: _databasePath,
+                logsDirectory: AppPaths.DefaultLogsDirectory,
+                backupDirectory: AppPaths.DefaultTagBackupDirectory,
+                getRoots: _initialized ? _scanner.ListRoots : null);
+
+            var result = await Task.Run(() => exportService.Export(file.Path));
+            if (result.Succeeded)
+            {
+                DiagnosticLogger.Default.LogInfo(
+                    DiagnosticCategory.App,
+                    "DiagnosticExportCompleted",
+                    correlationId: correlationId,
+                    status: DiagnosticResultStatus.Success,
+                    message: $"Exported {result.LogFilesCount} logs, {result.TotalZipBytes} bytes.");
+
+                TagStatusText.Text = $"已成功导出诊断包：{file.Name}";
+            }
+            else
+            {
+                DiagnosticLogger.Default.LogError(
+                    DiagnosticCategory.App,
+                    "DiagnosticExportFailed",
+                    correlationId: correlationId,
+                    status: DiagnosticResultStatus.Failed,
+                    message: result.ErrorMessage,
+                    errorCode: "DIAG_EXPORT_FAILED");
+
+                TagStatusText.Text = $"导出诊断失败：{result.ErrorMessage}";
+            }
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLogger.Default.LogError(
+                DiagnosticCategory.App,
+                "DiagnosticExportException",
+                correlationId: correlationId,
+                status: DiagnosticResultStatus.Failed,
+                message: ex.Message,
+                errorCode: "DIAG_EXPORT_EXCEPTION",
+                exception: ex);
+
+            TagStatusText.Text = $"导出诊断异常：{ex.Message}";
+        }
+        finally
+        {
+            SetTagTransfer(false);
+        }
     }
 
     private async Task ChangeSelectedFileTagsAsync(bool add)

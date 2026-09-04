@@ -47,14 +47,16 @@ public sealed class ManagedRootScanner
     private readonly Func<string, string[]> _getFileSystemEntries;
     private readonly Func<string, FileAttributes> _getAttributes;
     private readonly Func<string, FileTypeClassification> _classify;
+    private readonly DiagnosticLogger _logger;
 
-    public ManagedRootScanner(string databasePath) :
+    public ManagedRootScanner(string databasePath, DiagnosticLogger? logger = null) :
         this(
             databasePath,
             FileIdentityReader.Read,
             Directory.GetFileSystemEntries,
             File.GetAttributes,
-            new FileTypeClassifier().Classify)
+            new FileTypeClassifier().Classify,
+            logger)
     {
     }
 
@@ -85,7 +87,8 @@ public sealed class ManagedRootScanner
         Func<string, FileIdentity> readIdentity,
         Func<string, string[]> getFileSystemEntries,
         Func<string, FileAttributes> getAttributes,
-        Func<string, FileTypeClassification> classify)
+        Func<string, FileTypeClassification> classify,
+        DiagnosticLogger? logger = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(readIdentity);
@@ -97,6 +100,7 @@ public sealed class ManagedRootScanner
         _getFileSystemEntries = getFileSystemEntries;
         _getAttributes = getAttributes;
         _classify = classify;
+        _logger = logger ?? DiagnosticLogger.Default;
         Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);
         using var _ = SqliteDatabase.Open(DatabasePath);
     }
@@ -276,6 +280,7 @@ public sealed class ManagedRootScanner
         var pending = new List<FileRecord>(batchSize);
         var directories = new Stack<string>();
         var scanToken = Guid.NewGuid().ToString("N");
+        var correlationId = $"scan-{rootId}-{scanToken}";
         var discovered = 0;
         var committed = 0;
         var added = 0;
@@ -284,6 +289,13 @@ public sealed class ManagedRootScanner
         var fallback = 0;
         var coverageComplete = true;
         var rootAvailable = false;
+
+        _logger.LogInfo(
+            DiagnosticCategory.Scanner,
+            "ScanStarted",
+            correlationId: correlationId,
+            status: DiagnosticResultStatus.Started,
+            message: $"Root '{root.Path}' (Id={rootId})");
 
         if (cancellationToken.IsCancellationRequested)
         {
@@ -352,6 +364,15 @@ public sealed class ManagedRootScanner
                     rootAvailable = false;
                 }
 
+                _logger.LogWarning(
+                    DiagnosticCategory.Scanner,
+                    "ScanItemError",
+                    correlationId: correlationId,
+                    status: DiagnosticResultStatus.Failed,
+                    message: $"{directory}: {exception.Message}",
+                    errorCode: "SCAN_DIRECTORY_ERROR",
+                    exception: exception);
+
                 failures.Add(new(directory, exception.Message));
                 progress?.Invoke(new(discovered, committed, failures.Count));
                 continue;
@@ -395,6 +416,15 @@ public sealed class ManagedRootScanner
                 catch (Exception exception) when (IsFileSystemError(exception))
                 {
                     coverageComplete = false;
+                    _logger.LogWarning(
+                        DiagnosticCategory.Scanner,
+                        "ScanItemError",
+                        correlationId: correlationId,
+                        status: DiagnosticResultStatus.Failed,
+                        message: $"{entry}: {exception.Message}",
+                        errorCode: "SCAN_FILE_ERROR",
+                        exception: exception);
+
                     failures.Add(new(entry, exception.Message));
                     progress?.Invoke(new(discovered, committed, failures.Count));
                     continue;
@@ -436,13 +466,42 @@ public sealed class ManagedRootScanner
 
         ScanResult Complete(bool canceled)
         {
-            if (!canceled)
+            if (canceled)
+            {
+                _logger.LogInfo(
+                    DiagnosticCategory.Scanner,
+                    "ScanCancelled",
+                    correlationId: correlationId,
+                    status: DiagnosticResultStatus.Skipped,
+                    message: $"Root '{root.Path}' scan cancelled.");
+            }
+            else
             {
                 SetRootStatus(
                     connection,
                     root.Id,
                     rootAvailable ? ManagedRootStatus.Online : ManagedRootStatus.Offline,
                     failures.LastOrDefault()?.Error);
+
+                if (failures.Count > 0)
+                {
+                    _logger.LogWarning(
+                        DiagnosticCategory.Scanner,
+                        "ScanCompletedWithFailures",
+                        correlationId: correlationId,
+                        status: DiagnosticResultStatus.Failed,
+                        message: $"Root '{root.Path}' scan completed with {failures.Count} failures (Discovered: {discovered}, Committed: {committed}, Missing: {missing}).",
+                        errorCode: "SCAN_PARTIAL_FAILURE");
+                }
+                else
+                {
+                    _logger.LogInfo(
+                        DiagnosticCategory.Scanner,
+                        "ScanCompleted",
+                        correlationId: correlationId,
+                        status: DiagnosticResultStatus.Success,
+                        message: $"Root '{root.Path}' scan completed successfully (Discovered: {discovered}, Committed: {committed}, Missing: {missing}).");
+                }
             }
 
             return new(discovered, committed, added, updated, missing, fallback, canceled, failures);

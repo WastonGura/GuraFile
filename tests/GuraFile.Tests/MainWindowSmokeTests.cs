@@ -247,4 +247,24 @@ public sealed class MainWindowSmokeTests
         StringAssert.Contains(source, "_tags.RemoveTagFromFiles");
         StringAssert.Contains(source, "_tags.ListCommonUserTagsForFiles");
     }
+
+    [TestMethod]
+    public void MainWindowExposesDiagnosticExportControls()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "GuraFile", "MainWindow.xaml"));
+        var document = XDocument.Load(path);
+        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var names = document.Descendants()
+            .Select(element => element.Attribute(x + "Name")?.Value)
+            .Where(name => name is not null)
+            .ToHashSet();
+
+        Assert.Contains("ExportDiagnosticsButton", names);
+
+        var source = File.ReadAllText(Path.ChangeExtension(path, ".xaml.cs"));
+        StringAssert.Contains(source, "ExportDiagnosticsButton_Click");
+        StringAssert.Contains(source, "DiagnosticExportService");
+        StringAssert.Contains(source, "DiagnosticLogger.Default");
+    }
 }
