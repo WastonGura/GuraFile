@@ -58,6 +58,15 @@ public sealed record ScanResult(
     IReadOnlyList<ScanFailure> Failures,
     int SkippedReparsePoints = 0);
 
+public sealed record ScanSessionRecord(
+    long Id,
+    long RootId,
+    string ScanToken,
+    string ScanType,
+    string Status,
+    string StartedUtc,
+    string? CompletedUtc);
+
 public sealed class ManagedRootScanner
 {
     private readonly SemaphoreSlim _writeGate = new(1, 1);
@@ -66,6 +75,9 @@ public sealed class ManagedRootScanner
     private readonly Func<string, FileAttributes> _getAttributes;
     private readonly Func<string, FileTypeClassification> _classify;
     private readonly DiagnosticLogger _logger;
+
+    internal Action? OnBeforeMarkMissing { get; set; }
+    internal Action<int>? OnBatchCommitted { get; set; }
 
     public ManagedRootScanner(string databasePath, DiagnosticLogger? logger = null) :
         this(
@@ -221,14 +233,93 @@ public sealed class ManagedRootScanner
         }
     }
 
+    public IReadOnlyList<ManagedRoot> GetInterruptedScanRoots()
+    {
+        using var connection = SqliteDatabase.Open(DatabasePath);
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT DISTINCT r.id, r.path, r.status, r.last_error, r.last_checked_utc
+            FROM roots r
+            JOIN scan_sessions s ON s.root_id = r.id
+            WHERE s.status = 'running'
+            ORDER BY r.path COLLATE NOCASE;
+            """;
+        using var reader = command.ExecuteReader();
+        var roots = new List<ManagedRoot>();
+        while (reader.Read())
+        {
+            roots.Add(ReadManagedRoot(reader));
+        }
+
+        return roots;
+    }
+
+    public IReadOnlyList<ScanSessionRecord> GetInterruptedSessions(long? rootId = null)
+    {
+        using var connection = SqliteDatabase.Open(DatabasePath);
+        using var command = connection.CreateCommand();
+        command.CommandText = rootId.HasValue
+            ? "SELECT id, root_id, scan_token, scan_type, status, started_utc, completed_utc FROM scan_sessions WHERE status = 'running' AND root_id = $rootId ORDER BY id ASC;"
+            : "SELECT id, root_id, scan_token, scan_type, status, started_utc, completed_utc FROM scan_sessions WHERE status = 'running' ORDER BY id ASC;";
+        if (rootId.HasValue)
+        {
+            command.Parameters.AddWithValue("$rootId", rootId.Value);
+        }
+
+        using var reader = command.ExecuteReader();
+        var sessions = new List<ScanSessionRecord>();
+        while (reader.Read())
+        {
+            sessions.Add(new ScanSessionRecord(
+                reader.GetInt64(0),
+                reader.GetInt64(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6)));
+        }
+
+        return sessions;
+    }
+
+    public int ResolveInterruptedSessions(long rootId)
+    {
+        _writeGate.Wait();
+        try
+        {
+            using var connection = SqliteDatabase.Open(DatabasePath);
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                """
+                UPDATE scan_sessions
+                SET status = 'interrupted', completed_utc = $completedUtc
+                WHERE root_id = $rootId AND status = 'running';
+                """;
+            command.Parameters.AddWithValue("$rootId", rootId);
+            command.Parameters.AddWithValue("$completedUtc", DateTimeOffset.UtcNow.ToString("O"));
+            var count = command.ExecuteNonQuery();
+            transaction.Commit();
+            return count;
+        }
+        finally
+        {
+            _writeGate.Release();
+        }
+    }
+
     public Task<ScanResult> ScanAsync(
         long rootId,
         int batchSize = 100,
         Action<ScanProgress>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string scanType = "full")
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(batchSize, 1);
-        return RunSerialized(() => Scan(rootId, batchSize, progress, cancellationToken), cancellationToken);
+        return RunSerialized(() => Scan(rootId, batchSize, progress, cancellationToken, scanType), cancellationToken);
     }
 
     public Task<ScanResult> ReconcilePathsAsync(
@@ -291,8 +382,18 @@ public sealed class ManagedRootScanner
             }
         });
 
-    private ScanResult Scan(long rootId, int batchSize, Action<ScanProgress>? progress, CancellationToken cancellationToken)
+    private ScanResult Scan(
+        long rootId,
+        int batchSize,
+        Action<ScanProgress>? progress,
+        CancellationToken cancellationToken,
+        string scanType = "full")
     {
+        if (scanType is not ("full" or "recovery" or "reconcile"))
+        {
+            throw new ArgumentException($"Invalid scan type '{scanType}'.", nameof(scanType));
+        }
+
         using var connection = SqliteDatabase.Open(DatabasePath);
         var root = ReadRoot(connection, rootId);
         var failures = new List<ScanFailure>();
@@ -300,6 +401,23 @@ public sealed class ManagedRootScanner
         var directories = new Stack<string>();
         var scanToken = Guid.NewGuid().ToString("N");
         var correlationId = $"scan-{rootId}-{scanToken}";
+        var startedUtc = DateTimeOffset.UtcNow.ToString("O");
+        long sessionId;
+        using (var insertSession = connection.CreateCommand())
+        {
+            insertSession.CommandText =
+                """
+                INSERT INTO scan_sessions (root_id, scan_token, scan_type, status, started_utc)
+                VALUES ($rootId, $scanToken, $scanType, 'running', $startedUtc)
+                RETURNING id;
+                """;
+            insertSession.Parameters.AddWithValue("$rootId", rootId);
+            insertSession.Parameters.AddWithValue("$scanToken", scanToken);
+            insertSession.Parameters.AddWithValue("$scanType", scanType);
+            insertSession.Parameters.AddWithValue("$startedUtc", startedUtc);
+            sessionId = (long)insertSession.ExecuteScalar()!;
+        }
+
         var discovered = 0;
         var committed = 0;
         var added = 0;
@@ -315,7 +433,12 @@ public sealed class ManagedRootScanner
             "ScanStarted",
             correlationId: correlationId,
             status: DiagnosticResultStatus.Started,
-            message: $"Root '{root.Path}' (Id={rootId})");
+            message: $"Root '{root.Path}' (Id={rootId})",
+            properties: new Dictionary<string, object?>
+            {
+                ["scanType"] = scanType,
+                ["scanToken"] = scanToken
+            });
 
         if (cancellationToken.IsCancellationRequested)
         {
@@ -497,6 +620,7 @@ public sealed class ManagedRootScanner
                     missing += written.Missing;
                     committed += pending.Count;
                     pending.Clear();
+                    OnBatchCommitted?.Invoke(committed / batchSize);
                     progress?.Invoke(new(discovered, committed, failures.Count));
                 }
             }
@@ -514,17 +638,33 @@ public sealed class ManagedRootScanner
             updated += written.Updated;
             missing += written.Missing;
             committed += pending.Count;
+            OnBatchCommitted?.Invoke(committed / batchSize);
             progress?.Invoke(new(discovered, committed, failures.Count));
         }
 
         if (coverageComplete)
         {
+            OnBeforeMarkMissing?.Invoke();
             missing += MarkMissing(connection, root.Id, scanToken);
         }
         return Complete(canceled: false);
 
         ScanResult Complete(bool canceled)
         {
+            using (var updateSession = connection.CreateCommand())
+            {
+                updateSession.CommandText =
+                    """
+                    UPDATE scan_sessions
+                    SET status = $status, completed_utc = $completedUtc
+                    WHERE id = $sessionId;
+                    """;
+                updateSession.Parameters.AddWithValue("$status", canceled ? "interrupted" : "completed");
+                updateSession.Parameters.AddWithValue("$completedUtc", DateTimeOffset.UtcNow.ToString("O"));
+                updateSession.Parameters.AddWithValue("$sessionId", sessionId);
+                updateSession.ExecuteNonQuery();
+            }
+
             if (canceled)
             {
                 _logger.LogInfo(

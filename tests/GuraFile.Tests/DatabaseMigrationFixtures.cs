@@ -6,7 +6,7 @@ namespace GuraFile.Tests;
 public static class DatabaseMigrationFixtures
 {
     public const int MinHistoricalVersion = 1;
-    public const int MaxHistoricalVersion = 5;
+    public const int MaxHistoricalVersion = 6;
 
     public sealed class TempFixtureDatabase : IDisposable
     {
@@ -63,8 +63,11 @@ public static class DatabaseMigrationFixtures
             case 5:
                 CreateVersion5Database(path);
                 break;
+            case 6:
+                CreateVersion6Database(path);
+                break;
             default:
-                throw new ArgumentOutOfRangeException(nameof(version), version, $"Unsupported fixture version {version}. Supported: 1..5");
+                throw new ArgumentOutOfRangeException(nameof(version), version, $"Unsupported fixture version {version}. Supported: 1..6");
         }
     }
 
@@ -292,6 +295,63 @@ public static class DatabaseMigrationFixtures
             Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 1, 'user');", transaction);
             Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 2, 'automatic');", transaction);
             Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (2, 1, 'user');", transaction);
+
+            transaction.Commit();
+        }
+
+        return path;
+    }
+
+    public static string CreateVersion6Database(string? path = null)
+    {
+        path ??= Path.Combine(Path.GetTempPath(), $"GuraFile.Fixture.v6.{Guid.NewGuid():N}.db");
+
+        using (var connection = SqliteDatabase.Open(path, 6))
+        using (var transaction = connection.BeginTransaction())
+        {
+            // Roots: 3 roots covering online, offline, recovering status
+            Execute(connection, "INSERT INTO roots (id, path, normalized_path, status, last_error, last_checked_utc) VALUES (1, 'C:\\FixtureRoot\\Primary', 'c:\\fixtureroot\\primary', 'online', NULL, '2026-09-04T10:00:00Z');", transaction);
+            Execute(connection, "INSERT INTO roots (id, path, normalized_path, status, last_error, last_checked_utc) VALUES (2, 'C:\\FixtureRoot\\Secondary', 'c:\\fixtureroot\\secondary', 'offline', 'Device unplugged', '2026-09-04T09:00:00Z');", transaction);
+            Execute(connection, "INSERT INTO roots (id, path, normalized_path, status, last_error, last_checked_utc) VALUES (3, 'C:\\FixtureRoot\\Recover', 'c:\\fixtureroot\\recover', 'recovering', 'Crash recovery', '2026-09-04T09:30:00Z');", transaction);
+
+            // Files: 3 files
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, identity_diagnostic, is_online, scan_token) " +
+                "VALUES (1, 1, 'vol-v6-01', 'file-v6-001', 'C:\\FixtureRoot\\Primary\\Doc1.txt', 'c:\\fixtureroot\\primary\\doc1.txt', 'Doc1.txt', '.txt', 100, '2026-09-04T10:00:00Z', 'stable', NULL, 1, 'tok-6-1');",
+                transaction);
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, identity_diagnostic, is_online, scan_token) " +
+                "VALUES (2, 2, 'vol-v6-02', 'file-v6-002', 'C:\\FixtureRoot\\Secondary\\Doc2.txt', 'c:\\fixtureroot\\secondary\\doc2.txt', 'Doc2.txt', '.txt', 200, '2026-09-04T09:00:00Z', 'stable', NULL, 0, 'tok-6-2');",
+                transaction);
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, identity_diagnostic, is_online, scan_token) " +
+                "VALUES (3, 3, 'path-fallback', 'path-v6-003', 'C:\\FixtureRoot\\Recover\\Doc3.txt', 'c:\\fixtureroot\\recover\\doc3.txt', 'Doc3.txt', '.txt', 300, '2026-09-04T09:30:00Z', 'path', 'Diagnostic v6', 1, 'tok-6-3');",
+                transaction);
+
+            // Tags:
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name, source) VALUES (1, 'TagV6', 'tagv6', 'user');", transaction);
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name, source) VALUES (2, 'TagV6', 'tagv6', 'automatic');", transaction);
+
+            // File Tags:
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 1, 'user');", transaction);
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 2, 'automatic');", transaction);
+
+            // Scan Sessions:
+            // 1 completed session for root 1
+            Execute(connection,
+                "INSERT INTO scan_sessions (id, root_id, scan_token, scan_type, status, started_utc, completed_utc) " +
+                "VALUES (1, 1, 'tok-6-1', 'full', 'completed', '2026-09-04T09:59:00Z', '2026-09-04T10:00:00Z');",
+                transaction);
+            // 1 interrupted session for root 2
+            Execute(connection,
+                "INSERT INTO scan_sessions (id, root_id, scan_token, scan_type, status, started_utc, completed_utc) " +
+                "VALUES (2, 2, 'tok-6-2', 'recovery', 'interrupted', '2026-09-04T08:50:00Z', '2026-09-04T08:55:00Z');",
+                transaction);
+            // 1 running session for root 3 (simulating uncompleted scan session)
+            Execute(connection,
+                "INSERT INTO scan_sessions (id, root_id, scan_token, scan_type, status, started_utc, completed_utc) " +
+                "VALUES (3, 3, 'tok-6-3', 'recovery', 'running', '2026-09-04T09:30:00Z', NULL);",
+                transaction);
 
             transaction.Commit();
         }

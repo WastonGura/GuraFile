@@ -4,7 +4,7 @@ namespace GuraFile.Storage;
 
 public static class SqliteDatabase
 {
-    public const int CurrentVersion = 5;
+    public const int CurrentVersion = 6;
 
     private static readonly string[] Migrations =
     [
@@ -163,6 +163,18 @@ public static class SqliteDatabase
             CHECK (status IN ('online', 'offline', 'recovering'));
         ALTER TABLE roots ADD COLUMN last_error TEXT;
         ALTER TABLE roots ADD COLUMN last_checked_utc TEXT;
+        """,
+        """
+        CREATE TABLE scan_sessions (
+            id INTEGER PRIMARY KEY,
+            root_id INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
+            scan_token TEXT NOT NULL,
+            scan_type TEXT NOT NULL DEFAULT 'full' CHECK (scan_type IN ('full', 'recovery', 'reconcile')),
+            status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'interrupted')),
+            started_utc TEXT NOT NULL,
+            completed_utc TEXT
+        );
+        CREATE INDEX idx_scan_sessions_root_status ON scan_sessions(root_id, status);
         """
     ];
 

@@ -28,9 +28,9 @@ public sealed class DatabaseHealthServiceTests
     }
 
     [TestMethod]
-    public void NormalV5DatabaseIsDiagnosedAsHealthy()
+    public void NormalCurrentDatabaseIsDiagnosedAsHealthy()
     {
-        var path = Path.Combine(Path.GetTempPath(), $"GuraFile.V5.{Guid.NewGuid():N}.db");
+        var path = Path.Combine(Path.GetTempPath(), $"GuraFile.Current.{Guid.NewGuid():N}.db");
         try
         {
             using (var conn = SqliteDatabase.Open(path))
@@ -150,7 +150,7 @@ public sealed class DatabaseHealthServiceTests
     }
 
     [TestMethod]
-    [DataRow(6)]
+    [DataRow(7)]
     [DataRow(99)]
     public void UnsupportedFutureSchemaIsDiagnosedWithoutModifyingJournalMode(int futureVersion)
     {
