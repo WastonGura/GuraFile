@@ -2,10 +2,11 @@
 
 GuraFile 是一个 Windows 优先的标签式文件管理器。它保留真实文件系统作为唯一文件来源，在本地建立索引，让你用标签而不是文件夹层级整理和查找文件。
 
-## v0.4.0 Graph Preview
+## v0.4.1 Graph Preview
 
-本版为图谱预览（Graph Preview）版本，在 v0.3 系列稳定文件操作基础上引入完全离线的本地关系图谱与批量交互：
+本版为图谱预览（Graph Preview）性能修复版本，在 v0.3 系列稳定文件操作基础上提供完全离线的本地关系图谱与批量交互：
 
+- 真实首帧性能修复（#67）：将现有 Cytoscape.js `cose` 布局限制为 `numIter: 400`，并使用真实 WebView2 `layoutstop` harness 固化 310 节点 / 300 边验收；
 - 本地图谱预览（#57, #58）：基于 Cytoscape.js 3.30.2 与 WinUI 3 WebView2 提供完全离线的文件—标签受限二部图可视化，断网完全可用；
 - 安全沙箱与三重拦截（#58）：本地虚拟域名 `graph.gurafile.local`，实施外部导航、新窗口弹窗与文件下载三重拦截，严格 CSP 杜绝脚本注入；
 - 列表与图谱筛选选择双向联动（#59）：两视图共享同一筛选快照，点击高亮同步刷新右侧详情，双击通过内存安全验证执行 Shell 打开；
@@ -13,11 +14,13 @@ GuraFile 是一个 Windows 优先的标签式文件管理器。它保留真实�
 - 300 节点性能保护（#57, #58, #61）：图谱预览设定 300 个文件节点上限，超限明确提示收窄筛选条件，避免界面卡顿；
 - 保持基于 Windows STA `IFileOperation` 的安全文件操作（复制、移动、重命名、强制回收站软删除 `FOFX_RECYCLEONDELETE` + `FOF_ALLOWUNDO`）与标签继承。
 
+v0.4.0 发布后的真实 WebView2 复验为 1401.10 / 1404.30 / 1424.60 ms，未达到三次均小于 1000 ms 的门禁；v0.4.1 在目标设备上最终连续三次 JS 为 668.1 / 670.0 / 669.4 ms，Host 为 729.88 / 725.11 / 721.67 ms。测量环境为 Windows 10.0.26200.0、AMD Ryzen 7 7735H、WebView2 152.0.4191.62、.NET 10.0.11、1280×800 可见窗口；该结果仅代表此目标 x64 设备，其他受支持设备仍应运行 `tests\GraphFirstFrame.ps1` 复验。
+
 这是 Preview 版本，不建议把 SQLite 索引数据库本身作为唯一备份。重要整理结果请定期使用“导出备份”。
 
 ## 安装与运行
 
-1. 从 GitHub Releases 下载 `GuraFile-v0.4.0-win-x64.zip` 和对应的 `.sha256` 文件。
+1. 从 GitHub Releases 下载 `GuraFile-v0.4.1-win-x64.zip` 和对应的 `.sha256` 文件。
 2. 校验压缩包 SHA-256 后解压到可写目录。
 3. 运行 `GuraFile.exe`。应用为未签名预览包，Windows 可能显示 SmartScreen 提示。
 
@@ -69,7 +72,7 @@ dotnet test .\tests\GuraFile.Tests\GuraFile.Tests.csproj --configuration Release
 生成可发布包：
 
 ```powershell
-.\scripts\PackageRelease.ps1 -Version 0.4.0
+.\scripts\PackageRelease.ps1 -Version 0.4.1
 ```
 
 项目按 GitHub Issue、独立 worktree、测试先行、独立审查、PR 和受保护 `main` 分支交付。第三方组件及许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。
