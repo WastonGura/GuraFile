@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="src/GuraFile.Storage/GuraFile.Storage.csproj" />
   <Project Path="src/GuraFile/GuraFile.csproj" />
+  <Project Path="tests/GraphRenderHarness/GraphRenderHarness.csproj" />
   <Project Path="tests/GuraFile.Tests/GuraFile.Tests.csproj" />
 </Solution>
