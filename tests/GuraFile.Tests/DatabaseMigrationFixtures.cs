@@ -1,0 +1,399 @@
+using GuraFile.Storage;
+using Microsoft.Data.Sqlite;
+
+namespace GuraFile.Tests;
+
+public static class DatabaseMigrationFixtures
+{
+    public const int MinHistoricalVersion = 1;
+    public const int MaxHistoricalVersion = 5;
+
+    public sealed class TempFixtureDatabase : IDisposable
+    {
+        public string Path { get; }
+        public int Version { get; }
+
+        public TempFixtureDatabase(string path, int version)
+        {
+            Path = path;
+            Version = version;
+        }
+
+        public void Dispose()
+        {
+            foreach (var file in new[] { Path, $"{Path}-shm", $"{Path}-wal" })
+            {
+                if (File.Exists(file))
+                {
+                    try
+                    {
+                        File.Delete(file);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+        }
+    }
+
+    public static TempFixtureDatabase CreateTempDatabase(int version)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"GuraFile.Fixture.v{version}.{Guid.NewGuid():N}.db");
+        CreateDatabase(version, path);
+        return new TempFixtureDatabase(path, version);
+    }
+
+    public static void CreateDatabase(int version, string path)
+    {
+        switch (version)
+        {
+            case 1:
+                CreateVersion1Database(path);
+                break;
+            case 2:
+                CreateVersion2Database(path);
+                break;
+            case 3:
+                CreateVersion3Database(path);
+                break;
+            case 4:
+                CreateVersion4Database(path);
+                break;
+            case 5:
+                CreateVersion5Database(path);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(version), version, $"Unsupported fixture version {version}. Supported: 1..5");
+        }
+    }
+
+    public static string CreateVersion1Database(string? path = null)
+    {
+        path ??= Path.Combine(Path.GetTempPath(), $"GuraFile.Fixture.v1.{Guid.NewGuid():N}.db");
+
+        using (var connection = SqliteDatabase.Open(path, 1))
+        using (var transaction = connection.BeginTransaction())
+        {
+            // Roots: 2 roots
+            Execute(connection, "INSERT INTO roots (id, path, normalized_path) VALUES (1, 'C:\\FixtureRoot\\Docs', 'c:\\fixtureroot\\docs');", transaction);
+            Execute(connection, "INSERT INTO roots (id, path, normalized_path) VALUES (2, 'C:\\FixtureRoot\\Media', 'c:\\fixtureroot\\media');", transaction);
+
+            // Files: 3 files (stable, path-fallback, and media stable)
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc) " +
+                "VALUES (1, 1, 'vol-v1-stable', 'file-v1-001', 'C:\\FixtureRoot\\Docs\\Report.pdf', 'c:\\fixtureroot\\docs\\report.pdf', 'Report.pdf', '.pdf', 1024, '2026-08-30T10:00:00Z');",
+                transaction);
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc) " +
+                "VALUES (2, 1, 'path-fallback', 'path-v1-002', 'C:\\FixtureRoot\\Docs\\Fallback.txt', 'c:\\fixtureroot\\docs\\fallback.txt', 'Fallback.txt', '.txt', 512, '2026-08-30T10:05:00Z');",
+                transaction);
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc) " +
+                "VALUES (3, 2, 'vol-v1-media', 'file-v1-003', 'C:\\FixtureRoot\\Media\\Photo.jpg', 'c:\\fixtureroot\\media\\photo.jpg', 'Photo.jpg', '.jpg', 204800, '2026-08-30T10:10:00Z');",
+                transaction);
+
+            // Tags (v1 has no source column)
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name) VALUES (1, 'Urgent', 'urgent');", transaction);
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name) VALUES (2, 'Projects', 'projects');", transaction);
+
+            // File Tags (v1 has no source column; file 1 has multi-tags, tag 2 has multi-files)
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id) VALUES (1, 1);", transaction);
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id) VALUES (1, 2);", transaction);
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id) VALUES (2, 2);", transaction);
+
+            transaction.Commit();
+        }
+
+        return path;
+    }
+
+    public static string CreateVersion2Database(string? path = null)
+    {
+        path ??= Path.Combine(Path.GetTempPath(), $"GuraFile.Fixture.v2.{Guid.NewGuid():N}.db");
+
+        using (var connection = SqliteDatabase.Open(path, 2))
+        using (var transaction = connection.BeginTransaction())
+        {
+            // Roots: 2 roots
+            Execute(connection, "INSERT INTO roots (id, path, normalized_path) VALUES (1, 'C:\\FixtureRoot\\Docs', 'c:\\fixtureroot\\docs');", transaction);
+            Execute(connection, "INSERT INTO roots (id, path, normalized_path) VALUES (2, 'C:\\FixtureRoot\\Archive', 'c:\\fixtureroot\\archive');", transaction);
+
+            // Files: 4 files
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc) " +
+                "VALUES (1, 1, 'vol-v2-main', 'file-v2-001', 'C:\\FixtureRoot\\Docs\\Spec.pdf', 'c:\\fixtureroot\\docs\\spec.pdf', 'Spec.pdf', '.pdf', 4096, '2026-08-31T09:00:00Z');",
+                transaction);
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc) " +
+                "VALUES (2, 1, 'path-fallback', 'path-v2-002', 'C:\\FixtureRoot\\Docs\\Legacy.txt', 'c:\\fixtureroot\\docs\\legacy.txt', 'Legacy.txt', '.txt', 128, '2026-08-31T09:15:00Z');",
+                transaction);
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc) " +
+                "VALUES (3, 2, 'vol-v2-media', 'file-v2-003', 'C:\\FixtureRoot\\Archive\\Photo.png', 'c:\\fixtureroot\\archive\\photo.png', 'Photo.png', '.png', 1048576, '2026-08-31T09:30:00Z');",
+                transaction);
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc) " +
+                "VALUES (4, 2, 'vol-v2-media', 'file-v2-004', 'C:\\FixtureRoot\\Archive\\Data.csv', 'c:\\fixtureroot\\archive\\data.csv', 'Data.csv', '.csv', 2048, '2026-08-31T09:45:00Z');",
+                transaction);
+
+            // Tags (v2 tags still has no source column)
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name) VALUES (1, 'UserOnly', 'useronly');", transaction);
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name) VALUES (2, 'AutoOnly', 'autoonly');", transaction);
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name) VALUES (3, 'SharedTag', 'sharedtag');", transaction);
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name) VALUES (4, 'MultiFile', 'multifile');", transaction);
+
+            // File Tags (v2 has source column in file_tags)
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 1, 'user');", transaction);
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (2, 2, 'automatic');", transaction);
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 3, 'user');", transaction);
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (3, 3, 'automatic');", transaction);
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 4, 'user');", transaction);
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (4, 4, 'user');", transaction);
+
+            transaction.Commit();
+        }
+
+        return path;
+    }
+
+    public static string CreateVersion3Database(string? path = null)
+    {
+        path ??= Path.Combine(Path.GetTempPath(), $"GuraFile.Fixture.v3.{Guid.NewGuid():N}.db");
+
+        using (var connection = SqliteDatabase.Open(path, 3))
+        using (var transaction = connection.BeginTransaction())
+        {
+            // Roots: 2 roots
+            Execute(connection, "INSERT INTO roots (id, path, normalized_path) VALUES (1, 'C:\\FixtureRoot\\Projects', 'c:\\fixtureroot\\projects');", transaction);
+            Execute(connection, "INSERT INTO roots (id, path, normalized_path) VALUES (2, 'C:\\FixtureRoot\\External', 'c:\\fixtureroot\\external');", transaction);
+
+            // Files: 4 files (online stable, offline stable, online path-fallback, offline path-fallback)
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, identity_diagnostic, is_online, scan_token) " +
+                "VALUES (1, 1, 'vol-v3-01', 'file-v3-001', 'C:\\FixtureRoot\\Projects\\Main.cs', 'c:\\fixtureroot\\projects\\main.cs', 'Main.cs', '.cs', 8192, '2026-09-01T12:00:00Z', 'stable', NULL, 1, 'token-v3-1');",
+                transaction);
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, identity_diagnostic, is_online, scan_token) " +
+                "VALUES (2, 1, 'vol-v3-01', 'file-v3-002', 'C:\\FixtureRoot\\Projects\\OldMain.cs', 'c:\\fixtureroot\\projects\\oldmain.cs', 'OldMain.cs', '.cs', 4096, '2026-09-01T11:00:00Z', 'stable', NULL, 0, 'token-v3-1');",
+                transaction);
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, identity_diagnostic, is_online, scan_token) " +
+                "VALUES (3, 2, 'path-fallback', 'path-v3-003', 'C:\\FixtureRoot\\External\\Readme.md', 'c:\\fixtureroot\\external\\readme.md', 'Readme.md', '.md', 1024, '2026-09-01T12:30:00Z', 'path', 'Volume not supporting file IDs', 1, 'token-v3-2');",
+                transaction);
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, identity_diagnostic, is_online, scan_token) " +
+                "VALUES (4, 2, 'path-fallback', 'path-v3-004', 'C:\\FixtureRoot\\External\\Missing.md', 'c:\\fixtureroot\\external\\missing.md', 'Missing.md', '.md', 512, '2026-09-01T10:00:00Z', 'path', 'File ID query failed', 0, 'token-v3-2');",
+                transaction);
+
+            // Tags: 3 tags
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name) VALUES (1, 'Core', 'core');", transaction);
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name) VALUES (2, 'AutoCode', 'autocode');", transaction);
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name) VALUES (3, 'Review', 'review');", transaction);
+
+            // File Tags:
+            // File 1 (online stable) has Core ('user') and AutoCode ('automatic')
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 1, 'user');", transaction);
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 2, 'automatic');", transaction);
+            // File 2 (offline stable) has Core ('user')
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (2, 1, 'user');", transaction);
+            // File 3 (online path) has Review ('user')
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (3, 3, 'user');", transaction);
+            // File 4 (offline path) has Review ('automatic')
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (4, 3, 'automatic');", transaction);
+
+            transaction.Commit();
+        }
+
+        return path;
+    }
+
+    public static string CreateVersion4Database(string? path = null)
+    {
+        path ??= Path.Combine(Path.GetTempPath(), $"GuraFile.Fixture.v4.{Guid.NewGuid():N}.db");
+
+        using (var connection = SqliteDatabase.Open(path, 4))
+        using (var transaction = connection.BeginTransaction())
+        {
+            // Roots: 2 roots
+            Execute(connection, "INSERT INTO roots (id, path, normalized_path) VALUES (1, 'C:\\FixtureRoot\\Design', 'c:\\fixtureroot\\design');", transaction);
+            Execute(connection, "INSERT INTO roots (id, path, normalized_path) VALUES (2, 'C:\\FixtureRoot\\Assets', 'c:\\fixtureroot\\assets');", transaction);
+
+            // Files: 4 files (online stable, offline stable, online path-fallback, offline path-fallback)
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, identity_diagnostic, is_online, scan_token) " +
+                "VALUES (1, 1, 'vol-v4-01', 'file-v4-001', 'C:\\FixtureRoot\\Design\\App.xaml', 'c:\\fixtureroot\\design\\app.xaml', 'App.xaml', '.xaml', 16384, '2026-09-02T14:00:00Z', 'stable', NULL, 1, 'tok-v4-1');",
+                transaction);
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, identity_diagnostic, is_online, scan_token) " +
+                "VALUES (2, 1, 'vol-v4-01', 'file-v4-002', 'C:\\FixtureRoot\\Design\\OldApp.xaml', 'c:\\fixtureroot\\design\\oldapp.xaml', 'OldApp.xaml', '.xaml', 8192, '2026-09-02T13:00:00Z', 'stable', NULL, 0, 'tok-v4-1');",
+                transaction);
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, identity_diagnostic, is_online, scan_token) " +
+                "VALUES (3, 2, 'path-fallback', 'path-v4-003', 'C:\\FixtureRoot\\Assets\\Logo.png', 'c:\\fixtureroot\\assets\\logo.png', 'Logo.png', '.png', 32768, '2026-09-02T14:30:00Z', 'path', 'Diagnostic v4', 1, 'tok-v4-2');",
+                transaction);
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, identity_diagnostic, is_online, scan_token) " +
+                "VALUES (4, 2, 'path-fallback', 'path-v4-004', 'C:\\FixtureRoot\\Assets\\OldLogo.png', 'c:\\fixtureroot\\assets\\oldlogo.png', 'OldLogo.png', '.png', 16384, '2026-09-02T10:00:00Z', 'path', 'Missing v4', 0, 'tok-v4-2');",
+                transaction);
+
+            // Tags (v4 has source in tags!):
+            // Include same name with different source!
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name, source) VALUES (1, 'Archive', 'archive', 'user');", transaction);
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name, source) VALUES (2, 'Archive', 'archive', 'automatic');", transaction);
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name, source) VALUES (3, 'Starred', 'starred', 'user');", transaction);
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name, source) VALUES (4, 'AutoImage', 'autoimage', 'automatic');", transaction);
+
+            // File Tags:
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 1, 'user');", transaction);
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 4, 'automatic');", transaction);
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (2, 3, 'user');", transaction);
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (3, 2, 'automatic');", transaction);
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (3, 3, 'user');", transaction);
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (4, 1, 'user');", transaction);
+
+            transaction.Commit();
+        }
+
+        return path;
+    }
+
+    public static string CreateVersion5Database(string? path = null)
+    {
+        path ??= Path.Combine(Path.GetTempPath(), $"GuraFile.Fixture.v5.{Guid.NewGuid():N}.db");
+
+        using (var connection = SqliteDatabase.Open(path, 5))
+        using (var transaction = connection.BeginTransaction())
+        {
+            // Roots: 3 roots covering online, offline, recovering status
+            Execute(connection, "INSERT INTO roots (id, path, normalized_path, status, last_error, last_checked_utc) VALUES (1, 'C:\\FixtureRoot\\Active', 'c:\\fixtureroot\\active', 'online', NULL, '2026-09-03T10:00:00Z');", transaction);
+            Execute(connection, "INSERT INTO roots (id, path, normalized_path, status, last_error, last_checked_utc) VALUES (2, 'C:\\FixtureRoot\\Unplugged', 'c:\\fixtureroot\\unplugged', 'offline', 'Volume disconnected', '2026-09-03T09:00:00Z');", transaction);
+            Execute(connection, "INSERT INTO roots (id, path, normalized_path, status, last_error, last_checked_utc) VALUES (3, 'C:\\FixtureRoot\\Recovering', 'c:\\fixtureroot\\recovering', 'recovering', 'Sync in progress', '2026-09-03T09:30:00Z');", transaction);
+
+            // Files: 3 files
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, identity_diagnostic, is_online, scan_token) " +
+                "VALUES (1, 1, 'vol-v5-01', 'file-v5-001', 'C:\\FixtureRoot\\Active\\Doc1.txt', 'c:\\fixtureroot\\active\\doc1.txt', 'Doc1.txt', '.txt', 100, '2026-09-03T10:00:00Z', 'stable', NULL, 1, 'tok-5-1');",
+                transaction);
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, identity_diagnostic, is_online, scan_token) " +
+                "VALUES (2, 2, 'vol-v5-02', 'file-v5-002', 'C:\\FixtureRoot\\Unplugged\\Doc2.txt', 'c:\\fixtureroot\\unplugged\\doc2.txt', 'Doc2.txt', '.txt', 200, '2026-09-03T09:00:00Z', 'stable', NULL, 0, 'tok-5-2');",
+                transaction);
+            Execute(connection,
+                "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, identity_diagnostic, is_online, scan_token) " +
+                "VALUES (3, 3, 'path-fallback', 'path-v5-003', 'C:\\FixtureRoot\\Recovering\\Doc3.txt', 'c:\\fixtureroot\\recovering\\doc3.txt', 'Doc3.txt', '.txt', 300, '2026-09-03T09:30:00Z', 'path', 'Diagnostic v5', 1, 'tok-5-3');",
+                transaction);
+
+            // Tags:
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name, source) VALUES (1, 'TagV5', 'tagv5', 'user');", transaction);
+            Execute(connection, "INSERT INTO tags (id, name, normalized_name, source) VALUES (2, 'TagV5', 'tagv5', 'automatic');", transaction);
+
+            // File Tags:
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 1, 'user');", transaction);
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 2, 'automatic');", transaction);
+            Execute(connection, "INSERT INTO file_tags (file_id, tag_id, source) VALUES (2, 1, 'user');", transaction);
+
+            transaction.Commit();
+        }
+
+        return path;
+    }
+
+    public static SqliteConnection OpenRaw(string path)
+    {
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Pooling = false
+        }.ToString());
+        connection.Open();
+        return connection;
+    }
+
+    public static long GetUserVersion(string path)
+    {
+        using var connection = OpenRaw(path);
+        return Scalar<long>(connection, "PRAGMA user_version;");
+    }
+
+    public static string GetJournalMode(string path)
+    {
+        using var connection = OpenRaw(path);
+        return Scalar<string>(connection, "PRAGMA journal_mode;");
+    }
+
+    public static List<string> GetTableNames(SqliteConnection connection)
+    {
+        var list = new List<string>();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name;";
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            list.Add(reader.GetString(0));
+        }
+        return list;
+    }
+
+    public static void AssertForeignKeys(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA foreign_key_check;";
+        using var reader = command.ExecuteReader();
+        var violations = new List<string>();
+        while (reader.Read())
+        {
+            violations.Add($"Table={reader.GetString(0)}, RowId={reader.GetInt64(1)}, Parent={reader.GetString(2)}, FkId={reader.GetInt32(3)}");
+        }
+
+        if (violations.Count > 0)
+        {
+            throw new InvalidOperationException($"Foreign key integrity violated: {string.Join("; ", violations)}");
+        }
+    }
+
+    public static void AssertNoTemporaryTables(SqliteConnection connection)
+    {
+        var temporaryNames = new[] { "file_tags_v2", "files_v3", "file_tags_v3", "tags_v4", "file_tags_v4" };
+        var tables = GetTableNames(connection);
+        var leftovers = tables.Intersect(temporaryNames).ToList();
+        if (leftovers.Count > 0)
+        {
+            throw new InvalidOperationException($"Found leftover temporary migration tables: {string.Join(", ", leftovers)}");
+        }
+    }
+
+    public static T Scalar<T>(SqliteConnection connection, string sql, params (string Name, object Value)[] parameters)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var (name, value) in parameters)
+        {
+            command.Parameters.AddWithValue(name, value);
+        }
+        var result = command.ExecuteScalar();
+        if (result is DBNull || result is null)
+        {
+            return default!;
+        }
+        return (T)Convert.ChangeType(result, typeof(T))!;
+    }
+
+    public static void Execute(
+        SqliteConnection connection,
+        string sql,
+        SqliteTransaction? transaction = null,
+        params (string Name, object Value)[] parameters)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Transaction = transaction;
+        foreach (var (name, value) in parameters)
+        {
+            command.Parameters.AddWithValue(name, value);
+        }
+
+        command.ExecuteNonQuery();
+    }
+}
