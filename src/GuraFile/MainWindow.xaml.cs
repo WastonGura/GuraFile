@@ -18,6 +18,7 @@ public sealed partial class MainWindow : Window
     private readonly FileQueryService _fileQuery;
     private readonly TagService _tags;
     private readonly UserTagBackupService _tagBackup;
+    private readonly RollingTagBackupService _rollingBackup;
     private readonly ShellFileActions _shell = new();
     private readonly IFileClipboardService _clipboard;
     private readonly FileListOperationService _fileOperations;
@@ -48,10 +49,8 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         Title = "GuraFile";
-        var databasePath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "GuraFile",
-            "index.db");
+        var databasePath = AppPaths.DefaultDatabasePath;
+        _rollingBackup = new(databasePath);
         _scanner = new(databasePath);
         _fileChanges = new(
             _scanner,
@@ -59,7 +58,7 @@ public sealed partial class MainWindow : Window
             exception => DispatcherQueue.TryEnqueue(() => ShowRealtimeError(exception)),
             onRootChanged: () => DispatcherQueue.TryEnqueue(RefreshRoots));
         _fileQuery = new(databasePath);
-        _tags = new(databasePath);
+        _tags = new(databasePath, _rollingBackup);
         _tagBackup = new(databasePath);
         _graphSnapshotService = new(databasePath);
         _clipboard = new FileClipboardService();
@@ -1041,6 +1040,8 @@ public sealed partial class MainWindow : Window
         DeleteTagButton.IsEnabled = !operating;
         ExportTagsButton.IsEnabled = !operating && !_transferringTags;
         ImportTagsButton.IsEnabled = !operating && !_transferringTags;
+        BackupNowButton.IsEnabled = !operating && !_transferringTags;
+        RollingBackupsButton.IsEnabled = !operating && !_transferringTags;
 
         UpdateFileButtonsState();
     }
@@ -1285,11 +1286,143 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private async void BackupNowButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_transferringTags || _isOperating)
+        {
+            return;
+        }
+
+        SetTagTransfer(true);
+        try
+        {
+            var result = await Task.Run(() => _rollingBackup.TriggerBackup());
+            if (result.Status == BackupWriteStatus.Created)
+            {
+                TagStatusText.Text = $"已生成用户标签备份：{Path.GetFileName(result.BackupPath)}";
+            }
+            else if (result.Status == BackupWriteStatus.Updated)
+            {
+                TagStatusText.Text = $"已更新今日用户标签备份：{Path.GetFileName(result.BackupPath)}";
+            }
+            else if (result.Status == BackupWriteStatus.Unchanged)
+            {
+                TagStatusText.Text = "当前用户标签与今日备份一致，无需重复写入。";
+            }
+            else
+            {
+                TagStatusText.Text = $"备份失败：{result.ErrorMessage}";
+            }
+        }
+        catch (Exception exception)
+        {
+            TagStatusText.Text = $"备份失败：{exception.Message}";
+        }
+        finally
+        {
+            SetTagTransfer(false);
+        }
+    }
+
+    private async void RollingBackupsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_transferringTags || _isOperating)
+        {
+            return;
+        }
+
+        var backups = await Task.Run(() => _rollingBackup.ListBackups());
+        if (backups.Count == 0)
+        {
+            var emptyDialog = new ContentDialog
+            {
+                Title = "用户标签历史备份",
+                Content = $"备份目录暂无备份文件：\n{_rollingBackup.BackupDirectory}",
+                CloseButtonText = "关闭",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = (Content as FrameworkElement)?.XamlRoot
+            };
+            await emptyDialog.ShowAsync();
+            return;
+        }
+
+        var listView = new ListView
+        {
+            SelectionMode = ListViewSelectionMode.Single,
+            DisplayMemberPath = nameof(TagBackupInfo.DisplayText),
+            ItemsSource = backups,
+            MaxHeight = 260
+        };
+        listView.SelectedIndex = 0;
+
+        var dialogPanel = new StackPanel
+        {
+            Spacing = 8,
+            Children =
+            {
+                new TextBlock
+                {
+                    Text = $"备份目录：{_rollingBackup.BackupDirectory}",
+                    Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+                    TextWrapping = TextWrapping.Wrap
+                },
+                new TextBlock
+                {
+                    Text = "选择要恢复的快照（恢复将合并用户标签与关系，自动标签不受影响）：",
+                    TextWrapping = TextWrapping.Wrap
+                },
+                listView
+            }
+        };
+
+        var dialog = new ContentDialog
+        {
+            Title = "用户标签历史备份与恢复",
+            Content = dialogPanel,
+            PrimaryButtonText = "恢复所选备份",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = (Content as FrameworkElement)?.XamlRoot
+        };
+
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary || listView.SelectedItem is not TagBackupInfo selected)
+        {
+            return;
+        }
+
+        if (!selected.IsValid)
+        {
+            TagStatusText.Text = $"无法恢复损坏的备份：{selected.ValidationErrorMessage}";
+            return;
+        }
+
+        SetTagTransfer(true);
+        try
+        {
+            var result = await Task.Run(() => _rollingBackup.RestoreBackup(selected.Path));
+            await RefreshTagsAsync();
+            await RefreshFilesAsync();
+            TagStatusText.Text =
+                $"恢复完成：新建 {result.CreatedTags} 个标签，复用 {result.ReusedTags} 个，恢复 {result.RestoredRelations} 条关系；" +
+                $"名称冲突 {result.Conflicts.Count}，未匹配文件 {result.MissingFiles.Count}。";
+        }
+        catch (Exception exception)
+        {
+            TagStatusText.Text = $"恢复失败：{exception.Message}";
+        }
+        finally
+        {
+            SetTagTransfer(false);
+        }
+    }
+
     private void SetTagTransfer(bool transferring)
     {
         _transferringTags = transferring;
         ExportTagsButton.IsEnabled = !transferring && !_isOperating;
         ImportTagsButton.IsEnabled = !transferring && !_isOperating;
+        BackupNowButton.IsEnabled = !transferring && !_isOperating;
+        RollingBackupsButton.IsEnabled = !transferring && !_isOperating;
     }
 
     private async Task ChangeSelectedFileTagsAsync(bool add)

@@ -59,9 +59,15 @@
                 <ComboBoxItem Content="满足任一标签" />
                 <ComboBoxItem Content="满足全部标签" />
             </ComboBox>
-            <StackPanel Grid.Row="11" Orientation="Horizontal" Spacing="6">
-                <Button x:Name="ExportTagsButton" AutomationProperties.Name="导出用户标签备份" Click="ExportTagsButton_Click" Content="导出备份" />
-                <Button x:Name="ImportTagsButton" AutomationProperties.Name="导入用户标签备份" Click="ImportTagsButton_Click" Content="导入备份" />
+            <StackPanel Grid.Row="11" Spacing="6">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <Button x:Name="ExportTagsButton" AutomationProperties.Name="导出用户标签备份" Click="ExportTagsButton_Click" Content="导出备份" />
+                    <Button x:Name="ImportTagsButton" AutomationProperties.Name="导入用户标签备份" Click="ImportTagsButton_Click" Content="导入备份" />
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <Button x:Name="BackupNowButton" AutomationProperties.Name="立即备份用户标签" Click="BackupNowButton_Click" Content="立即备份" />
+                    <Button x:Name="RollingBackupsButton" AutomationProperties.Name="自动备份与恢复" Click="RollingBackupsButton_Click" Content="历史备份..." />
+                </StackPanel>
             </StackPanel>
             <TextBlock x:Name="TagStatusText" Grid.Row="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
         </Grid>
