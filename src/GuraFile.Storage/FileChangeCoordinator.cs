@@ -12,6 +12,7 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
     private readonly Action? _onRootChanged;
     private readonly TimeSpan _debounce;
     private readonly TimeSpan _retryInterval;
+    private readonly DiagnosticLogger _logger;
     private readonly Channel<Change> _changes = Channel.CreateUnbounded<Change>(
         new UnboundedChannelOptions { SingleReader = true });
     private readonly Channel<Recovery> _recoveries = Channel.CreateUnbounded<Recovery>(
@@ -34,17 +35,19 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
         Action<Exception>? onError = null,
         TimeSpan? debounce = null,
         TimeSpan? retryInterval = null,
-        Action? onRootChanged = null)
+        Action? onRootChanged = null,
+        DiagnosticLogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(scanner);
         _scanner = scanner;
+        _logger = logger ?? scanner.Logger ?? DiagnosticLogger.Default;
         _onChanged = onChanged;
         _reconcile = async (rootId, paths, cancellationToken) =>
         {
             var result = await scanner.ReconcilePathsAsync(rootId, paths, cancellationToken: cancellationToken);
             if (!result.Canceled)
             {
-                DiagnosticLogger.Default.LogInfo(
+                _logger.LogInfo(
                     DiagnosticCategory.Watcher,
                     "ReconciliationCompleted",
                     status: DiagnosticResultStatus.Success,
@@ -69,6 +72,7 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(reconcile);
         _reconcile = reconcile;
         _ignorePath = _ => false;
+        _logger = DiagnosticLogger.Default;
         _debounce = ValidateDebounce(debounce);
         _retryInterval = TimeSpan.FromHours(1);
         _processor = ProcessAsync();
@@ -126,7 +130,7 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
         watcher.Error += (_, eventArgs) =>
         {
             var exception = eventArgs.GetException();
-            DiagnosticLogger.Default.LogError(
+            _logger.LogError(
                 DiagnosticCategory.Watcher,
                 "WatcherError",
                 status: DiagnosticResultStatus.Failed,
@@ -144,7 +148,7 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
             watcher.EnableRaisingEvents = true;
             _watchers.Add(root.Id, watcher);
             _disabledRoots.Remove(root.Id);
-            DiagnosticLogger.Default.LogInfo(
+            _logger.LogInfo(
                 DiagnosticCategory.Watcher,
                 "WatcherStarted",
                 status: DiagnosticResultStatus.Success,
@@ -153,7 +157,7 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            DiagnosticLogger.Default.LogError(
+            _logger.LogError(
                 DiagnosticCategory.Watcher,
                 "WatcherStartFailed",
                 status: DiagnosticResultStatus.Failed,
@@ -324,6 +328,11 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
             try
             {
                 _scanner!.SetRootStatus(root.Id, ManagedRootStatus.Recovering, recovery.Error?.Message);
+                _logger.LogInfo(
+                    DiagnosticCategory.Watcher,
+                    "RootRecovering",
+                    status: DiagnosticResultStatus.Started,
+                    message: $"Managed root '{root.Path}' is recovering.");
                 NotifyRootChanged();
                 lock (_watchers)
                 {
@@ -363,6 +372,20 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
                         root.Id,
                         ManagedRootStatus.Offline,
                         "Managed root watcher could not be started.");
+                    _logger.LogWarning(
+                        DiagnosticCategory.Watcher,
+                        "RootOffline",
+                        status: DiagnosticResultStatus.Failed,
+                        message: $"Managed root '{root.Path}' watcher could not be started.",
+                        errorCode: "WATCHER_START_FAILED");
+                }
+                else if (refreshed.Status == ManagedRootStatus.Online)
+                {
+                    _logger.LogInfo(
+                        DiagnosticCategory.Watcher,
+                        "RootRecovered",
+                        status: DiagnosticResultStatus.Success,
+                        message: $"Managed root '{root.Path}' recovered and watcher active.");
                 }
 
                 NotifyChanged(result);
@@ -377,6 +400,13 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
                 try
                 {
                     _scanner!.SetRootStatus(root.Id, ManagedRootStatus.Offline, exception.Message);
+                    _logger.LogWarning(
+                        DiagnosticCategory.Watcher,
+                        "RootOffline",
+                        status: DiagnosticResultStatus.Failed,
+                        message: $"Managed root '{root.Path}' is offline: {exception.Message}",
+                        errorCode: "ROOT_OFFLINE",
+                        exception: exception);
                     NotifyRootChanged();
                 }
                 catch

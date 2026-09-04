@@ -72,12 +72,55 @@ public sealed class FileDetailsPresenterTests
 
         Assert.IsTrue(model.IsSingleFileSelected);
         Assert.AreEqual("离线", model.StatusText);
-        Assert.AreEqual("路径降级模式 (未绑定稳定 ID)", model.IdentityStateText);
+        Assert.AreEqual("⚠️ 身份跟踪有限：当前介质不支持底层稳定文件 ID。同路径原地修改可保留标签；跨目录移动或重命名时可能需要重新关联标签。", model.IdentityStateText);
         Assert.AreEqual("文件不可访问", model.Diagnostic);
         Assert.IsFalse(model.CanOpen);
         Assert.IsFalse(model.CanReveal);
         Assert.IsFalse(model.CanReidentify);
         Assert.IsTrue(model.CanCopyPath);
+    }
+
+    [TestMethod]
+    public void Create_FileInOfflineRoot_SetsRootOfflineNoticeAndDisablesActions()
+    {
+        var file = new IndexedFile(
+            Id: 3,
+            Name: "Keep.txt",
+            Path: @"E:\Drive\Keep.txt",
+            Extension: ".txt",
+            Size: 100,
+            Modified: DateTimeOffset.UtcNow,
+            IsOnline: true,
+            Diagnostic: null,
+            IdentityKind: "stable");
+
+        var model = FileDetailsPresenter.Create([file], [], [], isRootOffline: true);
+
+        Assert.IsTrue(model.IsSingleFileSelected);
+        Assert.IsTrue(model.IsRootOffline);
+        Assert.AreEqual("管理根目录当前离线，文件与标签已妥善保留，等待介质重新连接", model.RootOfflineNotice);
+        Assert.IsFalse(model.CanOpen);
+        Assert.IsFalse(model.CanReveal);
+        Assert.IsFalse(model.CanReidentify);
+    }
+
+    [TestMethod]
+    public void ManagedRoot_DisplayName_ReflectsDegradationStates()
+    {
+        var stableCap = new StorageCapability(StorageMediumKind.Fixed, "NTFS", SupportsStableFileId: true, IsReparsePoint: false, "本地固定盘 (NTFS) - 支持稳定身份跟踪");
+        var limitedCap = new StorageCapability(StorageMediumKind.Network, "SMB", SupportsStableFileId: false, IsReparsePoint: false, "网络共享 (SMB) - 身份跟踪受限（路径降级）");
+
+        var onlineStableRoot = new ManagedRoot(1, @"C:\Repo", ManagedRootStatus.Online, Capability: stableCap);
+        Assert.AreEqual(@"C:\Repo  [在线 · NTFS]", onlineStableRoot.DisplayName);
+
+        var onlineLimitedRoot = new ManagedRoot(2, @"\\server\share", ManagedRootStatus.Online, Capability: limitedCap);
+        Assert.AreEqual(@"\\server\share  [在线 · 身份跟踪有限]", onlineLimitedRoot.DisplayName);
+
+        var offlineRoot = new ManagedRoot(3, @"E:\Removable", ManagedRootStatus.Offline, Capability: limitedCap);
+        Assert.AreEqual(@"E:\Removable  [离线]", offlineRoot.DisplayName);
+
+        var recoveringRoot = new ManagedRoot(4, @"E:\Removable", ManagedRootStatus.Recovering, Capability: limitedCap);
+        Assert.AreEqual(@"E:\Removable  [正在恢复]", recoveringRoot.DisplayName);
     }
 
     [TestMethod]
