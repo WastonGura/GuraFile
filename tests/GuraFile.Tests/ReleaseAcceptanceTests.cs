@@ -1,6 +1,9 @@
-using System.Runtime.Versioning;
-using GuraFile.Storage;
+using System.Diagnostics;
 using System.Reflection;
+using System.Runtime.Versioning;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using GuraFile.Storage;
 
 namespace GuraFile.Tests;
 
@@ -332,6 +335,509 @@ public sealed class ReleaseAcceptanceTests
         temp.Dispose();
         Assert.IsFalse(RecycleBinTestHelper.ExistsInRecycleBin(renamedFileName, Path.GetDirectoryName(renamedPath)), "Recycled file must be cleaned up from Recycle Bin after test disposal.");
     }
+
+    [TestMethod]
+    public async Task GraphPreview_ThreeHundredFilesSnapshotGenerationAndFirstFrame_UnderOneSecond_AndEnforcesLimit()
+    {
+        using var temp = TempDirectory.Create();
+        var dbPath = Path.Combine(temp.Path, "perf_graph.db");
+        using (var conn = SqliteDatabase.Open(dbPath))
+        using (var tx = conn.BeginTransaction())
+        {
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = "INSERT INTO roots (id, path, normalized_path) VALUES (1, 'C:\\Root', 'C:\\Root');";
+                cmd.ExecuteNonQuery();
+            }
+
+            for (var i = 1; i <= 300; i++)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = """
+                    INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind)
+                    VALUES ($id, 1, 'vol', $fid, $path, $path, $name, '.txt', 100, '2026-09-01T00:00:00Z', 'stable');
+                    """;
+                cmd.Parameters.AddWithValue("$id", i);
+                cmd.Parameters.AddWithValue("$fid", $"f-{i}");
+                cmd.Parameters.AddWithValue("$path", $@"C:\Root\file_{i:D4}.txt");
+                cmd.Parameters.AddWithValue("$name", $"file_{i:D4}.txt");
+                cmd.ExecuteNonQuery();
+            }
+
+            for (var t = 1; t <= 10; t++)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = "INSERT INTO tags (id, name, normalized_name, source) VALUES ($id, $name, $norm, 'user');";
+                cmd.Parameters.AddWithValue("$id", t);
+                cmd.Parameters.AddWithValue("$name", $"Tag_{t}");
+                cmd.Parameters.AddWithValue("$norm", $"TAG_{t}");
+                cmd.ExecuteNonQuery();
+            }
+
+            for (var i = 1; i <= 300; i++)
+            {
+                var tagId = ((i - 1) % 10) + 1;
+                using var cmd = conn.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = "INSERT INTO file_tags (file_id, tag_id, source) VALUES ($fid, $tid, 'user');";
+                cmd.Parameters.AddWithValue("$fid", i);
+                cmd.Parameters.AddWithValue("$tid", tagId);
+                cmd.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+        }
+
+        var queryService = new FileQueryService(dbPath);
+        var files = await queryService.QueryAsync(new());
+        Assert.HasCount(300, files);
+
+        var snapshotService = new GraphSnapshotService(dbPath);
+
+        // Measure snapshot generation and serialization duration
+        var sw = Stopwatch.StartNew();
+        var snapshot = await snapshotService.CreateAsync(files);
+        var json = GraphMessageSerializer.SerializeRenderSnapshot(snapshot);
+        sw.Stop();
+
+        Assert.AreEqual(GraphSnapshotStatus.Ready, snapshot.Status);
+        Assert.AreEqual(300, snapshot.FileCount);
+        Assert.HasCount(300, snapshot.FileNodes);
+        Assert.HasCount(10, snapshot.TagNodes);
+        Assert.HasCount(300, snapshot.Edges);
+        Assert.IsNotNull(json);
+
+        // Record measurement evidence: must be well below 1000ms limit
+        Console.WriteLine($"[Graph Acceptance Benchmark] 300 files snapshot + JSON serialization: {sw.ElapsedMilliseconds} ms (target: < 1000 ms)");
+        Assert.IsLessThan(1000, sw.ElapsedMilliseconds, $"300 file snapshot generation exceeded 1000ms: {sw.ElapsedMilliseconds}ms");
+
+        // Verify firstFrameRendered protocol parsing
+        var firstFrameMsg = GraphMessageSerializer.Deserialize($$"""
+            {
+                "type": "firstFrameRendered",
+                "version": "1.0",
+                "payload": {
+                    "nodeCount": {{snapshot.FileNodes.Count + snapshot.TagNodes.Count}},
+                    "edgeCount": {{snapshot.Edges.Count}},
+                    "renderDurationMs": {{sw.ElapsedMilliseconds}}
+                }
+            }
+            """);
+        var metrics = GraphMessageSerializer.ParseFirstFrameMetrics(firstFrameMsg);
+        Assert.AreEqual(310, metrics.NodeCount);
+        Assert.AreEqual(300, metrics.EdgeCount);
+        Assert.IsLessThan(1000, metrics.RenderDurationMs);
+
+        // Limit verification: 301 files returns FileLimitExceeded without truncation
+        var extraFile = new IndexedFile(301, "file_0301.txt", @"C:\Root\file_0301.txt", ".txt", 100, DateTimeOffset.UtcNow, true, null);
+        var files301 = files.Concat([extraFile]).ToArray();
+        var exceededSnapshot = await snapshotService.CreateAsync(files301);
+
+        Assert.AreEqual(GraphSnapshotStatus.FileLimitExceeded, exceededSnapshot.Status);
+        Assert.AreEqual(301, exceededSnapshot.FileCount);
+        Assert.IsEmpty(exceededSnapshot.FileNodes);
+        Assert.IsEmpty(exceededSnapshot.TagNodes);
+        Assert.IsEmpty(exceededSnapshot.Edges);
+
+        var viewState = GraphViewState.FromSnapshot(exceededSnapshot);
+        Assert.AreEqual(GraphViewDisplayMode.LimitExceeded, viewState.Mode);
+        StringAssert.Contains(viewState.Message, "300");
+    }
+
+    [TestMethod]
+    public async Task GraphPreview_RapidFilterSwitching_EliminatesStaleWrites_AndKeepsListAndGraphSynchronized()
+    {
+        using var temp = TempDirectory.Create();
+        var dbPath = Path.Combine(temp.Path, "rapid_filter.db");
+        using (var conn = SqliteDatabase.Open(dbPath))
+        using (var tx = conn.BeginTransaction())
+        {
+            using var cmdRoot = conn.CreateCommand();
+            cmdRoot.Transaction = tx;
+            cmdRoot.CommandText = "INSERT INTO roots (id, path, normalized_path) VALUES (1, 'C:\\Root', 'C:\\Root');";
+            cmdRoot.ExecuteNonQuery();
+
+            for (var i = 1; i <= 10; i++)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = """
+                    INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind)
+                    VALUES ($id, 1, 'vol', $fid, $path, $path, $name, '.txt', 100, '2026-09-01T00:00:00Z', 'stable');
+                    """;
+                cmd.Parameters.AddWithValue("$id", i);
+                cmd.Parameters.AddWithValue("$fid", $"f-{i}");
+                var category = i <= 3 ? "Alpha" : (i <= 6 ? "Beta" : "Gamma");
+                cmd.Parameters.AddWithValue("$path", $@"C:\Root\{category}_{i}.txt");
+                cmd.Parameters.AddWithValue("$name", $"{category}_{i}.txt");
+                cmd.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+        }
+
+        var queryService = new FileQueryService(dbPath);
+        var snapshotService = new GraphSnapshotService(dbPath);
+        var coordinator = new GraphInteractionCoordinator();
+
+        // 1. User rapidly triggers 3 searches: "Alpha", "Beta", "Gamma"
+        var gen1 = coordinator.BeginQuery();
+        var gen2 = coordinator.BeginQuery();
+        var gen3 = coordinator.BeginQuery();
+
+        Assert.IsTrue(gen3 > gen2 && gen2 > gen1);
+
+        // 2. Query 1 finishes out of order (stale)
+        var alphaFiles = await queryService.QueryAsync(new(Search: "Alpha"));
+        Assert.IsFalse(coordinator.CanCommitQuery(gen1), "Query generation 1 must not be eligible to commit.");
+        Assert.IsFalse(coordinator.CommitQuery(gen1, alphaFiles), "Stale query 1 commit must be rejected.");
+
+        // 3. Query 2 finishes out of order (stale)
+        var betaFiles = await queryService.QueryAsync(new(Search: "Beta"));
+        Assert.IsFalse(coordinator.CanCommitQuery(gen2));
+        Assert.IsFalse(coordinator.CommitQuery(gen2, betaFiles));
+
+        // 4. Query 3 finishes (latest)
+        var gammaFiles = await queryService.QueryAsync(new(Search: "Gamma"));
+        Assert.IsTrue(coordinator.CanCommitQuery(gen3));
+        Assert.IsTrue(coordinator.CommitQuery(gen3, gammaFiles));
+
+        // Verify coordinator's CurrentFiles strictly contains Gamma files (4 files: 7, 8, 9, 10)
+        Assert.HasCount(4, coordinator.CurrentFiles);
+        CollectionAssert.AreEquivalent(
+            gammaFiles.Select(f => f.Id).ToArray(),
+            coordinator.CurrentFiles.Select(f => f.Id).ToArray());
+
+        // 5. Generate graph snapshot for Gamma files
+        var sGen = coordinator.BeginGraphRefresh();
+        var gammaSnapshot = await snapshotService.CreateAsync(coordinator.CurrentFiles);
+        Assert.IsTrue(coordinator.CommitSnapshot(sGen, gammaSnapshot));
+
+        // List and Graph snapshot collections are 100% aligned
+        CollectionAssert.AreEquivalent(
+            coordinator.CurrentFiles.Select(f => $"file:{f.Id}").ToArray(),
+            coordinator.CurrentSnapshot!.FileNodes.Select(n => n.Id).ToArray());
+
+        // 6. Stale selection events arriving from earlier queries are strictly rejected
+        var staleAlphaSelection = coordinator.EvaluateSelection(
+            new GraphNodeActionPayload("file:1", "file", 1, null, "Alpha_1.txt"));
+        Assert.AreEqual(GraphSelectionKind.Unknown, staleAlphaSelection.Kind);
+
+        var staleBatchFromGen1 = coordinator.EvaluateBatchSelection([1, 2, 3], expectedGeneration: gen1);
+        Assert.IsEmpty(staleBatchFromGen1);
+
+        // Valid selection for current Gamma file succeeds
+        var validGammaSelection = coordinator.EvaluateSelection(
+            new GraphNodeActionPayload($"file:{gammaFiles[0].Id}", "file", gammaFiles[0].Id, null, gammaFiles[0].Name));
+        Assert.AreEqual(GraphSelectionKind.File, validGammaSelection.Kind);
+        Assert.AreEqual(gammaFiles[0].Id, validGammaSelection.File!.Id);
+    }
+
+    [TestMethod]
+    public async Task GraphPreview_OneThousandFilesSharingSameTag_NeverProducesFileToFileEdges()
+    {
+        using var temp = TempDirectory.Create();
+        var dbPath = Path.Combine(temp.Path, "bipartite_1000.db");
+        using (var conn = SqliteDatabase.Open(dbPath))
+        using (var tx = conn.BeginTransaction())
+        {
+            using var cmdRoot = conn.CreateCommand();
+            cmdRoot.Transaction = tx;
+            cmdRoot.CommandText = "INSERT INTO roots (id, path, normalized_path) VALUES (1, 'C:\\Root', 'C:\\Root');";
+            cmdRoot.ExecuteNonQuery();
+
+            // Insert single shared tag
+            using var cmdTag = conn.CreateCommand();
+            cmdTag.Transaction = tx;
+            cmdTag.CommandText = "INSERT INTO tags (id, name, normalized_name, source) VALUES (42, 'UniversalShared', 'UNIVERSALSHARED', 'user');";
+            cmdTag.ExecuteNonQuery();
+
+            // Insert 1000 files all linked to tag 42
+            for (var i = 1; i <= 1000; i++)
+            {
+                using var cmdFile = conn.CreateCommand();
+                cmdFile.Transaction = tx;
+                cmdFile.CommandText = """
+                    INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind)
+                    VALUES ($id, 1, 'vol', $fid, $path, $path, $name, '.txt', 100, '2026-09-01T00:00:00Z', 'stable');
+                    """;
+                cmdFile.Parameters.AddWithValue("$id", i);
+                cmdFile.Parameters.AddWithValue("$fid", $"file-{i}");
+                cmdFile.Parameters.AddWithValue("$path", $@"C:\Root\f_{i:D4}.txt");
+                cmdFile.Parameters.AddWithValue("$name", $"f_{i:D4}.txt");
+                cmdFile.ExecuteNonQuery();
+
+                using var cmdRel = conn.CreateCommand();
+                cmdRel.Transaction = tx;
+                cmdRel.CommandText = "INSERT INTO file_tags (file_id, tag_id, source) VALUES ($fid, 42, 'user');";
+                cmdRel.Parameters.AddWithValue("$fid", i);
+                cmdRel.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+        }
+
+        var tagService = new TagService(dbPath);
+        var allFileIds = Enumerable.Range(1, 1000).Select(i => (long)i).ToArray();
+        var relations = tagService.ListTagRelationsForFiles(allFileIds, CancellationToken.None);
+
+        // Exactly 1000 relations (one per file-tag link), NOT pairwise file-file (which would be 499,500)
+        Assert.HasCount(1000, relations);
+        Assert.IsTrue(relations.All(r => r.TagId == 42));
+
+        var snapshotService = new GraphSnapshotService(dbPath);
+        var queryService = new FileQueryService(dbPath);
+        var allFiles = await queryService.QueryAsync(new());
+        Assert.HasCount(1000, allFiles);
+
+        // 1000 files exceeds 300 limit: protects graph by returning FileLimitExceeded with 0 edges
+        var exceededSnapshot = await snapshotService.CreateAsync(allFiles);
+        Assert.AreEqual(GraphSnapshotStatus.FileLimitExceeded, exceededSnapshot.Status);
+        Assert.IsEmpty(exceededSnapshot.Edges);
+
+        // Subset of 300 files: snapshot creates strictly file->tag edges and ZERO file->file edges
+        var subsetFiles = allFiles.Take(300).ToArray();
+        var subsetSnapshot = await snapshotService.CreateAsync(subsetFiles);
+        Assert.AreEqual(GraphSnapshotStatus.Ready, subsetSnapshot.Status);
+        Assert.HasCount(300, subsetSnapshot.Edges);
+        Assert.IsTrue(subsetSnapshot.Edges.All(e => e.SourceId.StartsWith("file:", StringComparison.Ordinal) && e.TargetId == "tag:42"));
+        Assert.IsFalse(subsetSnapshot.Edges.Any(e => e.SourceId.StartsWith("file:") && e.TargetId.StartsWith("file:")));
+        Assert.IsFalse(subsetSnapshot.Edges.Any(e => e.SourceId.StartsWith("tag:") && e.TargetId.StartsWith("tag:")));
+    }
+
+    [TestMethod]
+    public async Task GraphPreview_HostileStrings_PreservedSafelyAsPlainTextWithoutExecution()
+    {
+        using var temp = TempDirectory.Create();
+        var dbPath = Path.Combine(temp.Path, "hostile_graph.db");
+
+        const string hostileFileName = "</script><script>alert('xss-file')</script>\r\n\"escaped'\\<b>bold</b>";
+        const string hostileTagName = "\"><img src=x onerror=alert(1)>' OR '1'='1\n<svg onload=alert(2)>";
+
+        using (var conn = SqliteDatabase.Open(dbPath))
+        using (var tx = conn.BeginTransaction())
+        {
+            using var cmdRoot = conn.CreateCommand();
+            cmdRoot.Transaction = tx;
+            cmdRoot.CommandText = "INSERT INTO roots (id, path, normalized_path) VALUES (1, 'C:\\Root', 'C:\\Root');";
+            cmdRoot.ExecuteNonQuery();
+
+            using var cmdFile = conn.CreateCommand();
+            cmdFile.Transaction = tx;
+            cmdFile.CommandText = """
+                INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind)
+                VALUES (1, 1, 'vol', 'f-1', 'C:\\Root\\hostile.txt', 'C:\\Root\\hostile.txt', $name, '.txt', 100, '2026-09-01T00:00:00Z', 'stable');
+                """;
+            cmdFile.Parameters.AddWithValue("$name", hostileFileName);
+            cmdFile.ExecuteNonQuery();
+
+            using var cmdTag = conn.CreateCommand();
+            cmdTag.Transaction = tx;
+            cmdTag.CommandText = "INSERT INTO tags (id, name, normalized_name, source) VALUES (1, $name, 'HOSTILE', 'user');";
+            cmdTag.Parameters.AddWithValue("$name", hostileTagName);
+            cmdTag.ExecuteNonQuery();
+
+            using var cmdRel = conn.CreateCommand();
+            cmdRel.Transaction = tx;
+            cmdRel.CommandText = "INSERT INTO file_tags (file_id, tag_id, source) VALUES (1, 1, 'user');";
+            cmdRel.ExecuteNonQuery();
+
+            tx.Commit();
+        }
+
+        var queryService = new FileQueryService(dbPath);
+        var files = await queryService.QueryAsync(new());
+        Assert.HasCount(1, files);
+
+        var snapshotService = new GraphSnapshotService(dbPath);
+        var snapshot = await snapshotService.CreateAsync(files);
+
+        Assert.AreEqual(GraphSnapshotStatus.Ready, snapshot.Status);
+        Assert.AreEqual(hostileFileName, snapshot.FileNodes.Single().Label);
+        Assert.AreEqual(hostileTagName, snapshot.TagNodes.Single().Label);
+
+        // Serialize snapshot to JSON
+        var json = GraphMessageSerializer.SerializeRenderSnapshot(snapshot);
+        using (var doc = JsonDocument.Parse(json))
+        {
+            var root = doc.RootElement;
+            var fileLabel = root.GetProperty("payload").GetProperty("files")[0].GetProperty("label").GetString();
+            var tagLabel = root.GetProperty("payload").GetProperty("tags")[0].GetProperty("label").GetString();
+
+            Assert.AreEqual(hostileFileName, fileLabel);
+            Assert.AreEqual(hostileTagName, tagLabel);
+        }
+
+        // Inbound message handling with hostile payload
+        var inboundJson = $$"""
+            {
+                "type": "nodeSelected",
+                "version": "1.0",
+                "payload": {
+                    "nodeId": "file:1",
+                    "kind": "file",
+                    "fileId": 1,
+                    "tagId": null,
+                    "label": {{JsonSerializer.Serialize(hostileFileName)}}
+                }
+            }
+            """;
+        var inboundMsg = GraphMessageSerializer.Deserialize(inboundJson);
+        var nodeAction = GraphMessageSerializer.ParseNodeAction(inboundMsg);
+        Assert.AreEqual(hostileFileName, nodeAction.Label);
+
+        var coordinator = new GraphInteractionCoordinator();
+        var qGen = coordinator.BeginQuery();
+        coordinator.CommitQuery(qGen, files);
+        var selected = coordinator.EvaluateSelection(nodeAction);
+        Assert.AreEqual(GraphSelectionKind.File, selected.Kind);
+        Assert.AreEqual(hostileFileName, selected.File!.Name);
+    }
+
+    [TestMethod]
+    public void GraphPreview_OfflineEnvironment_LocalResourcesStrictCspAndInterceptionRulesVerified()
+    {
+        var root = RepositoryRoot();
+        var graphDir = Path.Combine(root, "src", "GuraFile", "Assets", "graph");
+        Assert.IsTrue(Directory.Exists(graphDir), $"Graph directory missing: {graphDir}");
+
+        var cytoscapeJs = Path.Combine(graphDir, "cytoscape.min.js");
+        var indexHtml = Path.Combine(graphDir, "index.html");
+        var graphCss = Path.Combine(graphDir, "graph.css");
+        var graphJs = Path.Combine(graphDir, "graph.js");
+
+        foreach (var file in new[] { cytoscapeJs, indexHtml, graphCss, graphJs })
+        {
+            Assert.IsTrue(File.Exists(file), $"Required asset missing: {file}");
+            Assert.IsGreaterThan(0, new FileInfo(file).Length, $"Asset is empty: {file}");
+        }
+
+        // Verify index.html contains strict CSP
+        var htmlContent = File.ReadAllText(indexHtml);
+        const string expectedCsp = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none';";
+        StringAssert.Contains(htmlContent, expectedCsp);
+
+        // Verify none of the assets contain remote network references (http/https)
+        foreach (var file in new[] { indexHtml, graphCss, graphJs })
+        {
+            var content = File.ReadAllText(file);
+            var match = Regex.Match(content, @"(?:src|href|url)\s*[:=]\s*[""']?https?://", RegexOptions.IgnoreCase);
+            Assert.IsFalse(match.Success, $"File {Path.GetFileName(file)} contains remote URL reference: {match.Value}");
+        }
+
+        // Verify GraphSecurityPolicy rules
+        string hostName = GraphSecurityPolicy.VirtualHostName;
+        string entryUrl = GraphSecurityPolicy.EntryUrl;
+        Assert.AreEqual("graph.gurafile.local", hostName);
+        Assert.AreEqual("https://graph.gurafile.local/index.html", entryUrl);
+
+        // Allowed local virtual host endpoints
+        Assert.IsTrue(GraphSecurityPolicy.IsAllowedUri("https://graph.gurafile.local/index.html"));
+        Assert.IsTrue(GraphSecurityPolicy.IsAllowedUri("https://graph.gurafile.local/Assets/graph/graph.js"));
+
+        // Strictly blocked remote, schemes, subdomains, file paths
+        Assert.IsFalse(GraphSecurityPolicy.IsAllowedUri("https://www.google.com"));
+        Assert.IsFalse(GraphSecurityPolicy.IsAllowedUri("http://malicious.org/script.js"));
+        Assert.IsFalse(GraphSecurityPolicy.IsAllowedUri("https://graph.gurafile.local.evil.com"));
+        Assert.IsFalse(GraphSecurityPolicy.IsAllowedUri("https://sub.graph.gurafile.local"));
+        Assert.IsFalse(GraphSecurityPolicy.IsAllowedUri("file:///C:/Windows/System32/cmd.exe"));
+        Assert.IsFalse(GraphSecurityPolicy.IsAllowedUri("javascript:alert(1)"));
+        Assert.IsFalse(GraphSecurityPolicy.IsAllowedUri("data:text/html,<b>xss</b>"));
+        Assert.IsFalse(GraphSecurityPolicy.IsAllowedUri("about:blank"));
+        Assert.IsFalse(GraphSecurityPolicy.IsAllowedUri((string?)null));
+        Assert.IsFalse(GraphSecurityPolicy.IsAllowedUri(""));
+    }
+
+    [TestMethod]
+    public async Task GraphPreview_BatchTagging_SingleTransactionRollbackOnFailure_AndSynchronizesBothViewsOnSuccess()
+    {
+        using var temp = TempDirectory.Create();
+        var dbPath = Path.Combine(temp.Path, "batch_tag_e2e.db");
+        using (var conn = SqliteDatabase.Open(dbPath))
+        using (var tx = conn.BeginTransaction())
+        {
+            using var cmdRoot = conn.CreateCommand();
+            cmdRoot.Transaction = tx;
+            cmdRoot.CommandText = "INSERT INTO roots (id, path, normalized_path) VALUES (1, 'C:\\Root', 'C:\\Root');";
+            cmdRoot.ExecuteNonQuery();
+
+            for (var i = 1; i <= 3; i++)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = """
+                    INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind)
+                    VALUES ($id, 1, 'vol', $fid, $path, $path, $name, '.txt', 100, '2026-09-01T00:00:00Z', 'stable');
+                    """;
+                cmd.Parameters.AddWithValue("$id", i);
+                cmd.Parameters.AddWithValue("$fid", $"f-{i}");
+                cmd.Parameters.AddWithValue("$path", $@"C:\Root\file_{i}.txt");
+                cmd.Parameters.AddWithValue("$name", $"file_{i}.txt");
+                cmd.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+        }
+
+        var tagService = new TagService(dbPath);
+        var queryService = new FileQueryService(dbPath);
+        var snapshotService = new GraphSnapshotService(dbPath);
+        var coordinator = new GraphInteractionCoordinator();
+
+        var initialFiles = await queryService.QueryAsync(new());
+        var qGen = coordinator.BeginQuery();
+        coordinator.CommitQuery(qGen, initialFiles);
+
+        // 1. Success path: user creates user tag and tags files 1 & 2
+        var userTag = tagService.CreateTag("Release_Verified");
+        tagService.AddTagToFiles(userTag.Id, [1L, 2L]);
+
+        // Verify common user tags for selection
+        var commonTags = tagService.ListCommonUserTagsForFiles([1L, 2L]);
+        Assert.HasCount(1, commonTags);
+        Assert.AreEqual("Release_Verified", commonTags[0].Name);
+
+        // Update graph snapshot and sync views
+        var sGen = coordinator.BeginGraphRefresh();
+        var snapshot = await snapshotService.CreateAsync(coordinator.CurrentFiles);
+        coordinator.CommitSnapshot(sGen, snapshot);
+
+        Assert.AreEqual(GraphSnapshotStatus.Ready, coordinator.CurrentSnapshot!.Status);
+        Assert.HasCount(1, coordinator.CurrentSnapshot.TagNodes);
+        Assert.AreEqual("tag:" + userTag.Id, coordinator.CurrentSnapshot.TagNodes[0].Id);
+        Assert.HasCount(2, coordinator.CurrentSnapshot.Edges);
+
+        // 2. Failure path: single transaction all-or-nothing rollback
+        var failTag = tagService.CreateTag("Will_Fail");
+        // Attempting to batch add with invalid file ID 999
+        Assert.Throws<ArgumentException>(() => tagService.AddTagToFiles(failTag.Id, [1L, 999L]));
+
+        // Verify file 1 did NOT get failTag (complete rollback)
+        var file1Tags = tagService.ListTagsForFile(1L);
+        Assert.IsFalse(file1Tags.Any(t => t.Name == "Will_Fail"), "Transaction rollback failed: file 1 was partially tagged.");
+
+        // Attempting to batch tag with automatic tag (strictly rejected)
+        using (var conn = SqliteDatabase.Open(dbPath))
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "INSERT INTO tags (id, name, normalized_name, source) VALUES (99, '类型/文档', 'TYPE_DOC', 'automatic');";
+            cmd.ExecuteNonQuery();
+        }
+
+        var autoTagEx = Assert.Throws<ArgumentException>(() => tagService.AddTagToFiles(99, [1L, 2L]));
+        StringAssert.Contains(autoTagEx.Message, "用户标签");
+
+        // Verify state is clean and undisturbed
+        var file1TagsAfter = tagService.ListTagsForFile(1L);
+        Assert.HasCount(1, file1TagsAfter);
+        Assert.AreEqual("Release_Verified", file1TagsAfter[0].Name);
+    }
+
+    private static string RepositoryRoot() => Path.GetFullPath(
+        Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
 
     private static async Task<IndexedFile> WaitForFileWithinTwoSecondsAsync(
         FileQueryService query,

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '0.3.2'
+    [string]$Version = '0.4.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,8 +50,26 @@ foreach ($resource in $requiredResources) {
     }
 }
 
+$requiredGraphAssets = @(
+    'Assets\graph\cytoscape.min.js',
+    'Assets\graph\index.html',
+    'Assets\graph\graph.css',
+    'Assets\graph\graph.js'
+)
+foreach ($graphAsset in $requiredGraphAssets) {
+    if (-not (Test-Path -LiteralPath (Join-Path $buildDirectory $graphAsset) -PathType Leaf)) {
+        throw "Required Graph asset is missing from the build: $graphAsset"
+    }
+}
+
 New-Item -ItemType Directory -Path $packageDirectory | Out-Null
 Copy-Item -Path (Join-Path $buildDirectory '*') -Destination $packageDirectory -Recurse
+
+foreach ($graphAsset in $requiredGraphAssets) {
+    if (-not (Test-Path -LiteralPath (Join-Path $packageDirectory $graphAsset) -PathType Leaf)) {
+        throw "Required Graph asset is missing from the package: $graphAsset"
+    }
+}
 
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'README.md') -Destination $packageDirectory
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'CHANGELOG.md') -Destination $packageDirectory

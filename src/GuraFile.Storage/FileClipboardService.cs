@@ -311,7 +311,7 @@ public sealed class FileClipboardService : IFileClipboardService
         return hGlobal;
     }
 
-    private static bool TryOpenClipboard(int retries = 5, int delayMs = 20)
+    private static bool TryOpenClipboard(int retries = 10, int delayMs = 25)
     {
         for (int i = 0; i < retries; i++)
         {
