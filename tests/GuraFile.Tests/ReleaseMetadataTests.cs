@@ -13,9 +13,9 @@ public sealed class ReleaseMetadataTests
         var root = RepositoryRoot();
         var project = XDocument.Load(Path.Combine(root, "src", "GuraFile", "GuraFile.csproj"));
 
-        Assert.AreEqual("0.3.2", project.Descendants("Version").Single().Value);
-        Assert.AreEqual("0.3.2.0", project.Descendants("AssemblyVersion").Single().Value);
-        Assert.AreEqual("0.3.2.0", project.Descendants("FileVersion").Single().Value);
+        Assert.AreEqual("0.4.0", project.Descendants("Version").Single().Value);
+        Assert.AreEqual("0.4.0.0", project.Descendants("AssemblyVersion").Single().Value);
+        Assert.AreEqual("0.4.0.0", project.Descendants("FileVersion").Single().Value);
         Assert.IsTrue(File.Exists(Path.Combine(root, "CHANGELOG.md")));
         Assert.IsTrue(File.Exists(Path.Combine(root, "THIRD_PARTY_NOTICES.md")));
         Assert.IsTrue(File.Exists(Path.Combine(root, "scripts", "PackageRelease.ps1")));
@@ -24,16 +24,34 @@ public sealed class ReleaseMetadataTests
         StringAssert.Contains(readme, "正常负载目标为 2 秒内更新");
         StringAssert.Contains(readme, "本版不使用 NTFS USN Journal");
         StringAssert.Contains(readme, "删除操作仅支持删除到 Windows 回收站");
-        StringAssert.Contains(readme, "尚未提供图谱");
-        StringAssert.Contains(readme, "GuraFile-v0.3.2-win-x64.zip");
-        StringAssert.Contains(readme, @".\scripts\PackageRelease.ps1 -Version 0.3.2");
+        StringAssert.Contains(readme, "图谱");
+        StringAssert.Contains(readme, "300");
+        StringAssert.Contains(readme, "GuraFile-v0.4.0-win-x64.zip");
+        StringAssert.Contains(readme, @".\scripts\PackageRelease.ps1 -Version 0.4.0");
 
-        StringAssert.Contains(File.ReadAllText(Path.Combine(root, "CHANGELOG.md")), "## 0.3.2");
-        StringAssert.Contains(File.ReadAllText(Path.Combine(root, "THIRD_PARTY_NOTICES.md")), "GuraFile v0.3.2");
-        StringAssert.Contains(File.ReadAllText(Path.Combine(root, "scripts", "PackageRelease.ps1")),
-            "[string]$Version = '0.3.2'");
+        var changelog = File.ReadAllText(Path.Combine(root, "CHANGELOG.md"));
+        StringAssert.Contains(changelog, "## 0.4.0");
+        StringAssert.Contains(changelog, "#57");
+        StringAssert.Contains(changelog, "#58");
+        StringAssert.Contains(changelog, "#59");
+        StringAssert.Contains(changelog, "#60");
+        StringAssert.Contains(changelog, "#61");
+
+        var notices = File.ReadAllText(Path.Combine(root, "THIRD_PARTY_NOTICES.md"));
+        StringAssert.Contains(notices, "GuraFile v0.4.0");
+        StringAssert.Contains(notices, "Cytoscape.js");
+        StringAssert.Contains(notices, "3.30.2");
+        StringAssert.Contains(notices, "MIT");
+
+        var packageScript = File.ReadAllText(Path.Combine(root, "scripts", "PackageRelease.ps1"));
+        StringAssert.Contains(packageScript, "[string]$Version = '0.4.0'");
+        StringAssert.Contains(packageScript, "cytoscape.min.js");
+        StringAssert.Contains(packageScript, "index.html");
+        StringAssert.Contains(packageScript, "graph.css");
+        StringAssert.Contains(packageScript, "graph.js");
+
         StringAssert.Contains(File.ReadAllText(Path.Combine(root, "docs", "RELEASE_CHECKLIST.md")),
-            "# v0.3.2 发布验收");
+            "# v0.4.0 发布验收");
     }
 
     [TestMethod]
