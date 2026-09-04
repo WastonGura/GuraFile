@@ -1,36 +1,40 @@
-# v0.4.0 发布验收
+# v0.4.1 发布验收
 
 验收日期：2026-09-04
-目标平台：Windows 10 1809 及以上，x64
 
-## 功能与数据安全
+支持平台：Windows 10 1809 及以上，x64
 
-- [x] 临时目录完成“扫描 → 贴标签 → 复制 → 移动 → 重命名 → 删除到回收站 → 重启恢复”全链路测试。
-- [x] 回收站测试产物实现真实精准清理：通过 Shell COM STA 枚举匹配项目调用 undelete 还原并彻底物理删除，杜绝 GUID 测试残留。
-- [x] 补齐真实 Shell / 回收站失败路径端到端测试：排他锁定文件实测执行器安全失败，磁盘源文件与内容完好无损，数据库节点保持在线且用户标签完整保留。
-- [x] 受限二部图快照生成：300 文件节点上限保护，超限返回 FileLimitExceeded 且不截断；纯文件—标签边，1000 个同标签文件绝不产生两两文件边。
-- [x] 本地离线 Cytoscape.js 3.30.2 安全图谱宿主：本地虚拟域名 `graph.gurafile.local`，实施外部导航、新窗口弹窗与文件下载三重拦截。
-- [x] 严格 Content Security Policy（CSP），引号、换行、HTML/脚本文本在图谱快照与消息中安全作为纯文本保留，杜绝脚本注入。
-- [x] 列表与图谱双向联动：两视图共享相同筛选快照，快速连续切换筛选无旧节点回写；单击高亮刷新详情，双击安全 Shell 打开。
-- [x] 图谱框选与批量用户标签：支持鼠标框选多个文件节点，单事务批量打标/去标，失败完全回滚，自动标签绝对只读保护。
-- [x] 文件操作经由 Windows 原生 STA IFileOperation 执行，支持自动重命名、覆盖和跳过三种冲突策略。
-- [x] 文件剪贴板支持标准 CF_HDROP 与 Preferred DropEffect，支持与 Windows 资源管理器双向复制/剪切/粘贴。
-- [x] 支持从资源管理器拖入文件复制到管理根目录，以及在应用内拖放移动；文件夹拖入安全拒绝，同位置判定为无操作。
-- [x] 删除操作严格采用 IFileOperation.DeleteItem 且附带 FOFX_RECYCLEONDELETE 与 FOF_ALLOWUNDO 语义，严禁永久删除。
-- [x] 接入常用文件快捷键（Ctrl+C/X/V/A, F2, F5, Delete），文本框聚焦编辑时不拦截文本快捷键，严格忽略 Shift+Delete。
-- [x] 原生兼容 v0.2.0、v0.3.x schema v5 数据库，升级无缝。
+本次性能目标设备：Windows 10.0.26200.0、AMD Ryzen 7 7735H、WebView2 152.0.4191.62、.NET 10.0.11、1280×800 可见窗口。结果只代表此目标 x64 设备；其他受支持设备需单独运行真实 WebView2 harness。
 
-## 性能与稳定性
+## 前置与问题更正
 
-- [x] 300 文件节点及边快照生成与首帧耗时基线验证，实测远低于 1 秒上限并记录证据。
-- [x] 批量操作与索引提交共享后台写入门，不与 FileSystemWatcher 事件发生死锁或竞争。
-- [x] Release x64 自包含构建成功，0 警告、0 错误；自动化测试全部通过。
-- [x] 真实窗口启动与响应正常，无残留进程。
+- [x] #67 已独立审查并合并为 `baad354`，PR #69 与合并后 `main` 的 `verify` CI 均成功。
+- [x] 更正 v0.4.0 验收结论：真实 WebView2/Cytoscape.js `layoutstop` 三次 JS 首帧为 1401.10 / 1404.30 / 1424.60 ms，未达到三次均小于 1000 ms 的门禁。
+- [x] v0.4.1 复用现有 `cose` 布局，仅由 #67 将 `numIter` 调整为 400，并加入不访问用户 `index.db` 的隔离真实 WebView2 harness；#68 未修改运行时代码。
+- [x] 未修改或删除既有 v0.4.0 tag、Release 或资产。
 
-## 构建与启动
+## 真实图谱首帧
 
-- [x] 文件版本 `0.4.0.0`、产品版本 `0.4.0` 与目标标签 `v0.4.0` 对齐。
-- [x] 发布包包含 `App.xbf`、`MainWindow.xbf`、`GuraFile.pri` 以及 `Assets/graph` 完整离线图谱资源与 `THIRD_PARTY_NOTICES.md`。
-- [x] PR CI 与合并后的 `main` CI 通过。
-- [x] 从远程 `main` 的全新克隆再次完成构建、测试、打包和 ZIP 解压启动检查。
-- [x] GitHub `v0.4.0` Pre-release 已创建，ZIP 与 SHA-256 附件可回下载并验证。
+- [x] 源码与 Release 输出中的 `index.html`、`cytoscape.min.js`、`graph.css`、`graph.js` 四项 SHA-256 一致。
+- [x] 第 1 次：JS 668.1 ms，Host 729.88 ms，310 节点 / 300 边。
+- [x] 第 2 次：JS 670.0 ms，Host 725.11 ms，310 节点 / 300 边。
+- [x] 第 3 次：JS 669.4 ms，Host 721.67 ms，310 节点 / 300 边。
+- [x] 三次均在可见窗口收到真实 `layoutstop` 后的 `firstFrameRendered`，零远程请求，且 JS / Host 均小于 1000 ms。
+- [x] 每次使用独立 WebView2 profile，运行后自动清理 profile 且无 harness 残留进程。
+
+## 本地构建、测试与候选包
+
+- [x] 产品版本 `0.4.1`、程序集版本和文件版本 `0.4.1.0`、打包默认值及文档当前版本一致。
+- [x] Release x64 自包含构建成功，0 警告、0 错误。
+- [x] Release 自动化测试 292/292 通过。
+- [x] Release 构建输出可见窗口启动、响应与进程清理通过。
+- [x] `PackageRelease.ps1 -Version 0.4.1` 成功生成本地候选 ZIP 与 checksum。
+- [x] 本地候选 ZIP SHA-256 为 `c1a6eda3e87dc0bdd0fad590c97d4457a4745f59a6c88c581f5f00632a36e730`，与 `.sha256` 内容一致。
+- [x] ZIP 共 539 个条目，包含 `App.xbf`、`MainWindow.xbf`、`GuraFile.pri`、四项离线图谱资产、`THIRD_PARTY_NOTICES.md` 及 7 个许可文件；图谱资产 SHA-256 与源码一致。
+- [x] 包内 `GuraFile.exe` 文件版本为 `0.4.1.0`，产品版本为 `0.4.1+baad354aeef6f360e74dd3da0cfc37371aad1c6a`。
+- [x] 从 ZIP 解压后的包内 `GuraFile.exe` 可见窗口启动且响应正常，退出后无残留进程。
+- [x] `git diff --check` 通过。
+
+## 主 Agent 后续发布步骤
+
+本实现提交不创建 PR、不发布 Release。独立审查、Issue #68 PR 与 CI、合并后从干净 remote-main 重建、最终资产上传与回下载复验、v0.4.0 升级提示及 Milestone 关闭由主 Agent 后续完成；最终发布 ZIP 的 SHA-256 应以合并后干净构建结果为准。
