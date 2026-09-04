@@ -86,6 +86,59 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
         RequestRecovery(root);
     }
 
+    public bool StartCrashRecovery(ManagedRoot root)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (_scanner is null)
+        {
+            return false;
+        }
+
+        var sessions = _scanner.GetInterruptedSessions(root.Id);
+        var token = sessions.FirstOrDefault()?.ScanToken ?? Guid.NewGuid().ToString("N");
+        var startedUtc = sessions.FirstOrDefault()?.StartedUtc ?? DateTimeOffset.UtcNow.ToString("O");
+
+        _scanner.SetRootStatus(root.Id, ManagedRootStatus.Recovering, "Crash recovery in progress");
+        _logger.LogWarning(
+            DiagnosticCategory.Scanner,
+            "CrashRecoveryDetected",
+            correlationId: $"crash-recovery-{root.Id}-{token}",
+            status: DiagnosticResultStatus.Started,
+            message: $"Crash recovery detected for root '{root.Path}' (Id={root.Id}, Token={token})",
+            properties: new Dictionary<string, object?>
+            {
+                ["rootId"] = root.Id,
+                ["scanToken"] = token,
+                ["startedUtc"] = startedUtc
+            });
+
+        _scanner.ResolveInterruptedSessions(root.Id);
+
+        lock (_watchers)
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+            _knownRoots[root.Id] = root;
+            return QueueRecovery(root.Id, null, isCrashRecovery: true, scanToken: token);
+        }
+    }
+
+    public bool CheckAndStartCrashRecovery(ManagedRoot root)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (_scanner is null)
+        {
+            return false;
+        }
+
+        var interrupted = _scanner.GetInterruptedSessions(root.Id);
+        if (interrupted.Count > 0 || root.Status == ManagedRootStatus.Recovering)
+        {
+            return StartCrashRecovery(root);
+        }
+
+        return false;
+    }
+
     public bool Watch(ManagedRoot root)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -235,7 +288,7 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
         }
     }
 
-    private bool QueueRecovery(long rootId, Exception? error)
+    private bool QueueRecovery(long rootId, Exception? error, bool isCrashRecovery = false, string? scanToken = null)
     {
         if (!_pendingRecoveries.Add(rootId))
         {
@@ -247,7 +300,7 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
             return false;
         }
 
-        if (_recoveries.Writer.TryWrite(new(rootId, error)))
+        if (_recoveries.Writer.TryWrite(new(rootId, error, isCrashRecovery, scanToken)))
         {
             return true;
         }
@@ -343,7 +396,8 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
                     }
                 }
 
-                var result = await _scanner.ScanAsync(root.Id, cancellationToken: cancellationToken);
+                var scanType = recovery.IsCrashRecovery ? "recovery" : "full";
+                var result = await _scanner.ScanAsync(root.Id, scanType: scanType, cancellationToken: cancellationToken);
                 if (result.Canceled)
                 {
                     continue;
@@ -381,6 +435,21 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
                 }
                 else if (refreshed.Status == ManagedRootStatus.Online)
                 {
+                    if (recovery.IsCrashRecovery)
+                    {
+                        _logger.LogInfo(
+                            DiagnosticCategory.Scanner,
+                            "CrashRecoveryCompleted",
+                            correlationId: recovery.ScanToken is not null ? $"crash-recovery-{root.Id}-{recovery.ScanToken}" : null,
+                            status: DiagnosticResultStatus.Success,
+                            message: $"Crash recovery completed for root '{root.Path}' (Id={root.Id})",
+                            properties: new Dictionary<string, object?>
+                            {
+                                ["rootId"] = root.Id,
+                                ["scanToken"] = recovery.ScanToken
+                            });
+                    }
+
                     _logger.LogInfo(
                         DiagnosticCategory.Watcher,
                         "RootRecovered",
@@ -579,5 +648,5 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
     }
 
     private sealed record Change(long RootId, string Path);
-    private sealed record Recovery(long RootId, Exception? Error);
+    private sealed record Recovery(long RootId, Exception? Error, bool IsCrashRecovery = false, string? ScanToken = null);
 }

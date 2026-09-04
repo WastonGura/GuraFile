@@ -113,7 +113,10 @@ public sealed partial class MainWindow : Window
                 RefreshRoots();
                 foreach (var root in _scanner.ListRoots())
                 {
-                    _fileChanges.Start(root);
+                    if (!_fileChanges.CheckAndStartCrashRecovery(root))
+                    {
+                        _fileChanges.Watch(root);
+                    }
                 }
                 _ = RefreshTagsAsync();
                 _ = RefreshAutomaticTagsAsync();
