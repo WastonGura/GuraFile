@@ -305,6 +305,43 @@ public sealed class RollingTagBackupServiceTests
         Assert.AreEqual(1L, targetDb.Scalar("SELECT COUNT(*) FROM file_tags WHERE file_id = 100 AND tag_id = $id AND source = 'user';", ("$id", existingTag.Id)));
     }
 
+    [TestMethod]
+    public void RollingTagBackupServiceInitializesWhenDatabaseParentDirectoryDoesNotExist()
+    {
+        var nonExistentDir = Path.Combine(Path.GetTempPath(), $"GuraFile.NonExistent.{Guid.NewGuid():N}", "sub");
+        var dbPath = Path.Combine(nonExistentDir, "index.db");
+        var backupDir = Path.Combine(nonExistentDir, "backups", "tags");
+
+        try
+        {
+            Assert.IsFalse(Directory.Exists(nonExistentDir));
+
+            // Initializing RollingTagBackupService triggers UserTagBackupService -> SqliteDatabase.Open
+            var service = new RollingTagBackupService(dbPath, backupDir);
+            Assert.IsTrue(Directory.Exists(nonExistentDir));
+            Assert.IsTrue(File.Exists(dbPath));
+
+            var result = service.TriggerBackup();
+            Assert.IsTrue(result.Success);
+            Assert.IsTrue(Directory.Exists(backupDir));
+            Assert.IsTrue(File.Exists(result.BackupPath!));
+        }
+        finally
+        {
+            var rootDir = Directory.GetParent(nonExistentDir)?.FullName;
+            if (rootDir is not null && Directory.Exists(rootDir))
+            {
+                try
+                {
+                    Directory.Delete(rootDir, recursive: true);
+                }
+                catch
+                {
+                }
+            }
+        }
+    }
+
     private sealed class TempDirectory : IDisposable
     {
         public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"GuraFile.BackupTests.{Guid.NewGuid():N}");

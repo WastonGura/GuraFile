@@ -127,17 +127,6 @@ public sealed class RollingTagBackupService
     {
         lock (_syncLock)
         {
-            string currentJson;
-            try
-            {
-                currentJson = _backupService.Export();
-            }
-            catch (Exception exception)
-            {
-                LastError = exception.Message;
-                return BackupResult.Failed($"导出用户标签失败：{exception.Message}");
-            }
-
             try
             {
                 if (!Directory.Exists(BackupDirectory))
@@ -149,6 +138,17 @@ public sealed class RollingTagBackupService
             {
                 LastError = exception.Message;
                 return BackupResult.Failed($"创建备份目录失败：{exception.Message}");
+            }
+
+            string currentJson;
+            try
+            {
+                currentJson = _backupService.Export();
+            }
+            catch (Exception exception)
+            {
+                LastError = exception.Message;
+                return BackupResult.Failed($"导出用户标签失败：{exception.Message}");
             }
 
             CleanStaleTempFiles();

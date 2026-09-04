@@ -199,6 +199,36 @@ public sealed class SqliteDatabaseTests
         return connection;
     }
 
+    [TestMethod]
+    public void OpenCreatesParentDirectoryWhenItDoesNotExist()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"GuraFile.NonExistent.{Guid.NewGuid():N}", "nested");
+        var dbPath = Path.Combine(tempDir, "index.db");
+        try
+        {
+            Assert.IsFalse(Directory.Exists(tempDir));
+
+            using var connection = SqliteDatabase.Open(dbPath);
+            Assert.IsTrue(Directory.Exists(tempDir));
+            Assert.IsTrue(File.Exists(dbPath));
+            Assert.AreEqual(SqliteDatabase.CurrentVersion, Scalar<long>(connection, "PRAGMA user_version;"));
+        }
+        finally
+        {
+            var rootDir = Directory.GetParent(tempDir)?.FullName;
+            if (rootDir is not null && Directory.Exists(rootDir))
+            {
+                try
+                {
+                    Directory.Delete(rootDir, recursive: true);
+                }
+                catch
+                {
+                }
+            }
+        }
+    }
+
     private static T Scalar<T>(SqliteConnection connection, string sql)
     {
         using var command = connection.CreateCommand();
