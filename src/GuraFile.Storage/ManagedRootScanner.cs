@@ -14,14 +14,31 @@ public sealed record ManagedRoot(
     string Path,
     ManagedRootStatus Status = ManagedRootStatus.Online,
     string? LastError = null,
-    DateTimeOffset? LastCheckedUtc = null)
+    DateTimeOffset? LastCheckedUtc = null,
+    StorageCapability? Capability = null)
 {
-    public string DisplayName => Status switch
+    public string DisplayName
     {
-        ManagedRootStatus.Offline => $"{Path}  [离线]{ErrorSuffix}",
-        ManagedRootStatus.Recovering => $"{Path}  [正在恢复]{ErrorSuffix}",
-        _ => $"{Path}  [在线]{ErrorSuffix}"
-    };
+        get
+        {
+            if (Status == ManagedRootStatus.Offline)
+            {
+                return $"{Path}  [离线]{ErrorSuffix}";
+            }
+
+            if (Status == ManagedRootStatus.Recovering)
+            {
+                return $"{Path}  [正在恢复]{ErrorSuffix}";
+            }
+
+            var cap = Capability ?? StorageCapabilityService.Default.Probe(Path);
+            var statusTag = cap.SupportsStableFileId
+                ? $"[在线 · {cap.FileSystemName}]"
+                : "[在线 · 身份跟踪有限]";
+
+            return $"{Path}  {statusTag}{ErrorSuffix}";
+        }
+    }
 
     private string ErrorSuffix => string.IsNullOrWhiteSpace(LastError) ? "" : $"  {LastError}";
 }
@@ -38,7 +55,8 @@ public sealed record ScanResult(
     int MissingFiles,
     int FallbackFiles,
     bool Canceled,
-    IReadOnlyList<ScanFailure> Failures);
+    IReadOnlyList<ScanFailure> Failures,
+    int SkippedReparsePoints = 0);
 
 public sealed class ManagedRootScanner
 {
@@ -106,6 +124,7 @@ public sealed class ManagedRootScanner
     }
 
     public string DatabasePath { get; }
+    public DiagnosticLogger Logger => _logger;
 
     public ManagedRoot AddRoot(string path)
     {
@@ -287,6 +306,7 @@ public sealed class ManagedRootScanner
         var updated = 0;
         var missing = 0;
         var fallback = 0;
+        var skippedReparsePoints = 0;
         var coverageComplete = true;
         var rootAvailable = false;
 
@@ -313,6 +333,18 @@ public sealed class ManagedRootScanner
 
             if ((attributes & FileAttributes.ReparsePoint) != 0)
             {
+                skippedReparsePoints++;
+                _logger.LogInfo(
+                    DiagnosticCategory.Scanner,
+                    "ReparsePointSkipped",
+                    correlationId: correlationId,
+                    status: DiagnosticResultStatus.Skipped,
+                    message: $"Managed root is a reparse point: {root.Path}",
+                    properties: new Dictionary<string, object?>
+                    {
+                        ["path"] = root.Path,
+                        ["type"] = "Directory"
+                    });
                 failures.Add(new(root.Path, "Managed root is a reparse point."));
                 return Complete(canceled: false);
             }
@@ -351,6 +383,21 @@ public sealed class ManagedRootScanner
                 if ((directoryAttributes & FileAttributes.ReparsePoint) != 0 ||
                     (directoryAttributes & FileAttributes.Directory) == 0)
                 {
+                    if ((directoryAttributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        skippedReparsePoints++;
+                        _logger.LogInfo(
+                            DiagnosticCategory.Scanner,
+                            "ReparsePointSkipped",
+                            correlationId: correlationId,
+                            status: DiagnosticResultStatus.Skipped,
+                            message: $"Skipped reparse point directory: {directory}",
+                            properties: new Dictionary<string, object?>
+                            {
+                                ["path"] = directory,
+                                ["type"] = "Directory"
+                            });
+                    }
                     continue;
                 }
 
@@ -395,6 +442,18 @@ public sealed class ManagedRootScanner
                     var attributes = _getAttributes(entry);
                     if ((attributes & FileAttributes.ReparsePoint) != 0)
                     {
+                        skippedReparsePoints++;
+                        _logger.LogInfo(
+                            DiagnosticCategory.Scanner,
+                            "ReparsePointSkipped",
+                            correlationId: correlationId,
+                            status: DiagnosticResultStatus.Skipped,
+                            message: $"Skipped reparse point: {entry}",
+                            properties: new Dictionary<string, object?>
+                            {
+                                ["path"] = entry,
+                                ["type"] = (attributes & FileAttributes.Directory) != 0 ? "Directory" : "File"
+                            });
                         continue;
                     }
 
@@ -483,7 +542,17 @@ public sealed class ManagedRootScanner
                     rootAvailable ? ManagedRootStatus.Online : ManagedRootStatus.Offline,
                     failures.LastOrDefault()?.Error);
 
-                if (failures.Count > 0)
+                if (!rootAvailable)
+                {
+                    _logger.LogWarning(
+                        DiagnosticCategory.Scanner,
+                        "RootOffline",
+                        correlationId: correlationId,
+                        status: DiagnosticResultStatus.Failed,
+                        message: $"Managed root '{root.Path}' is offline: {failures.LastOrDefault()?.Error ?? "Root unavailable"}",
+                        errorCode: "ROOT_OFFLINE");
+                }
+                else if (failures.Count > 0)
                 {
                     _logger.LogWarning(
                         DiagnosticCategory.Scanner,
@@ -497,6 +566,13 @@ public sealed class ManagedRootScanner
                 {
                     _logger.LogInfo(
                         DiagnosticCategory.Scanner,
+                        "RootOnline",
+                        correlationId: correlationId,
+                        status: DiagnosticResultStatus.Success,
+                        message: $"Managed root '{root.Path}' is online.");
+
+                    _logger.LogInfo(
+                        DiagnosticCategory.Scanner,
                         "ScanCompleted",
                         correlationId: correlationId,
                         status: DiagnosticResultStatus.Success,
@@ -504,7 +580,7 @@ public sealed class ManagedRootScanner
                 }
             }
 
-            return new(discovered, committed, added, updated, missing, fallback, canceled, failures);
+            return new(discovered, committed, added, updated, missing, fallback, canceled, failures, skippedReparsePoints);
         }
     }
 
@@ -523,6 +599,7 @@ public sealed class ManagedRootScanner
         var updated = 0;
         var missing = 0;
         var fallback = 0;
+        var skippedReparsePoints = 0;
 
         foreach (var path in CollapsePaths(root, paths))
         {
@@ -550,6 +627,17 @@ public sealed class ManagedRootScanner
             if ((attributes & FileAttributes.ReparsePoint) != 0)
             {
                 missing += MarkPathMissing(connection, root.Id, path);
+                skippedReparsePoints++;
+                _logger.LogInfo(
+                    DiagnosticCategory.Scanner,
+                    "ReparsePointSkipped",
+                    status: DiagnosticResultStatus.Skipped,
+                    message: $"Skipped reparse point: {path}",
+                    properties: new Dictionary<string, object?>
+                    {
+                        ["path"] = path,
+                        ["type"] = (attributes & FileAttributes.Directory) != 0 ? "Directory" : "File"
+                    });
                 continue;
             }
 
@@ -581,6 +669,7 @@ public sealed class ManagedRootScanner
             updated += result.UpdatedFiles;
             missing += result.MissingFiles;
             fallback += result.FallbackFiles;
+            skippedReparsePoints += result.SkippedReparsePoints;
             if (result.Canceled)
             {
                 return Complete(canceled: true);
@@ -590,7 +679,7 @@ public sealed class ManagedRootScanner
         return Complete(canceled: false);
 
         ScanResult Complete(bool canceled) =>
-            new(discovered, committed, added, updated, missing, fallback, canceled, failures);
+            new(discovered, committed, added, updated, missing, fallback, canceled, failures, skippedReparsePoints);
     }
 
     private ScanResult ReconcileDirectory(
@@ -610,6 +699,7 @@ public sealed class ManagedRootScanner
         var updated = 0;
         var missing = 0;
         var fallback = 0;
+        var skippedReparsePoints = 0;
         var coverageComplete = true;
         directories.Push(directoryPath);
 
@@ -623,6 +713,20 @@ public sealed class ManagedRootScanner
                 if ((directoryAttributes & FileAttributes.ReparsePoint) != 0 ||
                     (directoryAttributes & FileAttributes.Directory) == 0)
                 {
+                    if ((directoryAttributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        skippedReparsePoints++;
+                        _logger.LogInfo(
+                            DiagnosticCategory.Scanner,
+                            "ReparsePointSkipped",
+                            status: DiagnosticResultStatus.Skipped,
+                            message: $"Skipped reparse point directory: {directory}",
+                            properties: new Dictionary<string, object?>
+                            {
+                                ["path"] = directory,
+                                ["type"] = "Directory"
+                            });
+                    }
                     continue;
                 }
 
@@ -652,6 +756,17 @@ public sealed class ManagedRootScanner
                     var attributes = _getAttributes(entry);
                     if ((attributes & FileAttributes.ReparsePoint) != 0)
                     {
+                        skippedReparsePoints++;
+                        _logger.LogInfo(
+                            DiagnosticCategory.Scanner,
+                            "ReparsePointSkipped",
+                            status: DiagnosticResultStatus.Skipped,
+                            message: $"Skipped reparse point: {entry}",
+                            properties: new Dictionary<string, object?>
+                            {
+                                ["path"] = entry,
+                                ["type"] = (attributes & FileAttributes.Directory) != 0 ? "Directory" : "File"
+                            });
                         continue;
                     }
 
@@ -708,7 +823,7 @@ public sealed class ManagedRootScanner
         }
 
         ScanResult Complete(bool canceled) =>
-            new(discovered, committed, added, updated, missing, fallback, canceled, failures.ToArray());
+            new(discovered, committed, added, updated, missing, fallback, canceled, failures.ToArray(), skippedReparsePoints);
     }
 
     private static ManagedRoot ReadRoot(SqliteConnection connection, long rootId)

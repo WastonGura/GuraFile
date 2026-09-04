@@ -20,7 +20,9 @@ public sealed record FileDetailsModel(
     bool CanReidentify,
     bool CanCopyPath,
     bool IsTagSelected = false,
-    string? TagTypeSummary = null);
+    string? TagTypeSummary = null,
+    bool IsRootOffline = false,
+    string? RootOfflineNotice = null);
 
 public static class FileDetailsPresenter
 {
@@ -54,11 +56,14 @@ public static class FileDetailsPresenter
     public static FileDetailsModel Create(
         IReadOnlyList<IndexedFile> selectedFiles,
         IReadOnlyList<UserTag> userTags,
-        IReadOnlyList<AutomaticTag> automaticTags)
+        IReadOnlyList<AutomaticTag> automaticTags,
+        bool isRootOffline = false)
     {
         ArgumentNullException.ThrowIfNull(selectedFiles);
         ArgumentNullException.ThrowIfNull(userTags);
         ArgumentNullException.ThrowIfNull(automaticTags);
+
+        var rootNotice = isRootOffline ? "管理根目录当前离线，文件与标签已妥善保留，等待介质重新连接" : null;
 
         if (selectedFiles.Count == 0)
         {
@@ -69,7 +74,7 @@ public static class FileDetailsPresenter
                 Extension: null,
                 SizeText: null,
                 ModifiedText: null,
-                StatusText: "无",
+                StatusText: isRootOffline ? "离线" : "无",
                 IdentityStateText: "无",
                 UserTagsText: "无",
                 AutomaticTagsText: "无",
@@ -80,7 +85,9 @@ public static class FileDetailsPresenter
                 CanOpen: false,
                 CanReveal: false,
                 CanReidentify: false,
-                CanCopyPath: false);
+                CanCopyPath: false,
+                IsRootOffline: isRootOffline,
+                RootOfflineNotice: rootNotice);
         }
 
         if (selectedFiles.Count > 1)
@@ -99,7 +106,7 @@ public static class FileDetailsPresenter
                 Extension: null,
                 SizeText: null,
                 ModifiedText: null,
-                StatusText: "多选",
+                StatusText: isRootOffline ? "多选 (离线)" : "多选",
                 IdentityStateText: "多选",
                 UserTagsText: multiUserTagsText,
                 AutomaticTagsText: multiAutoTagsText,
@@ -110,15 +117,17 @@ public static class FileDetailsPresenter
                 CanOpen: false,
                 CanReveal: false,
                 CanReidentify: false,
-                CanCopyPath: false);
+                CanCopyPath: false,
+                IsRootOffline: isRootOffline,
+                RootOfflineNotice: rootNotice);
         }
 
         var file = selectedFiles[0];
-        var statusText = file.IsOnline ? "在线" : "离线";
+        var statusText = isRootOffline ? "离线" : (file.IsOnline ? "在线" : "离线");
         var isStable = string.Equals(file.IdentityKind, "stable", StringComparison.OrdinalIgnoreCase);
         var identityStateText = isStable
             ? "稳定身份已绑定"
-            : "路径降级模式 (未绑定稳定 ID)";
+            : "⚠️ 身份跟踪有限：当前介质不支持底层稳定文件 ID。同路径原地修改可保留标签；跨目录移动或重命名时可能需要重新关联标签。";
 
         var userTagsText = userTags.Count == 0
             ? "无"
@@ -127,6 +136,8 @@ public static class FileDetailsPresenter
         var autoTagsText = automaticTags.Count == 0
             ? "无"
             : string.Join("、", automaticTags.Select(t => t.Name));
+
+        var canPerformOnlineAction = file.IsOnline && !isRootOffline;
 
         return new FileDetailsModel(
             Title: file.Name,
@@ -143,9 +154,11 @@ public static class FileDetailsPresenter
             IsSingleFileSelected: true,
             IsMultipleFilesSelected: false,
             SelectedCount: 1,
-            CanOpen: file.IsOnline,
-            CanReveal: file.IsOnline,
-            CanReidentify: file.IsOnline,
-            CanCopyPath: true);
+            CanOpen: canPerformOnlineAction,
+            CanReveal: canPerformOnlineAction,
+            CanReidentify: canPerformOnlineAction,
+            CanCopyPath: true,
+            IsRootOffline: isRootOffline,
+            RootOfflineNotice: rootNotice);
     }
 }

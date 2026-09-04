@@ -28,7 +28,7 @@
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
             <TextBlock FontSize="20" FontWeight="SemiBold" Text="管理根目录" />
-            <ListView x:Name="RootsList" Grid.Row="1" AutomationProperties.Name="管理根目录" DisplayMemberPath="DisplayName" SelectionMode="Single" AllowDrop="True" DragOver="RootsList_DragOver" Drop="RootsList_Drop" />
+            <ListView x:Name="RootsList" Grid.Row="1" AutomationProperties.Name="管理根目录" DisplayMemberPath="DisplayName" SelectionMode="Single" AllowDrop="True" DragOver="RootsList_DragOver" Drop="RootsList_Drop" SelectionChanged="RootsList_SelectionChanged" />
             <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
                 <Button x:Name="AddRootButton" AutomationProperties.Name="添加管理根目录" Click="AddRootButton_Click" Content="添加" />
                 <Button x:Name="RemoveRootButton" AutomationProperties.Name="移除管理根目录" Click="RemoveRootButton_Click" Content="移除" />
@@ -235,6 +235,7 @@
             <TextBlock FontSize="20" FontWeight="SemiBold" Text="文件详情" />
             <StackPanel Grid.Row="1" Spacing="4">
                 <TextBlock x:Name="DetailsTitleText" FontWeight="SemiBold" Text="未选择文件" TextWrapping="Wrap" />
+                <TextBlock x:Name="DetailsRootOfflineNoticeText" AutomationProperties.Name="根目录离线提示" Foreground="{ThemeResource SystemFillColorCautionBrush}" FontWeight="SemiBold" TextWrapping="Wrap" Visibility="Collapsed" />
                 <TextBlock x:Name="DetailsPathText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
                 <TextBlock x:Name="DetailsMetaText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
                 <TextBlock x:Name="DetailsStatusText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Visibility="Collapsed" />

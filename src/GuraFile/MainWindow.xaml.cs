@@ -531,7 +531,8 @@ public sealed partial class MainWindow : Window
 
         if (selected.Count == 0)
         {
-            var model = FileDetailsPresenter.Create([], [], []);
+            var isSelectedRootOffline = (RootsList.SelectedItem as ManagedRoot)?.Status == ManagedRootStatus.Offline;
+            var model = FileDetailsPresenter.Create([], [], [], isRootOffline: isSelectedRootOffline);
             UpdateDetailsView(model);
             return;
         }
@@ -550,7 +551,8 @@ public sealed partial class MainWindow : Window
         _detailCancellation?.Cancel();
         var cancellation = new CancellationTokenSource();
         _detailCancellation = cancellation;
-        var initialModel = FileDetailsPresenter.Create(files, [], []);
+        var isRootOffline = files.Any(IsFileRootOffline);
+        var initialModel = FileDetailsPresenter.Create(files, [], [], isRootOffline: isRootOffline);
         UpdateDetailsView(initialModel);
         try
         {
@@ -561,7 +563,7 @@ public sealed partial class MainWindow : Window
             cancellation.Token.ThrowIfCancellationRequested();
             if (ReferenceEquals(_detailCancellation, cancellation))
             {
-                var loadedModel = FileDetailsPresenter.Create(files, commonUserTags, []);
+                var loadedModel = FileDetailsPresenter.Create(files, commonUserTags, [], isRootOffline: isRootOffline);
                 UpdateDetailsView(loadedModel);
             }
         }
@@ -591,7 +593,8 @@ public sealed partial class MainWindow : Window
         _detailCancellation?.Cancel();
         var cancellation = new CancellationTokenSource();
         _detailCancellation = cancellation;
-        var initialModel = FileDetailsPresenter.Create([file], [], []);
+        var isRootOffline = IsFileRootOffline(file);
+        var initialModel = FileDetailsPresenter.Create([file], [], [], isRootOffline: isRootOffline);
         UpdateDetailsView(initialModel);
         try
         {
@@ -601,7 +604,7 @@ public sealed partial class MainWindow : Window
             cancellation.Token.ThrowIfCancellationRequested();
             if (ReferenceEquals(_detailCancellation, cancellation))
             {
-                var loadedModel = FileDetailsPresenter.Create([file], tags.Item1, tags.Item2);
+                var loadedModel = FileDetailsPresenter.Create([file], tags.Item1, tags.Item2, isRootOffline: isRootOffline);
                 UpdateDetailsView(loadedModel);
             }
         }
@@ -631,6 +634,16 @@ public sealed partial class MainWindow : Window
         DetailsTitleText.Text = model.Title;
         DetailsText.Text = model.Title;
 
+        if (model.IsRootOffline && !string.IsNullOrWhiteSpace(model.RootOfflineNotice))
+        {
+            DetailsRootOfflineNoticeText.Text = model.RootOfflineNotice;
+            DetailsRootOfflineNoticeText.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            DetailsRootOfflineNoticeText.Visibility = Visibility.Collapsed;
+        }
+
         if (model.IsTagSelected)
         {
             DetailsPathText.Visibility = Visibility.Collapsed;
@@ -650,10 +663,25 @@ public sealed partial class MainWindow : Window
             DetailsMetaText.Text = $"扩展名：{model.Extension} | 大小：{model.SizeText} | 修改时间：{model.ModifiedText}";
             DetailsMetaText.Visibility = Visibility.Visible;
 
-            DetailsStatusText.Text = $"在线状态：{model.StatusText}";
+            DetailsStatusText.Text = model.IsRootOffline ? "在线状态：离线（管理根目录当前离线）" : $"在线状态：{model.StatusText}";
             DetailsStatusText.Visibility = Visibility.Visible;
 
-            DetailsIdentityText.Text = $"身份状态：{model.IdentityStateText}";
+            if (model.IdentityStateText.StartsWith("⚠️", StringComparison.Ordinal))
+            {
+                if (Application.Current.Resources.TryGetValue("SystemFillColorCautionBrush", out var cautionBrush) && cautionBrush is Brush brush)
+                {
+                    DetailsIdentityText.Foreground = brush;
+                }
+                DetailsIdentityText.Text = model.IdentityStateText;
+            }
+            else
+            {
+                if (Application.Current.Resources.TryGetValue("TextFillColorSecondaryBrush", out var secondaryBrush) && secondaryBrush is Brush brush)
+                {
+                    DetailsIdentityText.Foreground = brush;
+                }
+                DetailsIdentityText.Text = $"身份状态：{model.IdentityStateText}";
+            }
             DetailsIdentityText.Visibility = Visibility.Visible;
 
             DetailsUserTagsText.Text = $"用户标签：{model.UserTagsText}";
@@ -1112,6 +1140,20 @@ public sealed partial class MainWindow : Window
         }
 
         return RootsList.SelectedItem as ManagedRoot;
+    }
+
+    private void RootsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        RemoveRootButton.IsEnabled = !_isScanning && !_isOperating && RootsList.SelectedItem is not null;
+        ScanButton.IsEnabled = !_isScanning && !_isOperating && RootsList.SelectedItem is not null;
+
+        var selected = FilesList?.SelectedItems?.OfType<IndexedFile>().ToList();
+        if (selected == null || selected.Count == 0)
+        {
+            var isSelectedRootOffline = (RootsList.SelectedItem as ManagedRoot)?.Status == ManagedRootStatus.Offline;
+            var model = FileDetailsPresenter.Create([], [], [], isRootOffline: isSelectedRootOffline);
+            UpdateDetailsView(model);
+        }
     }
 
     private void RootsList_DragOver(object sender, DragEventArgs e)
@@ -2038,7 +2080,8 @@ public sealed partial class MainWindow : Window
             if (remaining.Count == 0)
             {
                 _detailCancellation?.Cancel();
-                var emptyModel = FileDetailsPresenter.Create([], [], []);
+                var isSelectedRootOffline = (RootsList.SelectedItem as ManagedRoot)?.Status == ManagedRootStatus.Offline;
+                var emptyModel = FileDetailsPresenter.Create([], [], [], isRootOffline: isSelectedRootOffline);
                 UpdateDetailsView(emptyModel);
             }
             else if (remaining.Count == 1)
@@ -2227,15 +2270,41 @@ public sealed partial class MainWindow : Window
         ScanProgressRing.Visibility = scanning ? Visibility.Visible : Visibility.Collapsed;
         CancelButton.IsEnabled = scanning;
         AddRootButton.IsEnabled = !scanning && !_isOperating;
-        RemoveRootButton.IsEnabled = !scanning && !_isOperating;
-        ScanButton.IsEnabled = !scanning && !_isOperating;
+        RemoveRootButton.IsEnabled = !scanning && !_isOperating && RootsList.SelectedItem is not null;
+        ScanButton.IsEnabled = !scanning && !_isOperating && RootsList.SelectedItem is not null;
+    }
+
+    private bool IsFileRootOffline(IndexedFile? file)
+    {
+        if (_scanner is null || string.IsNullOrWhiteSpace(file?.Path))
+        {
+            return false;
+        }
+
+        var roots = _scanner.ListRoots();
+        foreach (var root in roots)
+        {
+            if (root.Status == ManagedRootStatus.Offline)
+            {
+                var rootPath = root.Path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (file.Path.Equals(rootPath, StringComparison.OrdinalIgnoreCase) ||
+                    file.Path.StartsWith(rootPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                    file.Path.StartsWith(rootPath + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private void UpdateFileButtonsState()
     {
         var selected = FilesList.SelectedItems.OfType<IndexedFile>().ToList();
         var hasSingleFile = selected.Count == 1;
-        var isSingleOnline = hasSingleFile && selected[0].IsOnline;
+        var isFileRootOffline = hasSingleFile && IsFileRootOffline(selected[0]);
+        var isSingleOnline = hasSingleFile && selected[0].IsOnline && !isFileRootOffline;
         OpenFileButton.IsEnabled = isSingleOnline && !_isOperating;
         RevealFileButton.IsEnabled = isSingleOnline && !_isOperating;
         ReidentifyTypeButton.IsEnabled = isSingleOnline && !_isOperating;
@@ -2590,7 +2659,8 @@ public sealed partial class MainWindow : Window
                     if (validFiles.Count == 0)
                     {
                         _detailCancellation?.Cancel();
-                        var emptyModel = FileDetailsPresenter.Create([], [], []);
+                        var isSelectedRootOffline = (RootsList.SelectedItem as ManagedRoot)?.Status == ManagedRootStatus.Offline;
+                        var emptyModel = FileDetailsPresenter.Create([], [], [], isRootOffline: isSelectedRootOffline);
                         UpdateDetailsView(emptyModel);
                     }
                     else if (validFiles.Count == 1)
