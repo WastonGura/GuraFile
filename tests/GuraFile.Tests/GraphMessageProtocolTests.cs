@@ -13,6 +13,8 @@ public sealed class GraphMessageProtocolTests
         string fit = GraphMessageTypes.FitViewport;
         string broad = GraphMessageTypes.SetBroadTagsVisible;
         string select = GraphMessageTypes.SelectNode;
+        string selectionChanged = GraphMessageTypes.SelectionChanged;
+        string setSelection = GraphMessageTypes.SetSelection;
         string nodeSelected = GraphMessageTypes.NodeSelected;
         string nodeActivated = GraphMessageTypes.NodeActivated;
         string ready = GraphMessageTypes.Ready;
@@ -24,6 +26,8 @@ public sealed class GraphMessageProtocolTests
         Assert.AreEqual("fitViewport", fit);
         Assert.AreEqual("setBroadTagsVisible", broad);
         Assert.AreEqual("selectNode", select);
+        Assert.AreEqual("selectionChanged", selectionChanged);
+        Assert.AreEqual("setSelection", setSelection);
         Assert.AreEqual("nodeSelected", nodeSelected);
         Assert.AreEqual("nodeActivated", nodeActivated);
         Assert.AreEqual("ready", ready);
@@ -266,5 +270,78 @@ public sealed class GraphMessageProtocolTests
             var root = doc.RootElement;
             Assert.AreEqual("nodeActivated", root.GetProperty("type").GetString());
         }
+    }
+
+    [TestMethod]
+    public void OutboundSetSelectionSerializesCorrectly()
+    {
+        var json = GraphMessageSerializer.SerializeSetSelection([10L, 20L]);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.AreEqual("setSelection", root.GetProperty("type").GetString());
+        Assert.AreEqual("1.0", root.GetProperty("version").GetString());
+        var fileIds = root.GetProperty("payload").GetProperty("fileIds");
+        Assert.AreEqual(2, fileIds.GetArrayLength());
+        Assert.AreEqual(10L, fileIds[0].GetInt64());
+        Assert.AreEqual(20L, fileIds[1].GetInt64());
+    }
+
+    [TestMethod]
+    public void InboundSetSelectionDeserializesCorrectly()
+    {
+        var json = """
+            {
+                "type": "setSelection",
+                "version": "1.0",
+                "payload": {
+                    "fileIds": [1, 2, 3]
+                }
+            }
+            """;
+        var message = GraphMessageSerializer.Deserialize(json);
+        Assert.AreEqual("setSelection", message.Type);
+
+        var payload = GraphMessageSerializer.ParseSetSelection(message);
+        CollectionAssert.AreEqual(new long[] { 1, 2, 3 }, payload.FileIds.ToArray());
+    }
+
+    [TestMethod]
+    public void OutboundSelectionChangedSerializesCorrectly()
+    {
+        var json = GraphMessageSerializer.SerializeSelectionChanged([100L, 200L, 300L]);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.AreEqual("selectionChanged", root.GetProperty("type").GetString());
+        Assert.AreEqual("1.0", root.GetProperty("version").GetString());
+        var payload = root.GetProperty("payload");
+        Assert.AreEqual(3, payload.GetProperty("count").GetInt32());
+        var fileIds = payload.GetProperty("fileIds");
+        Assert.AreEqual(3, fileIds.GetArrayLength());
+        Assert.AreEqual(100L, fileIds[0].GetInt64());
+        Assert.AreEqual(200L, fileIds[1].GetInt64());
+        Assert.AreEqual(300L, fileIds[2].GetInt64());
+    }
+
+    [TestMethod]
+    public void InboundSelectionChangedDeserializesCorrectly()
+    {
+        var json = """
+            {
+                "type": "selectionChanged",
+                "version": "1.0",
+                "payload": {
+                    "fileIds": [42, 43],
+                    "count": 2
+                }
+            }
+            """;
+        var message = GraphMessageSerializer.Deserialize(json);
+        Assert.AreEqual("selectionChanged", message.Type);
+
+        var payload = GraphMessageSerializer.ParseSelectionChanged(message);
+        Assert.AreEqual(2, payload.Count);
+        CollectionAssert.AreEqual(new long[] { 42, 43 }, payload.FileIds.ToArray());
     }
 }

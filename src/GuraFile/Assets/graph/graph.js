@@ -50,7 +50,7 @@
     cy = cytoscape({
       container: document.getElementById("cy"),
       elements: [],
-      boxSelectionEnabled: false,
+      boxSelectionEnabled: true,
       autounselectify: false,
       style: [
         {
@@ -125,6 +125,39 @@
     let lastTapTime = 0;
     const DOUBLE_TAP_THRESHOLD_MS = 350;
 
+    function emitSelectionChanged() {
+      if (!cy) return;
+      const selectedFiles = cy.nodes("node[nodeType = 'file']:selected");
+      const fileIds = [];
+      selectedFiles.forEach(node => {
+        const fid = node.data("fileId");
+        if (fid != null) {
+          fileIds.push(Number(fid));
+        }
+      });
+      sendToHost("selectionChanged", {
+        fileIds: fileIds,
+        count: fileIds.length
+      });
+    }
+
+    cy.on("boxend", function () {
+      const tags = cy.nodes("node[nodeType = 'tag']:selected");
+      if (tags.length > 0) {
+        cy.batch(() => {
+          tags.unselect().removeClass("selected");
+        });
+      }
+      emitSelectionChanged();
+    });
+
+    cy.on("select", "node[nodeType = 'tag']", function (evt) {
+      const fileNodes = cy.nodes("node[nodeType = 'file']:selected");
+      if (fileNodes.length > 0) {
+        evt.target.unselect().removeClass("selected");
+      }
+    });
+
     cy.on("tap", "node", function (evt) {
       const node = evt.target;
       const now = performance.now();
@@ -153,6 +186,9 @@
         sendToHost("nodeActivated", payload);
       } else {
         sendToHost("nodeSelected", payload);
+        if (data.nodeType === "file") {
+          emitSelectionChanged();
+        }
       }
     });
 
@@ -161,6 +197,10 @@
         lastTapNodeId = null;
         lastTapTime = 0;
         hideTooltip();
+        cy.batch(() => {
+          cy.nodes().unselect().removeClass("selected");
+        });
+        emitSelectionChanged();
       }
     });
 
@@ -324,6 +364,22 @@
     });
   }
 
+  function setSelection(fileIds) {
+    if (!cy) return;
+    const idSet = new Set((fileIds || []).map(id => Number(id)));
+    cy.batch(() => {
+      cy.nodes().unselect().removeClass("selected");
+      if (idSet.size > 0) {
+        cy.nodes("node[nodeType = 'file']").forEach(node => {
+          const fid = Number(node.data("fileId"));
+          if (idSet.has(fid)) {
+            node.select().addClass("selected");
+          }
+        });
+      }
+    });
+  }
+
   function handleMessage(message) {
     if (!message || !message.type) return;
 
@@ -337,6 +393,9 @@
           break;
         case "selectNode":
           selectNode(message.payload && message.payload.nodeId);
+          break;
+        case "setSelection":
+          setSelection(message.payload && message.payload.fileIds);
           break;
         case "setBroadTagsVisible":
           setBroadTagsVisible(message.payload && message.payload.visible);

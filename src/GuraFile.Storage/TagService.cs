@@ -77,6 +77,50 @@ public sealed class TagService
         return tags;
     }
 
+    public IReadOnlyList<UserTag> ListCommonUserTagsForFiles(IReadOnlyCollection<long> fileIds)
+    {
+        ArgumentNullException.ThrowIfNull(fileIds);
+        var distinctIds = fileIds.Distinct().ToArray();
+        if (distinctIds.Length == 0)
+        {
+            return [];
+        }
+
+        if (distinctIds.Length == 1)
+        {
+            return ListTagsForFile(distinctIds[0]);
+        }
+
+        using var connection = SqliteDatabase.Open(DatabasePath);
+        using var command = connection.CreateCommand();
+        var placeholders = new string[distinctIds.Length];
+        for (var i = 0; i < distinctIds.Length; i++)
+        {
+            placeholders[i] = $"$id{i}";
+            command.Parameters.AddWithValue(placeholders[i], distinctIds[i]);
+        }
+
+        command.CommandText =
+            $"""
+            SELECT t.id, t.name
+            FROM file_tags ft
+            JOIN tags t ON t.id = ft.tag_id AND t.source = 'user'
+            WHERE ft.file_id IN ({string.Join(", ", placeholders)}) AND ft.source = 'user'
+            GROUP BY t.id, t.name
+            HAVING COUNT(DISTINCT ft.file_id) = {distinctIds.Length}
+            ORDER BY t.name;
+            """;
+
+        using var reader = command.ExecuteReader();
+        var tags = new List<UserTag>();
+        while (reader.Read())
+        {
+            tags.Add(new UserTag(reader.GetInt64(0), reader.GetString(1)));
+        }
+
+        return tags;
+    }
+
     public IReadOnlyList<AutomaticTag> ListAutomaticTags()
     {
         using var connection = SqliteDatabase.Open(DatabasePath);
