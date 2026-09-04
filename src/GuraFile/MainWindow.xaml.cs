@@ -13,16 +13,21 @@ namespace GuraFile;
 
 public sealed partial class MainWindow : Window
 {
-    private readonly ManagedRootScanner _scanner;
-    private readonly FileChangeCoordinator _fileChanges;
-    private readonly FileQueryService _fileQuery;
-    private readonly TagService _tags;
-    private readonly UserTagBackupService _tagBackup;
-    private readonly RollingTagBackupService _rollingBackup;
+    private ManagedRootScanner _scanner = null!;
+    private FileChangeCoordinator _fileChanges = null!;
+    private FileQueryService _fileQuery = null!;
+    private TagService _tags = null!;
+    private UserTagBackupService _tagBackup = null!;
+    private RollingTagBackupService _rollingBackup = null!;
     private readonly ShellFileActions _shell = new();
     private readonly IFileClipboardService _clipboard;
-    private readonly FileListOperationService _fileOperations;
-    private readonly GraphSnapshotService _graphSnapshotService;
+    private FileListOperationService _fileOperations = null!;
+    private GraphSnapshotService _graphSnapshotService = null!;
+    private readonly DatabaseHealthService _healthService = new();
+    private readonly DatabaseRecoveryService _recoveryService = new();
+    private readonly string _databasePath = AppPaths.DefaultDatabasePath;
+    private DatabaseHealthResult _currentHealth = new(DatabaseHealthStatus.Healthy);
+    private bool _isRecoveringDatabase;
     private CancellationTokenSource? _scanCancellation;
     private CancellationTokenSource? _fileQueryCancellation;
     private CancellationTokenSource? _detailCancellation;
@@ -49,21 +54,8 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         Title = "GuraFile";
-        var databasePath = AppPaths.DefaultDatabasePath;
-        _rollingBackup = new(databasePath);
-        _scanner = new(databasePath);
-        _fileChanges = new(
-            _scanner,
-            result => DispatcherQueue.TryEnqueue(() => _ = ShowRealtimeResultAsync(result)),
-            exception => DispatcherQueue.TryEnqueue(() => ShowRealtimeError(exception)),
-            onRootChanged: () => DispatcherQueue.TryEnqueue(RefreshRoots));
-        _fileQuery = new(databasePath);
-        _tags = new(databasePath, _rollingBackup);
-        _tagBackup = new(databasePath);
-        _graphSnapshotService = new(databasePath);
         _clipboard = new FileClipboardService();
-        _fileOperations = new FileListOperationService(new FileOperationIndexCommitter(_scanner), _scanner, _clipboard);
-        _initialized = true;
+
         Closed += async (_, _) =>
         {
             _scanCancellation?.Cancel();
@@ -71,17 +63,289 @@ public sealed partial class MainWindow : Window
             _detailCancellation?.Cancel();
             _fileOpCancellation?.Cancel();
             _graphRefreshCancellation?.Cancel();
-            await _fileChanges.DisposeAsync();
+            if (_fileChanges != null)
+            {
+                await _fileChanges.DisposeAsync();
+            }
         };
-        RefreshRoots();
-        foreach (var root in _scanner.ListRoots())
+
+        (Content as FrameworkElement)!.Loaded += (_, _) =>
         {
-            _fileChanges.Start(root);
+            if (_currentHealth.Status == DatabaseHealthStatus.Corrupted)
+            {
+                _ = PromptDatabaseRecoveryDialogAsync();
+            }
+        };
+
+        InitializeDatabaseAndServices();
+    }
+
+    private void InitializeDatabaseAndServices()
+    {
+        _currentHealth = _healthService.CheckHealth(_databasePath);
+        ApplyDatabaseHealthState(_currentHealth);
+    }
+
+    private void ApplyDatabaseHealthState(DatabaseHealthResult health)
+    {
+        switch (health.Status)
+        {
+            case DatabaseHealthStatus.Healthy:
+                DatabaseNoticeBar.IsOpen = false;
+                DatabaseNoticeActionButton.Visibility = Visibility.Collapsed;
+                ProgressText.Text = "空闲";
+                EnableControlsForHealthyDatabase();
+
+                _rollingBackup = new(_databasePath);
+                _scanner = new(_databasePath);
+                _fileChanges = new(
+                    _scanner,
+                    result => DispatcherQueue.TryEnqueue(() => _ = ShowRealtimeResultAsync(result)),
+                    exception => DispatcherQueue.TryEnqueue(() => ShowRealtimeError(exception)),
+                    onRootChanged: () => DispatcherQueue.TryEnqueue(RefreshRoots));
+                _fileQuery = new(_databasePath);
+                _tags = new(_databasePath, _rollingBackup);
+                _tagBackup = new(_databasePath);
+                _graphSnapshotService = new(_databasePath);
+                _fileOperations = new FileListOperationService(new FileOperationIndexCommitter(_scanner), _scanner, _clipboard);
+                _initialized = true;
+
+                RefreshRoots();
+                foreach (var root in _scanner.ListRoots())
+                {
+                    _fileChanges.Start(root);
+                }
+                _ = RefreshTagsAsync();
+                _ = RefreshAutomaticTagsAsync();
+                _ = RefreshFilesAsync();
+                UpdateFileButtonsState();
+                break;
+
+            case DatabaseHealthStatus.Locked:
+                _initialized = false;
+                DisableControlsForUnhealthyDatabase();
+                DatabaseNoticeBar.Severity = InfoBarSeverity.Warning;
+                DatabaseNoticeBar.Title = "数据库被锁定";
+                DatabaseNoticeBar.Message = "数据库正在被其他进程使用，请关闭其他进程后重试。";
+                DatabaseNoticeActionButton.Content = "重试连接";
+                DatabaseNoticeActionButton.Visibility = Visibility.Visible;
+                DatabaseNoticeBar.IsOpen = true;
+                ProgressText.Text = "数据库被其他进程锁定，请重试";
+                FilesStateText.Text = "数据库正在被其他进程使用，请关闭其他进程后重试。";
+                break;
+
+            case DatabaseHealthStatus.UnsupportedFutureSchema:
+                _initialized = false;
+                DisableControlsForUnhealthyDatabase();
+                DatabaseNoticeBar.Severity = InfoBarSeverity.Error;
+                DatabaseNoticeBar.Title = "数据库版本不受支持";
+                DatabaseNoticeBar.Message = "当前数据库由更新版本的 GuraFile 创建，请升级客户端。";
+                DatabaseNoticeActionButton.Visibility = Visibility.Collapsed;
+                DatabaseNoticeBar.IsOpen = true;
+                ProgressText.Text = "数据库架构版本不受支持，请升级客户端";
+                FilesStateText.Text = "当前数据库由更新版本的 GuraFile 创建，请升级客户端。";
+                break;
+
+            case DatabaseHealthStatus.Corrupted:
+                _initialized = false;
+                DisableControlsForUnhealthyDatabase();
+                DatabaseNoticeBar.Severity = InfoBarSeverity.Error;
+                DatabaseNoticeBar.Title = "数据库已损坏";
+                DatabaseNoticeBar.Message = "检测到数据库损坏。可隔离损坏文件，重新扫描管理根目录并自动恢复历史用户标签。";
+                DatabaseNoticeActionButton.Content = "恢复数据库...";
+                DatabaseNoticeActionButton.Visibility = Visibility.Visible;
+                DatabaseNoticeBar.IsOpen = true;
+                ProgressText.Text = "检测到数据库损坏，等待恢复";
+                FilesStateText.Text = "数据库损坏，需要恢复。";
+                break;
+
+            case DatabaseHealthStatus.IoError:
+            default:
+                _initialized = false;
+                DisableControlsForUnhealthyDatabase();
+                DatabaseNoticeBar.Severity = InfoBarSeverity.Error;
+                DatabaseNoticeBar.Title = "数据库访问失败";
+                DatabaseNoticeBar.Message = health.Message ?? "无法访问数据库。";
+                DatabaseNoticeActionButton.Content = "重试连接";
+                DatabaseNoticeActionButton.Visibility = Visibility.Visible;
+                DatabaseNoticeBar.IsOpen = true;
+                ProgressText.Text = "数据库访问 I/O 错误";
+                FilesStateText.Text = "数据库无法访问。";
+                break;
         }
-        _ = RefreshTagsAsync();
-        _ = RefreshAutomaticTagsAsync();
-        _ = RefreshFilesAsync();
-        UpdateFileButtonsState();
+    }
+
+    private void DisableControlsForUnhealthyDatabase()
+    {
+        AddRootButton.IsEnabled = false;
+        RemoveRootButton.IsEnabled = false;
+        ScanButton.IsEnabled = false;
+        CreateTagButton.IsEnabled = false;
+        RenameTagButton.IsEnabled = false;
+        DeleteTagButton.IsEnabled = false;
+        ApplyTagButton.IsEnabled = false;
+        RemoveTagButton.IsEnabled = false;
+        ExportTagsButton.IsEnabled = false;
+        ImportTagsButton.IsEnabled = false;
+        BackupNowButton.IsEnabled = false;
+        RollingBackupsButton.IsEnabled = false;
+        OpenFileButton.IsEnabled = false;
+        RevealFileButton.IsEnabled = false;
+        CopyPathButton.IsEnabled = false;
+        ReidentifyTypeButton.IsEnabled = false;
+        CopyFileButton.IsEnabled = false;
+        CutFileButton.IsEnabled = false;
+        PasteToFileButton.IsEnabled = false;
+        MoveToFileButton.IsEnabled = false;
+        RenameFileButton.IsEnabled = false;
+        DeleteFileButton.IsEnabled = false;
+    }
+
+    private void EnableControlsForHealthyDatabase()
+    {
+        AddRootButton.IsEnabled = true;
+        RemoveRootButton.IsEnabled = RootsList.SelectedItem is not null;
+        ScanButton.IsEnabled = RootsList.SelectedItem is not null;
+        CreateTagButton.IsEnabled = true;
+        ExportTagsButton.IsEnabled = true;
+        ImportTagsButton.IsEnabled = true;
+        BackupNowButton.IsEnabled = true;
+        RollingBackupsButton.IsEnabled = true;
+    }
+
+    private async void DatabaseNoticeActionButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentHealth.Status is DatabaseHealthStatus.Locked or DatabaseHealthStatus.IoError)
+        {
+            InitializeDatabaseAndServices();
+        }
+        else if (_currentHealth.Status == DatabaseHealthStatus.Corrupted)
+        {
+            await PromptDatabaseRecoveryDialogAsync();
+        }
+    }
+
+    private async Task PromptDatabaseRecoveryDialogAsync()
+    {
+        if (_isRecoveringDatabase)
+        {
+            return;
+        }
+
+        var xamlRoot = (Content as FrameworkElement)?.XamlRoot;
+        if (xamlRoot == null)
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            Title = "数据库损坏恢复",
+            Content = new TextBlock
+            {
+                Text = "系统检测到 GuraFile 数据库已损坏。\n\n" +
+                       "确认后将执行以下安全无损恢复步骤：\n" +
+                       "1. 将损坏的数据库文件安全隔离备份为 .corrupt_*.bak（绝不覆盖或删除原有数据库）；\n" +
+                       "2. 初始化全新的空白索引数据库；\n" +
+                       "3. 从磁盘重新扫描已配置的管理根目录重建文件索引；\n" +
+                       "4. 自动从最近的历史有效备份恢复用户标签与关系。\n\n" +
+                       "此操作严禁修改您的磁盘原始文件。是否立即开始恢复？",
+                TextWrapping = TextWrapping.Wrap
+            },
+            PrimaryButtonText = "开始安全恢复",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = xamlRoot
+        };
+
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        await ExecuteDatabaseRecoveryAsync();
+    }
+
+    private async Task ExecuteDatabaseRecoveryAsync()
+    {
+        if (_isRecoveringDatabase)
+        {
+            return;
+        }
+
+        _isRecoveringDatabase = true;
+        ProgressText.Text = "正在执行数据库恢复...";
+        ScanProgressRing.Visibility = Visibility.Visible;
+
+        try
+        {
+            var roots = DatabaseRecoveryService.TryExtractRoots(_databasePath);
+
+            var report = await Task.Run(() => _recoveryService.RebuildIndexAndRestoreTagsAsync(
+                _databasePath,
+                roots,
+                tagBackupDirectory: AppPaths.DefaultTagBackupDirectory,
+                statusCallback: msg => DispatcherQueue.TryEnqueue(() => ProgressText.Text = msg)));
+
+            if (!report.Succeeded)
+            {
+                ProgressText.Text = "数据库恢复失败";
+                FailureList.ItemsSource = new[] { report.ErrorMessage ?? "未知错误" };
+
+                var failureDialog = new ContentDialog
+                {
+                    Title = "数据库恢复未完成",
+                    Content = new TextBlock
+                    {
+                        Text = $"恢复过程中发生错误：{report.ErrorMessage}\n\n已隔离的损坏数据库及备份均完好保留。",
+                        TextWrapping = TextWrapping.Wrap
+                    },
+                    CloseButtonText = "确定",
+                    DefaultButton = ContentDialogButton.Close,
+                    XamlRoot = (Content as FrameworkElement)?.XamlRoot
+                };
+                await failureDialog.ShowAsync();
+                return;
+            }
+
+            // Successfully recovered!
+            InitializeDatabaseAndServices();
+
+            var summaryText =
+                $"已成功隔离损坏数据库并重建索引：\n\n" +
+                $"• 扫描根目录: {report.ScannedRoots} 个\n" +
+                $"• 发现文件: {report.DiscoveredFiles} 个（已索引 {report.IndexedFiles} 个）\n" +
+                $"• 恢复用户标签: {report.RestoredTags} 个\n" +
+                $"• 恢复标签关系: {report.RestoredRelations} 条\n" +
+                $"• 标签名称冲突: {report.TagConflictsCount} 个\n" +
+                $"• 未匹配文件: {report.UnmatchedFiles.Count} 个\n" +
+                (report.QuarantineBackupPath != null ? $"• 已隔离损坏库: {Path.GetFileName(report.QuarantineBackupPath)}\n" : "") +
+                (report.RestoredBackupPath != null ? $"• 恢复标签来源: {Path.GetFileName(report.RestoredBackupPath)}" : "• 未找到有效历史标签备份");
+
+            var summaryDialog = new ContentDialog
+            {
+                Title = "数据库恢复完成",
+                Content = new TextBlock
+                {
+                    Text = summaryText,
+                    TextWrapping = TextWrapping.Wrap
+                },
+                CloseButtonText = "完成",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = (Content as FrameworkElement)?.XamlRoot
+            };
+            await summaryDialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            ProgressText.Text = "数据库恢复失败";
+            FailureList.ItemsSource = new[] { ex.Message };
+        }
+        finally
+        {
+            ScanProgressRing.Visibility = Visibility.Collapsed;
+            _isRecoveringDatabase = false;
+        }
     }
 
     private async void AddRootButton_Click(object sender, RoutedEventArgs e)

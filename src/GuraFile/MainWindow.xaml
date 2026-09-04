@@ -79,17 +79,24 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
-            <Grid Grid.Row="0" ColumnSpacing="8">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBox x:Name="SearchBox" AutomationProperties.Name="筛选文件" PlaceholderText="按名称、路径或扩展名筛选" TextChanged="SearchBox_TextChanged" />
-                <ComboBox x:Name="ViewModeBox" Grid.Column="1" AutomationProperties.Name="视图模式" SelectedIndex="0" SelectionChanged="ViewModeBox_SelectionChanged">
-                    <ComboBoxItem Content="列表" />
-                    <ComboBoxItem Content="图谱" />
-                </ComboBox>
-            </Grid>
+            <StackPanel Grid.Row="0" Spacing="8">
+                <InfoBar x:Name="DatabaseNoticeBar" AutomationProperties.Name="数据库状态提示" IsOpen="False" IsClosable="False">
+                    <InfoBar.ActionButton>
+                        <Button x:Name="DatabaseNoticeActionButton" AutomationProperties.Name="数据库状态操作" Click="DatabaseNoticeActionButton_Click" Visibility="Collapsed" />
+                    </InfoBar.ActionButton>
+                </InfoBar>
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox x:Name="SearchBox" AutomationProperties.Name="筛选文件" PlaceholderText="按名称、路径或扩展名筛选" TextChanged="SearchBox_TextChanged" />
+                    <ComboBox x:Name="ViewModeBox" Grid.Column="1" AutomationProperties.Name="视图模式" SelectedIndex="0" SelectionChanged="ViewModeBox_SelectionChanged">
+                        <ComboBoxItem Content="列表" />
+                        <ComboBoxItem Content="图谱" />
+                    </ComboBox>
+                </Grid>
+            </StackPanel>
             <Grid x:Name="SortBarGrid" Grid.Row="1" ColumnSpacing="4">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="120" />
