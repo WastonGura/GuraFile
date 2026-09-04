@@ -337,7 +337,7 @@ public sealed class ReleaseAcceptanceTests
     }
 
     [TestMethod]
-    public async Task GraphPreview_ThreeHundredFilesSnapshotGenerationAndFirstFrame_UnderOneSecond_AndEnforcesLimit()
+    public async Task GraphPreview_ThreeHundredFilesSnapshotAndJsonSerialization_UnderOneSecond_AndEnforcesLimit()
     {
         using var temp = TempDirectory.Create();
         var dbPath = Path.Combine(temp.Path, "perf_graph.db");
@@ -410,26 +410,9 @@ public sealed class ReleaseAcceptanceTests
         Assert.HasCount(300, snapshot.Edges);
         Assert.IsNotNull(json);
 
-        // Record measurement evidence: must be well below 1000ms limit
+        // This measures snapshot generation and JSON serialization only. Real rendering is covered by GraphFirstFrame.ps1.
         Console.WriteLine($"[Graph Acceptance Benchmark] 300 files snapshot + JSON serialization: {sw.ElapsedMilliseconds} ms (target: < 1000 ms)");
         Assert.IsLessThan(1000, sw.ElapsedMilliseconds, $"300 file snapshot generation exceeded 1000ms: {sw.ElapsedMilliseconds}ms");
-
-        // Verify firstFrameRendered protocol parsing
-        var firstFrameMsg = GraphMessageSerializer.Deserialize($$"""
-            {
-                "type": "firstFrameRendered",
-                "version": "1.0",
-                "payload": {
-                    "nodeCount": {{snapshot.FileNodes.Count + snapshot.TagNodes.Count}},
-                    "edgeCount": {{snapshot.Edges.Count}},
-                    "renderDurationMs": {{sw.ElapsedMilliseconds}}
-                }
-            }
-            """);
-        var metrics = GraphMessageSerializer.ParseFirstFrameMetrics(firstFrameMsg);
-        Assert.AreEqual(310, metrics.NodeCount);
-        Assert.AreEqual(300, metrics.EdgeCount);
-        Assert.IsLessThan(1000, metrics.RenderDurationMs);
 
         // Limit verification: 301 files returns FileLimitExceeded without truncation
         var extraFile = new IndexedFile(301, "file_0301.txt", @"C:\Root\file_0301.txt", ".txt", 100, DateTimeOffset.UtcNow, true, null);

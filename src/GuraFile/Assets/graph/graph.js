@@ -305,6 +305,7 @@
       randomize: false,
       fit: true,
       padding: 30,
+      numIter: 400,
       nodeRepulsion: function () { return 2048; },
       idealEdgeLength: function () { return 50; }
     });
