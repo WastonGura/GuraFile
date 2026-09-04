@@ -106,22 +106,76 @@ public sealed class FileOperationIndexCommitter
 
         var effectiveRoots = ResolveOnlineRoots(onlineRootPaths);
         var snapshots = TakeSourceSnapshots(sourcePaths);
+        var correlationId = $"op-copy-{Guid.NewGuid():N}";
 
-        var batchResult = await _executor.CopyAsync(
-            sourcePaths,
-            destinationDirectory,
-            effectiveRoots,
-            collisionPolicy,
-            ownerWindow,
-            progress,
-            cancellationToken);
+        long intentId;
+        using (var connection = SqliteDatabase.Open(DatabasePath))
+        {
+            var intentItems = sourcePaths.Select(sp =>
+            {
+                var normSource = SafeFileOperationExecutor.Normalize(sp);
+                var targetName = Path.GetFileName(normSource);
+                var expectedTarget = Path.Combine(destinationDirectory, targetName);
+                return (normSource, (string?)destinationDirectory, (string?)targetName, (string?)expectedTarget);
+            }).ToList();
 
-        return await CommitBatchAsync(
+            intentId = InsertIntent(connection, correlationId, "copy", MapCollisionPolicy(collisionPolicy), intentItems);
+        }
+
+        FileOperationBatchResult batchResult;
+        try
+        {
+            batchResult = await _executor.CopyAsync(
+                sourcePaths,
+                destinationDirectory,
+                effectiveRoots,
+                collisionPolicy,
+                ownerWindow,
+                progress,
+                cancellationToken);
+
+            using (var connection = SqliteDatabase.Open(DatabasePath))
+            {
+                var updates = batchResult.Items.Select(item =>
+                    (SafeFileOperationExecutor.Normalize(item.SourcePath),
+                     item.ActualTargetPath,
+                     MapShellStatus(item.Status),
+                     item.Error)).ToList();
+                UpdateIntentShellCompleted(connection, intentId, updates);
+            }
+        }
+        catch (Exception ex)
+        {
+            using (var connection = SqliteDatabase.Open(DatabasePath))
+            {
+                var failedUpdates = sourcePaths.Select(sp =>
+                    (SafeFileOperationExecutor.Normalize(sp),
+                     (string?)null,
+                     "failed",
+                     (string?)ex.Message)).ToList();
+                UpdateIntentShellCompleted(connection, intentId, failedUpdates);
+            }
+            throw;
+        }
+
+        var commitResult = await CommitBatchAsync(
             batchResult.Items,
             isMove: false,
             effectiveRoots,
             snapshots,
             cancellationToken);
+
+        using (var connection = SqliteDatabase.Open(DatabasePath))
+        {
+            var commitUpdates = commitResult.Items.Select(ci =>
+                (SafeFileOperationExecutor.Normalize(ci.SourcePath),
+                 ci.Succeeded ? "committed" : "failed",
+                 ci.Error)).ToList();
+            UpdateIntentCommitted(connection, intentId, commitUpdates);
+            PurgeCommittedIntents(connection);
+        }
+
+        return commitResult;
     }
 
     public Task<FileOperationCommitBatchResult> CopyAsync(
@@ -163,22 +217,76 @@ public sealed class FileOperationIndexCommitter
 
         var effectiveRoots = ResolveOnlineRoots(onlineRootPaths);
         var snapshots = TakeSourceSnapshots(sourcePaths);
+        var correlationId = $"op-move-{Guid.NewGuid():N}";
 
-        var batchResult = await _executor.MoveAsync(
-            sourcePaths,
-            destinationDirectory,
-            effectiveRoots,
-            collisionPolicy,
-            ownerWindow,
-            progress,
-            cancellationToken);
+        long intentId;
+        using (var connection = SqliteDatabase.Open(DatabasePath))
+        {
+            var intentItems = sourcePaths.Select(sp =>
+            {
+                var normSource = SafeFileOperationExecutor.Normalize(sp);
+                var targetName = Path.GetFileName(normSource);
+                var expectedTarget = Path.Combine(destinationDirectory, targetName);
+                return (normSource, (string?)destinationDirectory, (string?)targetName, (string?)expectedTarget);
+            }).ToList();
 
-        return await CommitBatchAsync(
+            intentId = InsertIntent(connection, correlationId, "move", MapCollisionPolicy(collisionPolicy), intentItems);
+        }
+
+        FileOperationBatchResult batchResult;
+        try
+        {
+            batchResult = await _executor.MoveAsync(
+                sourcePaths,
+                destinationDirectory,
+                effectiveRoots,
+                collisionPolicy,
+                ownerWindow,
+                progress,
+                cancellationToken);
+
+            using (var connection = SqliteDatabase.Open(DatabasePath))
+            {
+                var updates = batchResult.Items.Select(item =>
+                    (SafeFileOperationExecutor.Normalize(item.SourcePath),
+                     item.ActualTargetPath,
+                     MapShellStatus(item.Status),
+                     item.Error)).ToList();
+                UpdateIntentShellCompleted(connection, intentId, updates);
+            }
+        }
+        catch (Exception ex)
+        {
+            using (var connection = SqliteDatabase.Open(DatabasePath))
+            {
+                var failedUpdates = sourcePaths.Select(sp =>
+                    (SafeFileOperationExecutor.Normalize(sp),
+                     (string?)null,
+                     "failed",
+                     (string?)ex.Message)).ToList();
+                UpdateIntentShellCompleted(connection, intentId, failedUpdates);
+            }
+            throw;
+        }
+
+        var commitResult = await CommitBatchAsync(
             batchResult.Items,
             isMove: true,
             effectiveRoots,
             snapshots,
             cancellationToken);
+
+        using (var connection = SqliteDatabase.Open(DatabasePath))
+        {
+            var commitUpdates = commitResult.Items.Select(ci =>
+                (SafeFileOperationExecutor.Normalize(ci.SourcePath),
+                 ci.Succeeded ? "committed" : "failed",
+                 ci.Error)).ToList();
+            UpdateIntentCommitted(connection, intentId, commitUpdates);
+            PurgeCommittedIntents(connection);
+        }
+
+        return commitResult;
     }
 
     public Task<FileOperationCommitBatchResult> MoveAsync(
@@ -220,14 +328,51 @@ public sealed class FileOperationIndexCommitter
         var effectiveRoots = ResolveOnlineRoots(onlineRootPaths);
         var normalizedSource = SafeFileOperationExecutor.Normalize(sourcePath);
         var snapshot = TakeSourceSnapshot(normalizedSource);
+        var destDir = Path.GetDirectoryName(normalizedSource);
+        var expectedTarget = destDir != null ? Path.Combine(destDir, newName) : newName;
+        var correlationId = $"op-rename-{Guid.NewGuid():N}";
 
-        var itemResult = await _executor.RenameAsync(
-            normalizedSource,
-            newName,
-            effectiveRoots,
-            collisionPolicy,
-            ownerWindow,
-            cancellationToken);
+        long intentId;
+        using (var connection = SqliteDatabase.Open(DatabasePath))
+        {
+            intentId = InsertIntent(
+                connection,
+                correlationId,
+                "rename",
+                MapCollisionPolicy(collisionPolicy),
+                [(normalizedSource, destDir, newName, expectedTarget)]);
+        }
+
+        FileOperationItemResult itemResult;
+        try
+        {
+            itemResult = await _executor.RenameAsync(
+                normalizedSource,
+                newName,
+                effectiveRoots,
+                collisionPolicy,
+                ownerWindow,
+                cancellationToken);
+
+            using (var connection = SqliteDatabase.Open(DatabasePath))
+            {
+                UpdateIntentShellCompleted(
+                    connection,
+                    intentId,
+                    [(normalizedSource, itemResult.ActualTargetPath, MapShellStatus(itemResult.Status), itemResult.Error)]);
+            }
+        }
+        catch (Exception ex)
+        {
+            using (var connection = SqliteDatabase.Open(DatabasePath))
+            {
+                UpdateIntentShellCompleted(
+                    connection,
+                    intentId,
+                    [(normalizedSource, null, "failed", ex.Message)]);
+            }
+            throw;
+        }
 
         var batchResult = await CommitBatchAsync(
             [itemResult],
@@ -236,7 +381,17 @@ public sealed class FileOperationIndexCommitter
             new Dictionary<string, SourceSnapshot>(StringComparer.OrdinalIgnoreCase) { [normalizedSource] = snapshot },
             cancellationToken);
 
-        return batchResult.Items[0];
+        var commitItem = batchResult.Items[0];
+        using (var connection = SqliteDatabase.Open(DatabasePath))
+        {
+            UpdateIntentCommitted(
+                connection,
+                intentId,
+                [(normalizedSource, commitItem.Succeeded ? "committed" : "failed", commitItem.Error)]);
+            PurgeCommittedIntents(connection);
+        }
+
+        return commitItem;
     }
 
     public Task<FileOperationCommitItemResult> RenameAsync(
@@ -272,18 +427,70 @@ public sealed class FileOperationIndexCommitter
         }
 
         var effectiveRoots = ResolveOnlineRoots(onlineRootPaths);
+        var correlationId = $"op-delete-{Guid.NewGuid():N}";
 
-        var batchResult = await _executor.DeleteToRecycleBinAsync(
-            sourcePaths,
-            effectiveRoots,
-            ownerWindow,
-            progress,
-            cancellationToken);
+        long intentId;
+        using (var connection = SqliteDatabase.Open(DatabasePath))
+        {
+            var intentItems = sourcePaths.Select(sp =>
+            {
+                var norm = SafeFileOperationExecutor.Normalize(sp);
+                return (norm, (string?)null, (string?)null, (string?)null);
+            }).ToList();
 
-        return await CommitDeleteBatchAsync(
+            intentId = InsertIntent(connection, correlationId, "recycle_bin_delete", "auto_rename", intentItems);
+        }
+
+        FileOperationBatchResult batchResult;
+        try
+        {
+            batchResult = await _executor.DeleteToRecycleBinAsync(
+                sourcePaths,
+                effectiveRoots,
+                ownerWindow,
+                progress,
+                cancellationToken);
+
+            using (var connection = SqliteDatabase.Open(DatabasePath))
+            {
+                var updates = batchResult.Items.Select(item =>
+                    (SafeFileOperationExecutor.Normalize(item.SourcePath),
+                     item.ActualTargetPath,
+                     MapShellStatus(item.Status),
+                     item.Error)).ToList();
+                UpdateIntentShellCompleted(connection, intentId, updates);
+            }
+        }
+        catch (Exception ex)
+        {
+            using (var connection = SqliteDatabase.Open(DatabasePath))
+            {
+                var failedUpdates = sourcePaths.Select(sp =>
+                    (SafeFileOperationExecutor.Normalize(sp),
+                     (string?)null,
+                     "failed",
+                     (string?)ex.Message)).ToList();
+                UpdateIntentShellCompleted(connection, intentId, failedUpdates);
+            }
+            throw;
+        }
+
+        var commitResult = await CommitDeleteBatchAsync(
             batchResult.Items,
             effectiveRoots,
             cancellationToken);
+
+        using (var connection = SqliteDatabase.Open(DatabasePath))
+        {
+            var commitUpdates = commitResult.Items.Select(ci =>
+                (SafeFileOperationExecutor.Normalize(ci.SourcePath),
+                 ci.Succeeded ? "committed" : "failed",
+                 ci.Error)).ToList();
+            UpdateIntentCommitted(connection, intentId, commitUpdates);
+            PurgeCommittedIntents(connection);
+        }
+
+        return commitResult;
     }
 
     public Task<FileOperationCommitBatchResult> DeleteToRecycleBinAsync(
@@ -382,7 +589,7 @@ public sealed class FileOperationIndexCommitter
         }, cancellationToken);
     }
 
-    private static FileOperationCommitItemResult CommitSingleDeleteItem(
+    internal static FileOperationCommitItemResult CommitSingleDeleteItem(
         SqliteConnection connection,
         ManagedRoot root,
         string normalizedSource)
@@ -506,7 +713,7 @@ public sealed class FileOperationIndexCommitter
         }, cancellationToken);
     }
 
-    private FileOperationCommitItemResult CommitSingleItem(
+    internal FileOperationCommitItemResult CommitSingleItem(
         SqliteConnection connection,
         IReadOnlyList<ManagedRoot> roots,
         string normalizedSource,
@@ -535,22 +742,25 @@ public sealed class FileOperationIndexCommitter
         }
 
         var targetIdentity = _readIdentity(normalizedTarget);
+        var sourceIdentity = snapshot.DiskIdentity.IsStable
+            ? snapshot.DiskIdentity
+            : (snapshot.DbIdentity?.IsStable == true ? snapshot.DbIdentity : null);
 
         // Check for external replacement on same-volume move/rename
-        if (isMove && snapshot.DiskIdentity.IsStable && targetIdentity.IsStable)
+        if (isMove && sourceIdentity?.IsStable == true && targetIdentity.IsStable)
         {
             var isSameVolume = string.Equals(
                 targetIdentity.VolumeId,
-                snapshot.DiskIdentity.VolumeId,
+                sourceIdentity.VolumeId,
                 StringComparison.OrdinalIgnoreCase);
 
-            if (isSameVolume && !string.Equals(targetIdentity.FileId, snapshot.DiskIdentity.FileId, StringComparison.OrdinalIgnoreCase))
+            if (isSameVolume && !string.Equals(targetIdentity.FileId, sourceIdentity.FileId, StringComparison.OrdinalIgnoreCase))
             {
                 return new FileOperationCommitItemResult(
                     normalizedSource,
                     normalizedTarget,
                     FileOperationItemStatus.Failed,
-                    $"目标文件身份与源文件不匹配（期望 {snapshot.DiskIdentity.FileId}，实际 {targetIdentity.FileId}），可能已被外部替换，拒绝提交并请重新扫描。");
+                    $"目标文件身份与源文件不匹配（期望 {sourceIdentity.FileId}，实际 {targetIdentity.FileId}），可能已被外部替换，拒绝提交并请重新扫描。");
             }
         }
 
@@ -718,9 +928,16 @@ public sealed class FileOperationIndexCommitter
         TagService.ReplaceAutomaticTags(connection, transaction, persistedFileId, classification.AutomaticTags);
 
         // 4. Inherit or preserve user tags
+        var sourceIdentity = snapshot.DiskIdentity.IsStable
+            ? snapshot.DiskIdentity
+            : (snapshot.DbIdentity?.IsStable == true ? snapshot.DbIdentity : null);
+
         var isCrossVolumeOrCopy = !isMove ||
-            !string.Equals(targetIdentity.VolumeId, snapshot.DiskIdentity.VolumeId, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(targetIdentity.FileId, snapshot.DiskIdentity.FileId, StringComparison.OrdinalIgnoreCase);
+            sourceIdentity == null ||
+            !sourceIdentity.IsStable ||
+            !targetIdentity.IsStable ||
+            !string.Equals(targetIdentity.VolumeId, sourceIdentity.VolumeId, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(targetIdentity.FileId, sourceIdentity.FileId, StringComparison.OrdinalIgnoreCase);
 
         if (isCrossVolumeOrCopy)
         {
@@ -775,12 +992,14 @@ public sealed class FileOperationIndexCommitter
                 markSourceOffline.CommandText =
                     """
                     UPDATE files SET is_online = 0
-                    WHERE normalized_path = $sourcePath COLLATE NOCASE;
+                    WHERE normalized_path = $sourcePath COLLATE NOCASE
+                      AND id != $persistedFileId;
                     """;
                 markSourceOffline.Parameters.AddWithValue("$sourcePath", normalizedSource);
+                markSourceOffline.Parameters.AddWithValue("$persistedFileId", persistedFileId);
                 markSourceOffline.ExecuteNonQuery();
 
-                if (snapshot.DbFileId.HasValue)
+                if (snapshot.DbFileId.HasValue && snapshot.DbFileId.Value != persistedFileId)
                 {
                     using var markDbOffline = connection.CreateCommand();
                     markDbOffline.Transaction = transaction;
@@ -992,7 +1211,7 @@ public sealed class FileOperationIndexCommitter
         return QuerySourceSnapshot(connection, normalizedSource);
     }
 
-    private SourceSnapshot QuerySourceSnapshot(SqliteConnection connection, string normalizedSource)
+    internal SourceSnapshot QuerySourceSnapshot(SqliteConnection connection, string normalizedSource)
     {
         var diskIdentity = _readIdentity(normalizedSource);
         var isDirectory = _directoryExists(normalizedSource);
@@ -1122,7 +1341,7 @@ public sealed class FileOperationIndexCommitter
             .ToArray();
     }
 
-    private static IReadOnlyList<ManagedRoot> LoadRoots(SqliteConnection connection)
+    internal static IReadOnlyList<ManagedRoot> LoadRoots(SqliteConnection connection)
     {
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT id, path, status, last_error, last_checked_utc FROM roots;";
@@ -1149,7 +1368,7 @@ public sealed class FileOperationIndexCommitter
         return roots;
     }
 
-    private static ManagedRoot? FindMatchingRoot(IReadOnlyList<ManagedRoot> roots, string path)
+    internal static ManagedRoot? FindMatchingRoot(IReadOnlyList<ManagedRoot> roots, string path)
     {
         var normalizedPath = SafeFileOperationExecutor.Normalize(path);
         foreach (var root in roots)
@@ -1172,6 +1391,266 @@ public sealed class FileOperationIndexCommitter
 
     private static bool IsDirectorySeparator(char value) =>
         value == Path.DirectorySeparatorChar || value == Path.AltDirectorySeparatorChar;
+
+    internal static string MapCollisionPolicy(FileCollisionPolicy policy) => policy switch
+    {
+        FileCollisionPolicy.Overwrite => "overwrite",
+        FileCollisionPolicy.Skip => "skip",
+        _ => "auto_rename",
+    };
+
+    internal static string MapShellStatus(FileOperationItemStatus status) => status switch
+    {
+        FileOperationItemStatus.Completed => "completed",
+        FileOperationItemStatus.Skipped => "skipped",
+        FileOperationItemStatus.Canceled => "canceled",
+        _ => "failed",
+    };
+
+    public long InsertIntent(
+        SqliteConnection connection,
+        string correlationId,
+        string operationType,
+        string collisionPolicy,
+        IReadOnlyList<(string SourcePath, string? DestinationDirectory, string? TargetName, string? ExpectedTargetPath)> items)
+    {
+        var nowUtc = DateTime.UtcNow.ToString("O");
+        using var tx = connection.BeginTransaction();
+        long intentId;
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText =
+                """
+                INSERT INTO file_operation_intents (correlation_id, operation_type, collision_policy, status, created_utc)
+                VALUES ($correlationId, $operationType, $collisionPolicy, 'pending', $createdUtc)
+                RETURNING id;
+                """;
+            cmd.Parameters.AddWithValue("$correlationId", correlationId);
+            cmd.Parameters.AddWithValue("$operationType", operationType);
+            cmd.Parameters.AddWithValue("$collisionPolicy", collisionPolicy);
+            cmd.Parameters.AddWithValue("$createdUtc", nowUtc);
+            intentId = (long)cmd.ExecuteScalar()!;
+        }
+
+        foreach (var item in items)
+        {
+            using var itemCmd = connection.CreateCommand();
+            itemCmd.Transaction = tx;
+            itemCmd.CommandText =
+                """
+                INSERT INTO file_operation_intent_items (intent_id, source_path, destination_directory, target_name, expected_target_path, shell_status, commit_status)
+                VALUES ($intentId, $sourcePath, $destDir, $targetName, $expectedTarget, NULL, 'pending');
+                """;
+            itemCmd.Parameters.AddWithValue("$intentId", intentId);
+            itemCmd.Parameters.AddWithValue("$sourcePath", SafeFileOperationExecutor.Normalize(item.SourcePath));
+            itemCmd.Parameters.AddWithValue("$destDir", (object?)item.DestinationDirectory ?? DBNull.Value);
+            itemCmd.Parameters.AddWithValue("$targetName", (object?)item.TargetName ?? DBNull.Value);
+            itemCmd.Parameters.AddWithValue("$expectedTarget", (object?)item.ExpectedTargetPath ?? DBNull.Value);
+            itemCmd.ExecuteNonQuery();
+        }
+
+        tx.Commit();
+        return intentId;
+    }
+
+    public void UpdateIntentShellCompleted(
+        SqliteConnection connection,
+        long intentId,
+        IReadOnlyList<(string SourcePath, string? ActualTargetPath, string ShellStatus, string? Error)> itemUpdates)
+    {
+        using var tx = connection.BeginTransaction();
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "UPDATE file_operation_intents SET status = 'shell_completed' WHERE id = $intentId;";
+            cmd.Parameters.AddWithValue("$intentId", intentId);
+            cmd.ExecuteNonQuery();
+        }
+
+        foreach (var update in itemUpdates)
+        {
+            var normalizedSource = SafeFileOperationExecutor.Normalize(update.SourcePath);
+            var normalizedShellStatus = update.ShellStatus.ToLowerInvariant() switch
+            {
+                "completed" or "succeeded" => "completed",
+                "skipped" => "skipped",
+                "canceled" => "canceled",
+                _ => "failed",
+            };
+
+            using var itemCmd = connection.CreateCommand();
+            itemCmd.Transaction = tx;
+            itemCmd.CommandText =
+                """
+                UPDATE file_operation_intent_items SET
+                    actual_target_path = $actualTarget,
+                    shell_status = $shellStatus,
+                    error = $error
+                WHERE intent_id = $intentId AND source_path = $sourcePath COLLATE NOCASE;
+                """;
+            itemCmd.Parameters.AddWithValue("$intentId", intentId);
+            itemCmd.Parameters.AddWithValue("$actualTarget", (object?)update.ActualTargetPath ?? DBNull.Value);
+            itemCmd.Parameters.AddWithValue("$shellStatus", normalizedShellStatus);
+            itemCmd.Parameters.AddWithValue("$error", (object?)update.Error ?? DBNull.Value);
+            itemCmd.Parameters.AddWithValue("$sourcePath", normalizedSource);
+            itemCmd.ExecuteNonQuery();
+        }
+
+        tx.Commit();
+    }
+
+    public void UpdateIntentCommitted(
+        SqliteConnection connection,
+        long intentId,
+        IReadOnlyList<(string SourcePath, string CommitStatus, string? Error)> itemUpdates)
+    {
+        var nowUtc = DateTime.UtcNow.ToString("O");
+        using var tx = connection.BeginTransaction();
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText =
+                """
+                UPDATE file_operation_intents SET
+                    status = 'committed',
+                    completed_utc = $completedUtc
+                WHERE id = $intentId;
+                """;
+            cmd.Parameters.AddWithValue("$intentId", intentId);
+            cmd.Parameters.AddWithValue("$completedUtc", nowUtc);
+            cmd.ExecuteNonQuery();
+        }
+
+        foreach (var update in itemUpdates)
+        {
+            var normalizedSource = SafeFileOperationExecutor.Normalize(update.SourcePath);
+            using var itemCmd = connection.CreateCommand();
+            itemCmd.Transaction = tx;
+            itemCmd.CommandText =
+                """
+                UPDATE file_operation_intent_items SET
+                    commit_status = $commitStatus,
+                    error = coalesce($error, error)
+                WHERE intent_id = $intentId AND source_path = $sourcePath COLLATE NOCASE;
+                """;
+            itemCmd.Parameters.AddWithValue("$intentId", intentId);
+            itemCmd.Parameters.AddWithValue("$commitStatus", update.CommitStatus);
+            itemCmd.Parameters.AddWithValue("$error", (object?)update.Error ?? DBNull.Value);
+            itemCmd.Parameters.AddWithValue("$sourcePath", normalizedSource);
+            itemCmd.ExecuteNonQuery();
+        }
+
+        tx.Commit();
+    }
+
+    public void UpdateIntentIndeterminate(
+        SqliteConnection connection,
+        long intentId,
+        IReadOnlyList<(string SourcePath, string CommitStatus, string? Error)> itemUpdates)
+    {
+        var nowUtc = DateTime.UtcNow.ToString("O");
+        using var tx = connection.BeginTransaction();
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText =
+                """
+                UPDATE file_operation_intents SET
+                    status = 'indeterminate',
+                    completed_utc = $completedUtc
+                WHERE id = $intentId;
+                """;
+            cmd.Parameters.AddWithValue("$intentId", intentId);
+            cmd.Parameters.AddWithValue("$completedUtc", nowUtc);
+            cmd.ExecuteNonQuery();
+        }
+
+        foreach (var update in itemUpdates)
+        {
+            var normalizedSource = SafeFileOperationExecutor.Normalize(update.SourcePath);
+            using var itemCmd = connection.CreateCommand();
+            itemCmd.Transaction = tx;
+            itemCmd.CommandText =
+                """
+                UPDATE file_operation_intent_items SET
+                    commit_status = $commitStatus,
+                    error = coalesce($error, error)
+                WHERE intent_id = $intentId AND source_path = $sourcePath COLLATE NOCASE;
+                """;
+            itemCmd.Parameters.AddWithValue("$intentId", intentId);
+            itemCmd.Parameters.AddWithValue("$commitStatus", update.CommitStatus);
+            itemCmd.Parameters.AddWithValue("$error", (object?)update.Error ?? DBNull.Value);
+            itemCmd.Parameters.AddWithValue("$sourcePath", normalizedSource);
+            itemCmd.ExecuteNonQuery();
+        }
+
+        tx.Commit();
+    }
+
+    public string GetIntentStatus(SqliteConnection connection, long intentId)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT status FROM file_operation_intents WHERE id = $intentId;";
+        cmd.Parameters.AddWithValue("$intentId", intentId);
+        var result = cmd.ExecuteScalar();
+        return result?.ToString() ?? string.Empty;
+    }
+
+    public void PurgeCommittedIntents(
+        SqliteConnection connection,
+        int maxCommittedToRetain = 100,
+        int retentionDays = 14)
+    {
+        var cutoff = DateTime.UtcNow.AddDays(-retentionDays).ToString("O");
+        using var tx = connection.BeginTransaction();
+
+        // 1. Delete committed older than retentionDays
+        using (var deleteOldCmd = connection.CreateCommand())
+        {
+            deleteOldCmd.Transaction = tx;
+            deleteOldCmd.CommandText =
+                """
+                DELETE FROM file_operation_intents
+                WHERE status = 'committed' AND created_utc < $cutoff;
+                """;
+            deleteOldCmd.Parameters.AddWithValue("$cutoff", cutoff);
+            deleteOldCmd.ExecuteNonQuery();
+        }
+
+        // 2. Bound retention: keep at most maxCommittedToRetain committed intents
+        using (var boundCmd = connection.CreateCommand())
+        {
+            boundCmd.Transaction = tx;
+            boundCmd.CommandText =
+                """
+                DELETE FROM file_operation_intents
+                WHERE status = 'committed'
+                  AND id NOT IN (
+                      SELECT id FROM file_operation_intents
+                      WHERE status = 'committed'
+                      ORDER BY id DESC
+                      LIMIT $maxRetain
+                  );
+                """;
+            boundCmd.Parameters.AddWithValue("$maxRetain", maxCommittedToRetain);
+            boundCmd.ExecuteNonQuery();
+        }
+
+        // 3. Clean up orphaned intent items (in case FK cascade is off)
+        using (var orphanCmd = connection.CreateCommand())
+        {
+            orphanCmd.Transaction = tx;
+            orphanCmd.CommandText =
+                """
+                DELETE FROM file_operation_intent_items
+                WHERE intent_id NOT IN (SELECT id FROM file_operation_intents);
+                """;
+            orphanCmd.ExecuteNonQuery();
+        }
+
+        tx.Commit();
+    }
 
     internal sealed record SourceSnapshot(
         string SourcePath,

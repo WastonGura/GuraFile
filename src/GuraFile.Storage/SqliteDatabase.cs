@@ -4,7 +4,7 @@ namespace GuraFile.Storage;
 
 public static class SqliteDatabase
 {
-    public const int CurrentVersion = 6;
+    public const int CurrentVersion = 7;
 
     private static readonly string[] Migrations =
     [
@@ -175,6 +175,32 @@ public static class SqliteDatabase
             completed_utc TEXT
         );
         CREATE INDEX idx_scan_sessions_root_status ON scan_sessions(root_id, status);
+        """,
+        """
+        CREATE TABLE file_operation_intents (
+            id INTEGER PRIMARY KEY,
+            correlation_id TEXT NOT NULL,
+            operation_type TEXT NOT NULL CHECK (operation_type IN ('copy', 'move', 'rename', 'recycle_bin_delete')),
+            collision_policy TEXT NOT NULL DEFAULT 'auto_rename',
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'shell_completed', 'committed', 'indeterminate')),
+            created_utc TEXT NOT NULL,
+            completed_utc TEXT
+        );
+        CREATE INDEX idx_file_op_intents_status ON file_operation_intents(status);
+
+        CREATE TABLE file_operation_intent_items (
+            id INTEGER PRIMARY KEY,
+            intent_id INTEGER NOT NULL REFERENCES file_operation_intents(id) ON DELETE CASCADE,
+            source_path TEXT NOT NULL,
+            destination_directory TEXT,
+            target_name TEXT,
+            expected_target_path TEXT,
+            actual_target_path TEXT,
+            shell_status TEXT CHECK (shell_status IN ('completed', 'failed', 'skipped', 'canceled', 'unknown')),
+            commit_status TEXT CHECK (commit_status IN ('pending', 'committed', 'failed', 'indeterminate')),
+            error TEXT
+        );
+        CREATE INDEX idx_file_op_intent_items_intent_id ON file_operation_intent_items(intent_id);
         """
     ];
 
