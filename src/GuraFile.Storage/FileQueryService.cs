@@ -75,13 +75,20 @@ public sealed class FileQueryService
                 _ => throw new ArgumentOutOfRangeException(nameof(query), query.SortBy, "Unsupported sort column.")
             };
             var direction = query.Descending ? "DESC" : "ASC";
+            var joinFts = false;
             if (!string.IsNullOrWhiteSpace(query.Search))
             {
-                filters.Add(
-                    "(f.name LIKE $search ESCAPE '\\' COLLATE NOCASE " +
-                    "OR f.path LIKE $search ESCAPE '\\' COLLATE NOCASE " +
-                    "OR f.extension LIKE $search ESCAPE '\\' COLLATE NOCASE)");
-                command.Parameters.AddWithValue("$search", $"%{EscapeLike(query.Search.Trim())}%");
+                var ftsQuery = FtsQueryBuilder.Build(query.Search);
+                if (ftsQuery is not null)
+                {
+                    joinFts = true;
+                    filters.Add("fts.files_fts MATCH $ftsQuery");
+                    command.Parameters.AddWithValue("$ftsQuery", ftsQuery);
+                }
+                else
+                {
+                    filters.Add("0 = 1");
+                }
             }
 
             var tagIds = query.TagIds?.Distinct().ToArray() ?? [];
@@ -125,11 +132,14 @@ public sealed class FileQueryService
                 }
             }
 
+            var fromClause = joinFts
+                ? "FROM files f JOIN files_fts fts ON fts.rowid = f.id"
+                : "FROM files f";
             var where = filters.Count == 0 ? "" : $"WHERE {string.Join(" AND ", filters)}";
             command.CommandText =
                 $"""
                 SELECT f.id, f.name, f.path, f.extension, f.size, f.modified_utc, f.is_online, f.identity_diagnostic, f.identity_kind
-                FROM files f
+                {fromClause}
                 {where}
                 ORDER BY {sortColumn} {direction}, f.id {direction};
                 """;
@@ -160,6 +170,13 @@ public sealed class FileQueryService
         }
     }
 
+    public Task RebuildSearchIndexAsync(CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            using var connection = SqliteDatabase.Open(DatabasePath);
+            SqliteDatabase.RebuildSearchIndex(connection);
+        }, cancellationToken);
+
     private static DateTimeOffset ParseModifiedUtc(string raw)
     {
         if (DateTimeOffset.TryParseExact(raw, "O", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed))
@@ -169,9 +186,4 @@ public sealed class FileQueryService
 
         return DateTimeOffset.Parse(raw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
     }
-
-    private static string EscapeLike(string value) =>
-        value.Replace("\\", "\\\\", StringComparison.Ordinal)
-            .Replace("%", "\\%", StringComparison.Ordinal)
-            .Replace("_", "\\_", StringComparison.Ordinal);
 }

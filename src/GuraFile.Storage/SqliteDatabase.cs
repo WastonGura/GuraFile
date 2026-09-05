@@ -4,7 +4,7 @@ namespace GuraFile.Storage;
 
 public static class SqliteDatabase
 {
-    public const int CurrentVersion = 8;
+    public const int CurrentVersion = 9;
 
     private static readonly string[] Migrations =
     [
@@ -204,6 +204,29 @@ public static class SqliteDatabase
         """,
         """
         CREATE INDEX idx_files_name_nocase ON files(name COLLATE NOCASE);
+        """,
+        """
+        CREATE VIRTUAL TABLE files_fts USING fts5(
+            name,
+            path,
+            content='files',
+            content_rowid='id'
+        );
+
+        CREATE TRIGGER files_ai AFTER INSERT ON files BEGIN
+            INSERT INTO files_fts(rowid, name, path) VALUES (new.id, new.name, new.path);
+        END;
+
+        CREATE TRIGGER files_ad AFTER DELETE ON files BEGIN
+            INSERT INTO files_fts(files_fts, rowid, name, path) VALUES('delete', old.id, old.name, old.path);
+        END;
+
+        CREATE TRIGGER files_au AFTER UPDATE OF name, path ON files BEGIN
+            INSERT INTO files_fts(files_fts, rowid, name, path) VALUES('delete', old.id, old.name, old.path);
+            INSERT INTO files_fts(rowid, name, path) VALUES (new.id, new.name, new.path);
+        END;
+
+        INSERT INTO files_fts(rowid, name, path) SELECT id, name, path FROM files;
         """
     ];
 
@@ -266,6 +289,12 @@ public static class SqliteDatabase
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         return command.ExecuteScalar();
+    }
+
+    public static void RebuildSearchIndex(SqliteConnection connection, SqliteTransaction? transaction = null)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        Execute(connection, "INSERT INTO files_fts(files_fts) VALUES('rebuild');", transaction);
     }
 
     private static void Execute(SqliteConnection connection, string sql, SqliteTransaction? transaction = null)
