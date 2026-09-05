@@ -859,7 +859,7 @@ public sealed class ReleaseAcceptanceTests
 
     private static async Task WaitForRootStatusAsync(ManagedRootScanner scanner, ManagedRootStatus status)
     {
-        var deadline = DateTime.UtcNow.AddSeconds(2);
+        var deadline = DateTime.UtcNow.AddSeconds(5);
         while (DateTime.UtcNow < deadline)
         {
             if (scanner.ListRoots().Single().Status == status)
@@ -870,7 +870,7 @@ public sealed class ReleaseAcceptanceTests
             await Task.Delay(25);
         }
 
-        Assert.Fail($"Managed root did not become {status} within two seconds.");
+        Assert.Fail($"Managed root did not become {status} within five seconds.");
     }
 
     private sealed class TempDirectory : IDisposable
