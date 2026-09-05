@@ -146,7 +146,7 @@ public sealed class FileQueryService
                     reader.GetString(2),
                     reader.GetString(3),
                     reader.GetInt64(4),
-                    DateTimeOffset.Parse(reader.GetString(5), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                    ParseModifiedUtc(reader.GetString(5)),
                     reader.GetInt64(6) != 0,
                     reader.IsDBNull(7) ? null : reader.GetString(7),
                     reader.IsDBNull(8) ? "stable" : reader.GetString(8)));
@@ -158,6 +158,16 @@ public sealed class FileQueryService
         {
             throw new OperationCanceledException(cancellationToken);
         }
+    }
+
+    private static DateTimeOffset ParseModifiedUtc(string raw)
+    {
+        if (DateTimeOffset.TryParseExact(raw, "O", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed))
+        {
+            return parsed;
+        }
+
+        return DateTimeOffset.Parse(raw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
     }
 
     private static string EscapeLike(string value) =>
