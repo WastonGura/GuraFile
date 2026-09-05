@@ -297,4 +297,44 @@ public sealed class MainWindowSmokeTests
         StringAssert.Contains(source, "RollingBackupDialogOpened");
         StringAssert.Contains(source, "RollingBackupRestoreRequested");
     }
+
+    [TestMethod]
+    public void MainWindowExposesSavedFilterViewControls()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "GuraFile", "MainWindow.xaml"));
+        var document = XDocument.Load(path);
+        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var names = document.Descendants()
+            .Select(element => element.Attribute(x + "Name")?.Value)
+            .Where(name => name is not null)
+            .ToHashSet();
+
+        CollectionAssert.IsSubsetOf(
+            new[]
+            {
+                "ViewNameBox",
+                "SavedFilterViewsList",
+                "SaveViewButton",
+                "UpdateViewButton",
+                "RenameViewButton",
+                "DeleteViewButton",
+                "ViewStatusText"
+            },
+            names.ToArray());
+
+        var viewsList = document.Descendants()
+            .Single(element => element.Attribute(x + "Name")?.Value == "SavedFilterViewsList");
+        Assert.AreEqual("DisplayName", viewsList.Attribute("DisplayMemberPath")?.Value);
+        Assert.AreEqual("Single", viewsList.Attribute("SelectionMode")?.Value);
+
+        var source = File.ReadAllText(Path.ChangeExtension(path, ".xaml.cs"));
+        StringAssert.Contains(source, "_savedFilterViews");
+        StringAssert.Contains(source, "SavedFilterViewsList_SelectionChanged");
+        StringAssert.Contains(source, "SaveViewButton_Click");
+        StringAssert.Contains(source, "UpdateViewButton_Click");
+        StringAssert.Contains(source, "RenameViewButton_Click");
+        StringAssert.Contains(source, "DeleteViewButton_Click");
+        StringAssert.Contains(source, "ApplySavedFilterViewAsync");
+    }
 }

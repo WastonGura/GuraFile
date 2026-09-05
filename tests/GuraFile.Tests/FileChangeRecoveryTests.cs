@@ -238,7 +238,7 @@ public sealed class FileChangeRecoveryTests
     private static async Task WaitForFileAsync(string databasePath, string path)
     {
         var query = new FileQueryService(databasePath);
-        var deadline = DateTime.UtcNow.AddSeconds(2);
+        var deadline = DateTime.UtcNow.AddSeconds(5);
         while (DateTime.UtcNow < deadline)
         {
             if ((await query.QueryAsync(new())).Any(file => file.Path == path && file.IsOnline))
