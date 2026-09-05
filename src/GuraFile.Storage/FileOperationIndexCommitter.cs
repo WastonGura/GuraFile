@@ -597,24 +597,27 @@ public sealed class FileOperationIndexCommitter
         try
         {
             using var transaction = connection.BeginTransaction();
-            var prefix = Path.EndsInDirectorySeparator(normalizedSource)
-                ? normalizedSource
-                : normalizedSource + Path.DirectorySeparatorChar;
+            var (prefix, prefixUpper) = ManagedRootScanner.GetPrefixBounds(normalizedSource);
 
-            using (var markMissing = connection.CreateCommand())
+            using (var markExact = connection.CreateCommand())
             {
-                markMissing.Transaction = transaction;
-                markMissing.CommandText =
-                    """
-                    UPDATE files SET is_online = 0
-                    WHERE root_id = $rootId
-                      AND is_online = 1
-                      AND (normalized_path = $path COLLATE NOCASE OR substr(normalized_path, 1, length($prefix)) = $prefix COLLATE NOCASE);
-                    """;
-                markMissing.Parameters.AddWithValue("$rootId", root.Id);
-                markMissing.Parameters.AddWithValue("$path", normalizedSource);
-                markMissing.Parameters.AddWithValue("$prefix", prefix);
-                markMissing.ExecuteNonQuery();
+                markExact.Transaction = transaction;
+                markExact.CommandText =
+                    "UPDATE files SET is_online = 0 WHERE root_id = $rootId AND is_online = 1 AND normalized_path = $path COLLATE NOCASE;";
+                markExact.Parameters.AddWithValue("$rootId", root.Id);
+                markExact.Parameters.AddWithValue("$path", normalizedSource);
+                markExact.ExecuteNonQuery();
+            }
+
+            using (var markRange = connection.CreateCommand())
+            {
+                markRange.Transaction = transaction;
+                markRange.CommandText =
+                    "UPDATE files SET is_online = 0 WHERE root_id = $rootId AND is_online = 1 AND normalized_path >= $prefix COLLATE NOCASE AND normalized_path < $prefixUpper COLLATE NOCASE;";
+                markRange.Parameters.AddWithValue("$rootId", root.Id);
+                markRange.Parameters.AddWithValue("$prefix", prefix);
+                markRange.Parameters.AddWithValue("$prefixUpper", prefixUpper);
+                markRange.ExecuteNonQuery();
             }
 
             transaction.Commit();
@@ -835,13 +838,21 @@ public sealed class FileOperationIndexCommitter
         }
 
         // 2. Mark any descendants offline if target path was previously a directory
+        var (descPrefix, descPrefixUpper) = ManagedRootScanner.GetPrefixBounds(normalizedTarget);
         using (var releaseDescendants = connection.CreateCommand())
         {
             releaseDescendants.Transaction = transaction;
             releaseDescendants.CommandText =
-                "UPDATE files SET is_online = 0 WHERE root_id = $rootId AND is_online = 1 AND substr(normalized_path, 1, length($prefix)) = $prefix COLLATE NOCASE;";
+                """
+                UPDATE files SET is_online = 0
+                WHERE root_id = $rootId
+                  AND is_online = 1
+                  AND normalized_path >= $prefix COLLATE NOCASE
+                  AND normalized_path < $prefixUpper COLLATE NOCASE;
+                """;
             releaseDescendants.Parameters.AddWithValue("$rootId", targetRoot.Id);
-            releaseDescendants.Parameters.AddWithValue("$prefix", normalizedTarget + Path.DirectorySeparatorChar);
+            releaseDescendants.Parameters.AddWithValue("$prefix", descPrefix);
+            releaseDescendants.Parameters.AddWithValue("$prefixUpper", descPrefixUpper);
             releaseDescendants.ExecuteNonQuery();
         }
 
@@ -1047,24 +1058,30 @@ public sealed class FileOperationIndexCommitter
             var sourceRoot = FindMatchingRoot(LoadRoots(connection), normalizedSource);
             if (sourceRoot != null)
             {
-                var prefix = Path.EndsInDirectorySeparator(normalizedSource)
-                    ? normalizedSource
-                    : normalizedSource + Path.DirectorySeparatorChar;
+                var (prefix, prefixUpper) = ManagedRootScanner.GetPrefixBounds(normalizedSource);
 
                 using var transaction = connection.BeginTransaction();
-                using var markMissing = connection.CreateCommand();
-                markMissing.Transaction = transaction;
-                markMissing.CommandText =
-                    """
-                    UPDATE files SET is_online = 0
-                    WHERE root_id = $rootId
-                      AND is_online = 1
-                      AND (normalized_path = $path COLLATE NOCASE OR substr(normalized_path, 1, length($prefix)) = $prefix COLLATE NOCASE);
-                    """;
-                markMissing.Parameters.AddWithValue("$rootId", sourceRoot.Id);
-                markMissing.Parameters.AddWithValue("$path", normalizedSource);
-                markMissing.Parameters.AddWithValue("$prefix", prefix);
-                markMissing.ExecuteNonQuery();
+                using (var markExact = connection.CreateCommand())
+                {
+                    markExact.Transaction = transaction;
+                    markExact.CommandText =
+                        "UPDATE files SET is_online = 0 WHERE root_id = $rootId AND is_online = 1 AND normalized_path = $path COLLATE NOCASE;";
+                    markExact.Parameters.AddWithValue("$rootId", sourceRoot.Id);
+                    markExact.Parameters.AddWithValue("$path", normalizedSource);
+                    markExact.ExecuteNonQuery();
+                }
+
+                using (var markRange = connection.CreateCommand())
+                {
+                    markRange.Transaction = transaction;
+                    markRange.CommandText =
+                        "UPDATE files SET is_online = 0 WHERE root_id = $rootId AND is_online = 1 AND normalized_path >= $prefix COLLATE NOCASE AND normalized_path < $prefixUpper COLLATE NOCASE;";
+                    markRange.Parameters.AddWithValue("$rootId", sourceRoot.Id);
+                    markRange.Parameters.AddWithValue("$prefix", prefix);
+                    markRange.Parameters.AddWithValue("$prefixUpper", prefixUpper);
+                    markRange.ExecuteNonQuery();
+                }
+
                 transaction.Commit();
             }
         }
@@ -1080,9 +1097,7 @@ public sealed class FileOperationIndexCommitter
         string sourceDir,
         string targetDir)
     {
-        var targetPrefix = Path.EndsInDirectorySeparator(targetDir)
-            ? targetDir
-            : targetDir + Path.DirectorySeparatorChar;
+        var (targetPrefix, targetPrefixUpper) = ManagedRootScanner.GetPrefixBounds(targetDir);
 
         var targetFiles = new List<(long Id, string Path)>();
         using (var cmd = connection.CreateCommand())
@@ -1091,11 +1106,15 @@ public sealed class FileOperationIndexCommitter
                 """
                 SELECT id, normalized_path
                 FROM files
-                WHERE (normalized_path = $targetDir COLLATE NOCASE OR substr(normalized_path, 1, length($prefix)) = $prefix COLLATE NOCASE)
-                  AND is_online = 1;
+                WHERE is_online = 1 AND normalized_path = $targetDir COLLATE NOCASE
+                UNION ALL
+                SELECT id, normalized_path
+                FROM files
+                WHERE is_online = 1 AND normalized_path >= $prefix COLLATE NOCASE AND normalized_path < $prefixUpper COLLATE NOCASE;
                 """;
             cmd.Parameters.AddWithValue("$targetDir", targetDir);
             cmd.Parameters.AddWithValue("$prefix", targetPrefix);
+            cmd.Parameters.AddWithValue("$prefixUpper", targetPrefixUpper);
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {

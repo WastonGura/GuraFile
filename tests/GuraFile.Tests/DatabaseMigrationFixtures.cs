@@ -6,7 +6,7 @@ namespace GuraFile.Tests;
 public static class DatabaseMigrationFixtures
 {
     public const int MinHistoricalVersion = 1;
-    public const int MaxHistoricalVersion = 7;
+    public const int MaxHistoricalVersion = 8;
 
     public sealed class TempFixtureDatabase : IDisposable
     {
@@ -69,8 +69,11 @@ public static class DatabaseMigrationFixtures
             case 7:
                 CreateVersion7Database(path);
                 break;
+            case 8:
+                CreateVersion8Database(path);
+                break;
             default:
-                throw new ArgumentOutOfRangeException(nameof(version), version, $"Unsupported fixture version {version}. Supported: 1..7");
+                throw new ArgumentOutOfRangeException(nameof(version), version, $"Unsupported fixture version {version}. Supported: 1..8");
         }
     }
 
@@ -431,6 +434,18 @@ public static class DatabaseMigrationFixtures
                 transaction);
 
             transaction.Commit();
+        }
+
+        return path;
+    }
+
+    public static string CreateVersion8Database(string? path = null)
+    {
+        path = CreateVersion7Database(path);
+
+        using (var connection = SqliteDatabase.Open(path, 8))
+        {
+            // Migrates 7 -> 8: idx_files_name_nocase created
         }
 
         return path;

@@ -74,6 +74,7 @@ public sealed class ManagedRootScanner
     private readonly Func<string, string[]> _getFileSystemEntries;
     private readonly Func<string, FileAttributes> _getAttributes;
     private readonly Func<string, FileTypeClassification> _classify;
+    private readonly Func<string, (long Size, DateTimeOffset ModifiedUtc)>? _readFileMetadata;
     private readonly DiagnosticLogger _logger;
 
     internal Action? OnBeforeMarkMissing { get; set; }
@@ -118,7 +119,8 @@ public sealed class ManagedRootScanner
         Func<string, string[]> getFileSystemEntries,
         Func<string, FileAttributes> getAttributes,
         Func<string, FileTypeClassification> classify,
-        DiagnosticLogger? logger = null)
+        DiagnosticLogger? logger = null,
+        Func<string, (long Size, DateTimeOffset ModifiedUtc)>? readFileMetadata = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(readIdentity);
@@ -131,6 +133,7 @@ public sealed class ManagedRootScanner
         _getAttributes = getAttributes;
         _classify = classify;
         _logger = logger ?? DiagnosticLogger.Default;
+        _readFileMetadata = readFileMetadata;
         Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);
         using var _ = SqliteDatabase.Open(DatabasePath);
     }
@@ -1059,8 +1062,20 @@ public sealed class ManagedRootScanner
 
     private FileRecord ReadFileRecord(string path)
     {
+        var fullPath = Normalize(path);
+        if (_readFileMetadata is not null)
+        {
+            var meta = _readFileMetadata(fullPath);
+            return new(
+                _readIdentity(fullPath),
+                fullPath,
+                Path.GetFileName(fullPath),
+                Path.GetExtension(fullPath),
+                meta.Size,
+                meta.ModifiedUtc.ToString("O"));
+        }
+
         var file = new FileInfo(path);
-        var fullPath = Normalize(file.FullName);
         return new(
             _readIdentity(fullPath),
             fullPath,
@@ -1078,36 +1093,120 @@ public sealed class ManagedRootScanner
         ICollection<ScanFailure> failures)
     {
         var prepared = new List<PreparedFile>(files.Count);
-        foreach (var file in files)
+
+        using (var readExistingCmd = connection.CreateCommand())
         {
-            var existing = ReadExistingFile(connection, file.Identity);
-            FileTypeClassification? classification = null;
-            if (existing is null ||
-                !string.Equals(existing.Extension, file.Extension, StringComparison.OrdinalIgnoreCase) ||
-                existing.Size != file.Size ||
-                !string.Equals(existing.ModifiedUtc, file.ModifiedUtc, StringComparison.Ordinal))
+            readExistingCmd.CommandText =
+                """
+                SELECT extension, size, modified_utc
+                FROM files
+                WHERE volume_id = $volumeId AND file_id = $fileId;
+                """;
+            var pVol = readExistingCmd.Parameters.Add("$volumeId", SqliteType.Text);
+            var pFid = readExistingCmd.Parameters.Add("$fileId", SqliteType.Text);
+
+            foreach (var file in files)
             {
-                try
+                pVol.Value = file.Identity.VolumeId;
+                pFid.Value = file.Identity.FileId;
+                ExistingFile? existing = null;
+                using (var reader = readExistingCmd.ExecuteReader())
                 {
-                    classification = _classify(file.Path);
-                    if (!classification.HasConflict && !string.IsNullOrWhiteSpace(classification.Diagnostic))
+                    if (reader.Read())
                     {
-                        failures.Add(new(file.Path, classification.Diagnostic));
+                        existing = new(reader.GetString(0), reader.GetInt64(1), reader.GetString(2));
                     }
                 }
-                catch (Exception exception) when (IsClassificationError(exception))
-                {
-                    failures.Add(new(file.Path, $"类型识别失败：{exception.Message}"));
-                }
-            }
 
-            prepared.Add(new(file, existing is not null, classification));
+                FileTypeClassification? classification = null;
+                if (existing is null ||
+                    !string.Equals(existing.Extension, file.Extension, StringComparison.OrdinalIgnoreCase) ||
+                    existing.Size != file.Size ||
+                    !string.Equals(existing.ModifiedUtc, file.ModifiedUtc, StringComparison.Ordinal))
+                {
+                    try
+                    {
+                        classification = _classify(file.Path);
+                        if (!classification.HasConflict && !string.IsNullOrWhiteSpace(classification.Diagnostic))
+                        {
+                            failures.Add(new(file.Path, classification.Diagnostic));
+                        }
+                    }
+                    catch (Exception exception) when (IsClassificationError(exception))
+                    {
+                        failures.Add(new(file.Path, $"类型识别失败：{exception.Message}"));
+                    }
+                }
+
+                prepared.Add(new(file, existing is not null, classification));
+            }
         }
 
         using var transaction = connection.BeginTransaction();
         var added = 0;
         var updated = 0;
         var missing = 0;
+
+        using var releaseDescendants = connection.CreateCommand();
+        releaseDescendants.Transaction = transaction;
+        releaseDescendants.CommandText =
+            """
+            UPDATE files SET is_online = 0
+            WHERE root_id = $rootId
+              AND is_online = 1
+              AND normalized_path >= $prefix COLLATE NOCASE
+              AND normalized_path < $prefixUpper COLLATE NOCASE;
+            """;
+        var pRelRootId = releaseDescendants.Parameters.Add("$rootId", SqliteType.Integer);
+        var pRelPrefix = releaseDescendants.Parameters.Add("$prefix", SqliteType.Text);
+        var pRelPrefixUpper = releaseDescendants.Parameters.Add("$prefixUpper", SqliteType.Text);
+
+        using var releasePath = connection.CreateCommand();
+        releasePath.Transaction = transaction;
+        releasePath.CommandText =
+            """
+            UPDATE files SET is_online = 0
+            WHERE normalized_path = $normalizedPath COLLATE NOCASE
+              AND is_online = 1
+              AND NOT (volume_id = $volumeId AND file_id = $fileId);
+            """;
+        var pRelNormPath = releasePath.Parameters.Add("$normalizedPath", SqliteType.Text);
+        var pRelVolId = releasePath.Parameters.Add("$volumeId", SqliteType.Text);
+        var pRelFileId = releasePath.Parameters.Add("$fileId", SqliteType.Text);
+
+        using var insertCmd = connection.CreateCommand();
+        insertCmd.Transaction = transaction;
+        insertCmd.CommandText =
+            """
+            INSERT INTO files (root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, identity_diagnostic, is_online, scan_token)
+            VALUES ($rootId, $volumeId, $fileId, $path, $normalizedPath, $name, $extension, $size, $modifiedUtc, $identityKind, $identityDiagnostic, 1, $scanToken)
+            ON CONFLICT(volume_id, file_id) DO UPDATE SET
+                root_id = excluded.root_id,
+                path = excluded.path,
+                normalized_path = excluded.normalized_path,
+                name = excluded.name,
+                extension = excluded.extension,
+                size = excluded.size,
+                modified_utc = excluded.modified_utc,
+                identity_kind = excluded.identity_kind,
+                identity_diagnostic = excluded.identity_diagnostic,
+                is_online = 1,
+                scan_token = excluded.scan_token
+            RETURNING id;
+            """;
+        var pInsRootId = insertCmd.Parameters.Add("$rootId", SqliteType.Integer);
+        var pInsVolId = insertCmd.Parameters.Add("$volumeId", SqliteType.Text);
+        var pInsFileId = insertCmd.Parameters.Add("$fileId", SqliteType.Text);
+        var pInsPath = insertCmd.Parameters.Add("$path", SqliteType.Text);
+        var pInsNormPath = insertCmd.Parameters.Add("$normalizedPath", SqliteType.Text);
+        var pInsName = insertCmd.Parameters.Add("$name", SqliteType.Text);
+        var pInsExt = insertCmd.Parameters.Add("$extension", SqliteType.Text);
+        var pInsSize = insertCmd.Parameters.Add("$size", SqliteType.Integer);
+        var pInsModUtc = insertCmd.Parameters.Add("$modifiedUtc", SqliteType.Text);
+        var pInsKind = insertCmd.Parameters.Add("$identityKind", SqliteType.Text);
+        var pInsDiag = insertCmd.Parameters.Add("$identityDiagnostic", SqliteType.Text);
+        var pInsScanToken = insertCmd.Parameters.Add("$scanToken", SqliteType.Text);
+
         foreach (var preparedFile in prepared)
         {
             var file = preparedFile.File;
@@ -1121,65 +1220,31 @@ public sealed class ManagedRootScanner
                 added++;
             }
 
-            using (var releaseDescendants = connection.CreateCommand())
-            {
-                releaseDescendants.Transaction = transaction;
-                releaseDescendants.CommandText =
-                    "UPDATE files SET is_online = 0 WHERE root_id = $rootId AND is_online = 1 AND substr(normalized_path, 1, length($prefix)) = $prefix COLLATE NOCASE;";
-                releaseDescendants.Parameters.AddWithValue("$rootId", rootId);
-                releaseDescendants.Parameters.AddWithValue("$prefix", file.Path + Path.DirectorySeparatorChar);
-                missing += releaseDescendants.ExecuteNonQuery();
-            }
+            var (prefix, prefixUpper) = GetPrefixBounds(file.Path);
+            pRelRootId.Value = rootId;
+            pRelPrefix.Value = prefix;
+            pRelPrefixUpper.Value = prefixUpper;
+            missing += releaseDescendants.ExecuteNonQuery();
 
-            using (var releasePath = connection.CreateCommand())
-            {
-                releasePath.Transaction = transaction;
-                releasePath.CommandText =
-                    """
-                    UPDATE files SET is_online = 0
-                    WHERE normalized_path = $normalizedPath COLLATE NOCASE
-                      AND is_online = 1
-                      AND NOT (volume_id = $volumeId AND file_id = $fileId);
-                    """;
-                releasePath.Parameters.AddWithValue("$normalizedPath", file.Path);
-                releasePath.Parameters.AddWithValue("$volumeId", file.Identity.VolumeId);
-                releasePath.Parameters.AddWithValue("$fileId", file.Identity.FileId);
-                missing += releasePath.ExecuteNonQuery();
-            }
+            pRelNormPath.Value = file.Path;
+            pRelVolId.Value = file.Identity.VolumeId;
+            pRelFileId.Value = file.Identity.FileId;
+            missing += releasePath.ExecuteNonQuery();
 
-            using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText =
-                """
-                INSERT INTO files (root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, identity_diagnostic, is_online, scan_token)
-                VALUES ($rootId, $volumeId, $fileId, $path, $normalizedPath, $name, $extension, $size, $modifiedUtc, $identityKind, $identityDiagnostic, 1, $scanToken)
-                ON CONFLICT(volume_id, file_id) DO UPDATE SET
-                    root_id = excluded.root_id,
-                    path = excluded.path,
-                    normalized_path = excluded.normalized_path,
-                    name = excluded.name,
-                    extension = excluded.extension,
-                    size = excluded.size,
-                    modified_utc = excluded.modified_utc,
-                    identity_kind = excluded.identity_kind,
-                    identity_diagnostic = excluded.identity_diagnostic,
-                    is_online = 1,
-                    scan_token = excluded.scan_token
-                RETURNING id;
-                """;
-            command.Parameters.AddWithValue("$rootId", rootId);
-            command.Parameters.AddWithValue("$volumeId", file.Identity.VolumeId);
-            command.Parameters.AddWithValue("$fileId", file.Identity.FileId);
-            command.Parameters.AddWithValue("$path", file.Path);
-            command.Parameters.AddWithValue("$normalizedPath", file.Path);
-            command.Parameters.AddWithValue("$name", file.Name);
-            command.Parameters.AddWithValue("$extension", file.Extension);
-            command.Parameters.AddWithValue("$size", file.Size);
-            command.Parameters.AddWithValue("$modifiedUtc", file.ModifiedUtc);
-            command.Parameters.AddWithValue("$identityKind", file.Identity.IsStable ? "stable" : "path");
-            command.Parameters.AddWithValue("$identityDiagnostic", (object?)file.Identity.Diagnostic ?? DBNull.Value);
-            command.Parameters.AddWithValue("$scanToken", scanToken);
-            var persistedFileId = (long)command.ExecuteScalar()!;
+            pInsRootId.Value = rootId;
+            pInsVolId.Value = file.Identity.VolumeId;
+            pInsFileId.Value = file.Identity.FileId;
+            pInsPath.Value = file.Path;
+            pInsNormPath.Value = file.Path;
+            pInsName.Value = file.Name;
+            pInsExt.Value = file.Extension;
+            pInsSize.Value = file.Size;
+            pInsModUtc.Value = file.ModifiedUtc;
+            pInsKind.Value = file.Identity.IsStable ? "stable" : "path";
+            pInsDiag.Value = (object?)file.Identity.Diagnostic ?? DBNull.Value;
+            pInsScanToken.Value = scanToken;
+            var persistedFileId = (long)insertCmd.ExecuteScalar()!;
+
             if (preparedFile.Classification is not null)
             {
                 TagService.ReplaceAutomaticTags(
@@ -1221,17 +1286,34 @@ public sealed class ManagedRootScanner
         return command.ExecuteNonQuery();
     }
 
+    internal static (string Prefix, string PrefixUpper) GetPrefixBounds(string path)
+    {
+        var prefix = Path.EndsInDirectorySeparator(path) ? path : path + Path.DirectorySeparatorChar;
+        var prefixUpper = prefix[..^1] + (char)(prefix[^1] + 1);
+        return (prefix, prefixUpper);
+    }
+
     private static int MarkPathMissing(SqliteConnection connection, long rootId, string path)
     {
+        var (prefix, prefixUpper) = GetPrefixBounds(path);
         using var transaction = connection.BeginTransaction();
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText =
-            "UPDATE files SET is_online = 0 WHERE root_id = $rootId AND is_online = 1 AND (normalized_path = $path COLLATE NOCASE OR substr(normalized_path, 1, length($prefix)) = $prefix COLLATE NOCASE);";
-        command.Parameters.AddWithValue("$rootId", rootId);
-        command.Parameters.AddWithValue("$path", path);
-        command.Parameters.AddWithValue("$prefix", Path.EndsInDirectorySeparator(path) ? path : path + Path.DirectorySeparatorChar);
-        var missing = command.ExecuteNonQuery();
+        using var cmdExact = connection.CreateCommand();
+        cmdExact.Transaction = transaction;
+        cmdExact.CommandText =
+            "UPDATE files SET is_online = 0 WHERE root_id = $rootId AND is_online = 1 AND normalized_path = $path COLLATE NOCASE;";
+        cmdExact.Parameters.AddWithValue("$rootId", rootId);
+        cmdExact.Parameters.AddWithValue("$path", path);
+        var missing = cmdExact.ExecuteNonQuery();
+
+        using var cmdRange = connection.CreateCommand();
+        cmdRange.Transaction = transaction;
+        cmdRange.CommandText =
+            "UPDATE files SET is_online = 0 WHERE root_id = $rootId AND is_online = 1 AND normalized_path >= $prefix COLLATE NOCASE AND normalized_path < $prefixUpper COLLATE NOCASE;";
+        cmdRange.Parameters.AddWithValue("$rootId", rootId);
+        cmdRange.Parameters.AddWithValue("$prefix", prefix);
+        cmdRange.Parameters.AddWithValue("$prefixUpper", prefixUpper);
+        missing += cmdRange.ExecuteNonQuery();
+
         transaction.Commit();
         return missing;
     }
@@ -1242,19 +1324,27 @@ public sealed class ManagedRootScanner
         string directoryPath,
         string scanToken)
     {
-        var prefix = Path.EndsInDirectorySeparator(directoryPath)
-            ? directoryPath
-            : directoryPath + Path.DirectorySeparatorChar;
+        var (prefix, prefixUpper) = GetPrefixBounds(directoryPath);
         using var transaction = connection.BeginTransaction();
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText =
-            "UPDATE files SET is_online = 0 WHERE root_id = $rootId AND is_online = 1 AND scan_token <> $scanToken AND (normalized_path = $path COLLATE NOCASE OR substr(normalized_path, 1, length($prefix)) = $prefix COLLATE NOCASE);";
-        command.Parameters.AddWithValue("$rootId", rootId);
-        command.Parameters.AddWithValue("$scanToken", scanToken);
-        command.Parameters.AddWithValue("$path", directoryPath);
-        command.Parameters.AddWithValue("$prefix", prefix);
-        var missing = command.ExecuteNonQuery();
+        using var cmdExact = connection.CreateCommand();
+        cmdExact.Transaction = transaction;
+        cmdExact.CommandText =
+            "UPDATE files SET is_online = 0 WHERE root_id = $rootId AND is_online = 1 AND scan_token <> $scanToken AND normalized_path = $path COLLATE NOCASE;";
+        cmdExact.Parameters.AddWithValue("$rootId", rootId);
+        cmdExact.Parameters.AddWithValue("$scanToken", scanToken);
+        cmdExact.Parameters.AddWithValue("$path", directoryPath);
+        var missing = cmdExact.ExecuteNonQuery();
+
+        using var cmdRange = connection.CreateCommand();
+        cmdRange.Transaction = transaction;
+        cmdRange.CommandText =
+            "UPDATE files SET is_online = 0 WHERE root_id = $rootId AND is_online = 1 AND scan_token <> $scanToken AND normalized_path >= $prefix COLLATE NOCASE AND normalized_path < $prefixUpper COLLATE NOCASE;";
+        cmdRange.Parameters.AddWithValue("$rootId", rootId);
+        cmdRange.Parameters.AddWithValue("$scanToken", scanToken);
+        cmdRange.Parameters.AddWithValue("$prefix", prefix);
+        cmdRange.Parameters.AddWithValue("$prefixUpper", prefixUpper);
+        missing += cmdRange.ExecuteNonQuery();
+
         transaction.Commit();
         return missing;
     }

@@ -4,7 +4,7 @@ namespace GuraFile.Storage;
 
 public static class SqliteDatabase
 {
-    public const int CurrentVersion = 7;
+    public const int CurrentVersion = 8;
 
     private static readonly string[] Migrations =
     [
@@ -201,6 +201,9 @@ public static class SqliteDatabase
             error TEXT
         );
         CREATE INDEX idx_file_op_intent_items_intent_id ON file_operation_intent_items(intent_id);
+        """,
+        """
+        CREATE INDEX idx_files_name_nocase ON files(name COLLATE NOCASE);
         """
     ];
 
