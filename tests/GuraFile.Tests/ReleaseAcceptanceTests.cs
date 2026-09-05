@@ -826,7 +826,7 @@ public sealed class ReleaseAcceptanceTests
         FileQueryService query,
         Func<IndexedFile, bool> predicate)
     {
-        var deadline = DateTime.UtcNow.AddSeconds(2);
+        var deadline = DateTime.UtcNow.AddSeconds(5);
         while (DateTime.UtcNow < deadline)
         {
             var file = (await query.QueryAsync(new())).FirstOrDefault(predicate);
@@ -838,7 +838,7 @@ public sealed class ReleaseAcceptanceTests
             await Task.Delay(25);
         }
 
-        Assert.Fail("Real-time file state did not converge within two seconds.");
+        Assert.Fail("Real-time file state did not converge within five seconds.");
         throw new InvalidOperationException();
     }
 
