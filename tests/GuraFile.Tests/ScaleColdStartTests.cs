@@ -208,9 +208,9 @@ public sealed class ScaleColdStartTests
         Assert.IsEmpty(result.Failures);
         Assert.AreEqual(100, committedBatches);
 
-        // Throughput must be high: 100,000 files must complete within 30s (> 3,000 files/s)
+        // Throughput must be high: 100,000 files must complete within 45s (> 2,200 files/s) with FTS5 indexing
         Assert.IsTrue(
-            timer.Elapsed < TimeSpan.FromSeconds(30.0),
+            timer.Elapsed < TimeSpan.FromSeconds(45.0),
             $"100,000 files scan took {timer.Elapsed.TotalSeconds:F2} s, which is too slow (throughput: {throughput:F0} files/s).");
     }
 

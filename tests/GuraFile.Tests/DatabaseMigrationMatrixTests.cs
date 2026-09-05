@@ -15,6 +15,7 @@ public sealed class DatabaseMigrationMatrixTests
     [DataRow(6)]
     [DataRow(7)]
     [DataRow(8)]
+    [DataRow(9)]
     public void HistoricalFixtures_InitializeAtExpectedSchemaVersion(int version)
     {
         using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(version);
@@ -30,6 +31,7 @@ public sealed class DatabaseMigrationMatrixTests
     [DataRow(6)]
     [DataRow(7)]
     [DataRow(8)]
+    [DataRow(9)]
     public void Matrix_AnyHistoricalVersion_UpgradesToCurrentVersionCleanly(int version)
     {
         using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(version);
@@ -45,7 +47,12 @@ public sealed class DatabaseMigrationMatrixTests
 
             // Verify core tables exist
             var tables = DatabaseMigrationFixtures.GetTableNames(connection);
-            CollectionAssert.IsSubsetOf(new[] { "roots", "files", "tags", "file_tags", "scan_sessions", "file_operation_intents", "file_operation_intent_items" }, tables);
+            CollectionAssert.IsSubsetOf(new[] { "roots", "files", "tags", "file_tags", "scan_sessions", "file_operation_intents", "file_operation_intent_items", "files_fts" }, tables);
+
+            // Verify triggers on files exist for FTS5 sync
+            var triggerCount = DatabaseMigrationFixtures.Scalar<long>(connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ('files_ai', 'files_ad', 'files_au');");
+            Assert.AreEqual(3L, triggerCount);
 
             // Verify index on scan_sessions exists
             var indexCount = DatabaseMigrationFixtures.Scalar<long>(connection,
@@ -437,7 +444,7 @@ public sealed class DatabaseMigrationMatrixTests
     }
 
     [TestMethod]
-    public void Migrate_Version8_To_Current_IsIdempotent()
+    public void Migrate_Version8_To_Current_CreatesFtsTableAndSyncsFiles()
     {
         using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(8);
 
@@ -449,13 +456,36 @@ public sealed class DatabaseMigrationMatrixTests
 
             Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(connection,
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_files_name_nocase';"));
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'files_fts';"));
+            Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ('files_ai', 'files_ad', 'files_au');"));
             Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(connection, "SELECT COUNT(*) FROM files;"));
+            Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(connection, "SELECT COUNT(*) FROM files_fts;"));
             Assert.AreEqual(2L, DatabaseMigrationFixtures.Scalar<long>(connection, "SELECT COUNT(*) FROM tags;"));
         }
     }
 
     [TestMethod]
-    public void Chained_Stepwise_Migration_From_Version1_To_Version8()
+    public void Migrate_Version9_To_Current_IsIdempotent()
+    {
+        using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(9);
+
+        using (var connection = SqliteDatabase.Open(fixture.Path))
+        {
+            Assert.AreEqual(SqliteDatabase.CurrentVersion, DatabaseMigrationFixtures.Scalar<long>(connection, "PRAGMA user_version;"));
+            DatabaseMigrationFixtures.AssertForeignKeys(connection);
+            DatabaseMigrationFixtures.AssertNoTemporaryTables(connection);
+
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'files_fts';"));
+            Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(connection, "SELECT COUNT(*) FROM files;"));
+            Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(connection, "SELECT COUNT(*) FROM files_fts;"));
+        }
+    }
+
+    [TestMethod]
+    public void Chained_Stepwise_Migration_From_Version1_To_Version9()
     {
         using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(1);
 
@@ -538,6 +568,19 @@ public sealed class DatabaseMigrationMatrixTests
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_files_name_nocase';"));
             DatabaseMigrationFixtures.AssertForeignKeys(v8Conn);
             DatabaseMigrationFixtures.AssertNoTemporaryTables(v8Conn);
+        }
+
+        // Step 8 -> 9
+        using (var v9Conn = SqliteDatabase.Open(fixture.Path, 9))
+        {
+            Assert.AreEqual(9L, DatabaseMigrationFixtures.Scalar<long>(v9Conn, "PRAGMA user_version;"));
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(v9Conn,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'files_fts';"));
+            Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(v9Conn,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ('files_ai', 'files_ad', 'files_au');"));
+            Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(v9Conn, "SELECT COUNT(*) FROM files_fts;"));
+            DatabaseMigrationFixtures.AssertForeignKeys(v9Conn);
+            DatabaseMigrationFixtures.AssertNoTemporaryTables(v9Conn);
         }
     }
 
@@ -765,14 +808,41 @@ public sealed class DatabaseMigrationMatrixTests
     }
 
     [TestMethod]
-    public void FutureSchema_V9_Rejected_WithoutModifyingJournalMode()
+    public void MigrationStep_V8_To_V9_RollsBack_OnFailure()
     {
-        var dbPath = Path.Combine(Path.GetTempPath(), $"GuraFile.FutureV9.{Guid.NewGuid():N}.db");
+        using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(8);
+
+        // Inject conflicting files_fts as a regular table in v8 so virtual table creation fails
+        using (var raw = DatabaseMigrationFixtures.OpenRaw(fixture.Path))
+        {
+            DatabaseMigrationFixtures.Execute(raw, "CREATE TABLE files_fts (dummy TEXT);");
+        }
+
+        Assert.ThrowsExactly<SqliteException>(() =>
+        {
+            using var _ = SqliteDatabase.Open(fixture.Path, 9);
+        });
+
+        using (var raw = DatabaseMigrationFixtures.OpenRaw(fixture.Path))
+        {
+            Assert.AreEqual(8L, DatabaseMigrationFixtures.Scalar<long>(raw, "PRAGMA user_version;"));
+            Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(raw, "SELECT COUNT(*) FROM roots;"));
+            Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(raw, "SELECT COUNT(*) FROM files;"));
+            Assert.AreEqual(2L, DatabaseMigrationFixtures.Scalar<long>(raw, "SELECT COUNT(*) FROM tags;"));
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(raw, "SELECT COUNT(*) FROM scan_sessions;"));
+            Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(raw, "SELECT COUNT(*) FROM file_operation_intents;"));
+        }
+    }
+
+    [TestMethod]
+    public void FutureSchema_V10_Rejected_WithoutModifyingJournalMode()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"GuraFile.FutureV10.{Guid.NewGuid():N}.db");
         try
         {
             using (var raw = DatabaseMigrationFixtures.OpenRaw(dbPath))
             {
-                DatabaseMigrationFixtures.Execute(raw, "PRAGMA user_version = 9;");
+                DatabaseMigrationFixtures.Execute(raw, "PRAGMA user_version = 10;");
                 DatabaseMigrationFixtures.Execute(raw, "PRAGMA journal_mode = DELETE;");
             }
 
@@ -781,7 +851,7 @@ public sealed class DatabaseMigrationMatrixTests
                 using var _ = SqliteDatabase.Open(dbPath);
             });
 
-            StringAssert.Contains(ex.Message, "v9 is newer than supported v8");
+            StringAssert.Contains(ex.Message, "v10 is newer than supported v9");
 
             // Verify journal_mode was untouched before exception
             using (var raw = DatabaseMigrationFixtures.OpenRaw(dbPath))
@@ -818,7 +888,7 @@ public sealed class DatabaseMigrationMatrixTests
                 using var _ = SqliteDatabase.Open(dbPath);
             });
 
-            StringAssert.Contains(ex.Message, "v99 is newer than supported v8");
+            StringAssert.Contains(ex.Message, "v99 is newer than supported v9");
 
             using (var raw = DatabaseMigrationFixtures.OpenRaw(dbPath))
             {
@@ -856,7 +926,7 @@ public sealed class DatabaseMigrationMatrixTests
             // Target version out of range (> CurrentVersion) throws ArgumentOutOfRangeException
             Assert.ThrowsExactly<ArgumentOutOfRangeException>(() =>
             {
-                using var _ = SqliteDatabase.Open(dbPath, 9);
+                using var _ = SqliteDatabase.Open(dbPath, 10);
             });
 
             // Target version out of range (< 0) throws ArgumentOutOfRangeException

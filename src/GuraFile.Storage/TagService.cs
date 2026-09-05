@@ -366,16 +366,21 @@ public sealed class TagService
         using var connection = SqliteDatabase.Open(DatabasePath);
         using var transaction = connection.BeginTransaction();
         EnsureUserTagExists(connection, transaction, tagId);
+        EnsureFilesExist(connection, transaction, distinctFileIds);
+
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = add
+            ? "INSERT INTO file_tags (file_id, tag_id, source) VALUES ($fileId, $tagId, 'user') ON CONFLICT DO NOTHING;"
+            : "DELETE FROM file_tags WHERE file_id = $fileId AND tag_id = $tagId AND source = 'user';";
+        var pFileId = command.Parameters.Add("$fileId", SqliteType.Integer);
+        var pTagId = command.Parameters.Add("$tagId", SqliteType.Integer);
+        pTagId.Value = tagId;
+        command.Prepare();
+
         foreach (var fileId in distinctFileIds)
         {
-            EnsureExists(connection, transaction, "files", fileId, $"文件节点 {fileId} 不存在。");
-            using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = add
-                ? "INSERT INTO file_tags (file_id, tag_id, source) VALUES ($fileId, $tagId, 'user') ON CONFLICT DO NOTHING;"
-                : "DELETE FROM file_tags WHERE file_id = $fileId AND tag_id = $tagId AND source = 'user';";
-            command.Parameters.AddWithValue("$fileId", fileId);
-            command.Parameters.AddWithValue("$tagId", tagId);
+            pFileId.Value = fileId;
             command.ExecuteNonQuery();
         }
 
@@ -395,20 +400,45 @@ public sealed class TagService
         }
     }
 
-    private static void EnsureExists(
+    private static void EnsureFilesExist(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        string table,
-        long id,
-        string message)
+        IReadOnlyList<long> fileIds)
     {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = $"SELECT EXISTS(SELECT 1 FROM {table} WHERE id = $id);";
-        command.Parameters.AddWithValue("$id", id);
-        if ((long)command.ExecuteScalar()! == 0)
+        const int batchSize = 500;
+        for (var offset = 0; offset < fileIds.Count; offset += batchSize)
         {
-            throw new ArgumentException(message);
+            var count = Math.Min(batchSize, fileIds.Count - offset);
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            var placeholders = new string[count];
+            for (var i = 0; i < count; i++)
+            {
+                placeholders[i] = $"$id{i}";
+                command.Parameters.AddWithValue(placeholders[i], fileIds[offset + i]);
+            }
+
+            command.CommandText = $"SELECT id FROM files WHERE id IN ({string.Join(", ", placeholders)});";
+            var found = new HashSet<long>();
+            using (var reader = command.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    found.Add(reader.GetInt64(0));
+                }
+            }
+
+            if (found.Count < count)
+            {
+                for (var i = 0; i < count; i++)
+                {
+                    var id = fileIds[offset + i];
+                    if (!found.Contains(id))
+                    {
+                        throw new ArgumentException($"文件节点 {id} 不存在。");
+                    }
+                }
+            }
         }
     }
 
