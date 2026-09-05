@@ -107,7 +107,8 @@ public sealed partial class MainWindow : Window
                 _tags = new(_databasePath, _rollingBackup);
                 _tagBackup = new(_databasePath);
                 _graphSnapshotService = new(_databasePath);
-                _fileOperations = new FileListOperationService(new FileOperationIndexCommitter(_scanner), _scanner, _clipboard);
+                var committer = new FileOperationIndexCommitter(_scanner);
+                _fileOperations = new FileListOperationService(committer, _scanner, _clipboard);
                 _initialized = true;
 
                 RefreshRoots();
@@ -122,6 +123,7 @@ public sealed partial class MainWindow : Window
                 _ = RefreshAutomaticTagsAsync();
                 _ = RefreshFilesAsync();
                 UpdateFileButtonsState();
+                _ = StartFileOperationCrashRecoveryAsync(committer);
                 break;
 
             case DatabaseHealthStatus.Locked:
@@ -203,6 +205,7 @@ public sealed partial class MainWindow : Window
         RenameFileButton.IsEnabled = false;
         DeleteFileButton.IsEnabled = false;
         ExportDiagnosticsButton.IsEnabled = true;
+        FileOperationRecoveryNoticeBar.IsOpen = false;
     }
 
     private void EnableControlsForHealthyDatabase()
@@ -373,6 +376,39 @@ public sealed partial class MainWindow : Window
         {
             ScanProgressRing.Visibility = Visibility.Collapsed;
             _isRecoveringDatabase = false;
+        }
+    }
+
+    private async Task StartFileOperationCrashRecoveryAsync(FileOperationIndexCommitter committer)
+    {
+        try
+        {
+            var recoveryService = new FileOperationCrashRecoveryService(_databasePath, _scanner, committer);
+            var report = await recoveryService.RecoverAsync();
+            if (report.HasIndeterminateOperations)
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    FileOperationRecoveryNoticeBar.IsOpen = true;
+                    FileOperationRecoveryNoticeBar.Message = $"存在 {report.IndeterminateIntentsCount} 个需要检查的中断文件操作。";
+                    FilesStateText.Text = "存在需要检查的中断文件操作。";
+                });
+            }
+            else if (report.RecoveredIntentsCount > 0)
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    _ = RefreshFilesAsync();
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLogger.Default.LogError(
+                DiagnosticCategory.FileOperation,
+                "FileOperationRecoveryFailed",
+                exception: ex,
+                message: $"崩溃恢复对齐失败：{ex.Message}");
         }
     }
 

@@ -13,6 +13,7 @@ public sealed class DatabaseMigrationMatrixTests
     [DataRow(4)]
     [DataRow(5)]
     [DataRow(6)]
+    [DataRow(7)]
     public void HistoricalFixtures_InitializeAtExpectedSchemaVersion(int version)
     {
         using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(version);
@@ -26,6 +27,7 @@ public sealed class DatabaseMigrationMatrixTests
     [DataRow(4)]
     [DataRow(5)]
     [DataRow(6)]
+    [DataRow(7)]
     public void Matrix_AnyHistoricalVersion_UpgradesToCurrentVersionCleanly(int version)
     {
         using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(version);
@@ -41,17 +43,37 @@ public sealed class DatabaseMigrationMatrixTests
 
             // Verify core tables exist
             var tables = DatabaseMigrationFixtures.GetTableNames(connection);
-            CollectionAssert.IsSubsetOf(new[] { "roots", "files", "tags", "file_tags", "scan_sessions" }, tables);
+            CollectionAssert.IsSubsetOf(new[] { "roots", "files", "tags", "file_tags", "scan_sessions", "file_operation_intents", "file_operation_intent_items" }, tables);
 
             // Verify index on scan_sessions exists
             var indexCount = DatabaseMigrationFixtures.Scalar<long>(connection,
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_scan_sessions_root_status';");
             Assert.AreEqual(1L, indexCount);
 
+            // Verify index on file_operation_intents exists
+            var intentIndexCount = DatabaseMigrationFixtures.Scalar<long>(connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_file_op_intents_status';");
+            Assert.AreEqual(1L, intentIndexCount);
+
+            // Verify index on file_operation_intent_items exists
+            var itemIndexCount = DatabaseMigrationFixtures.Scalar<long>(connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_file_op_intent_items_intent_id';");
+            Assert.AreEqual(1L, itemIndexCount);
+
             // Verify scan_sessions check constraints
             var invalidSessions = DatabaseMigrationFixtures.Scalar<long>(connection,
                 "SELECT COUNT(*) FROM scan_sessions WHERE status NOT IN ('running', 'completed', 'interrupted') OR scan_type NOT IN ('full', 'recovery', 'reconcile');");
             Assert.AreEqual(0L, invalidSessions);
+
+            // Verify file_operation_intents check constraints
+            var invalidIntents = DatabaseMigrationFixtures.Scalar<long>(connection,
+                "SELECT COUNT(*) FROM file_operation_intents WHERE status NOT IN ('pending', 'shell_completed', 'committed', 'indeterminate') OR operation_type NOT IN ('copy', 'move', 'rename', 'recycle_bin_delete');");
+            Assert.AreEqual(0L, invalidIntents);
+
+            // Verify file_operation_intent_items check constraints
+            var invalidIntentItems = DatabaseMigrationFixtures.Scalar<long>(connection,
+                "SELECT COUNT(*) FROM file_operation_intent_items WHERE (shell_status IS NOT NULL AND shell_status NOT IN ('completed', 'failed', 'skipped', 'canceled', 'unknown')) OR (commit_status IS NOT NULL AND commit_status NOT IN ('pending', 'committed', 'failed', 'indeterminate'));");
+            Assert.AreEqual(0L, invalidIntentItems);
 
             // Verify no source cross-contamination
             var corruptedRelations = DatabaseMigrationFixtures.Scalar<long>(connection,
@@ -333,7 +355,7 @@ public sealed class DatabaseMigrationMatrixTests
     }
 
     [TestMethod]
-    public void Migrate_Version6_To_Current_IsIdempotent()
+    public void Migrate_Version6_To_Current_PreservesAllData()
     {
         using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(6);
 
@@ -342,6 +364,10 @@ public sealed class DatabaseMigrationMatrixTests
             Assert.AreEqual(SqliteDatabase.CurrentVersion, DatabaseMigrationFixtures.Scalar<long>(connection, "PRAGMA user_version;"));
             DatabaseMigrationFixtures.AssertForeignKeys(connection);
             DatabaseMigrationFixtures.AssertNoTemporaryTables(connection);
+
+            // file_operation_intents and items created and initially empty
+            Assert.AreEqual(0L, DatabaseMigrationFixtures.Scalar<long>(connection, "SELECT COUNT(*) FROM file_operation_intents;"));
+            Assert.AreEqual(0L, DatabaseMigrationFixtures.Scalar<long>(connection, "SELECT COUNT(*) FROM file_operation_intent_items;"));
 
             // Roots status and timestamps/errors intact
             Assert.AreEqual("online", DatabaseMigrationFixtures.Scalar<string>(connection, "SELECT status FROM roots WHERE id = 1;"));
@@ -363,7 +389,48 @@ public sealed class DatabaseMigrationMatrixTests
     }
 
     [TestMethod]
-    public void Chained_Stepwise_Migration_From_Version1_To_Version6()
+    public void Migrate_Version7_To_Current_IsIdempotent()
+    {
+        using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(7);
+
+        using (var connection = SqliteDatabase.Open(fixture.Path))
+        {
+            Assert.AreEqual(SqliteDatabase.CurrentVersion, DatabaseMigrationFixtures.Scalar<long>(connection, "PRAGMA user_version;"));
+            DatabaseMigrationFixtures.AssertForeignKeys(connection);
+            DatabaseMigrationFixtures.AssertNoTemporaryTables(connection);
+
+            // Roots status intact
+            Assert.AreEqual("online", DatabaseMigrationFixtures.Scalar<string>(connection, "SELECT status FROM roots WHERE id = 1;"));
+            Assert.AreEqual("offline", DatabaseMigrationFixtures.Scalar<string>(connection, "SELECT status FROM roots WHERE id = 2;"));
+            Assert.AreEqual("recovering", DatabaseMigrationFixtures.Scalar<string>(connection, "SELECT status FROM roots WHERE id = 3;"));
+
+            // Files and tags intact
+            Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(connection, "SELECT COUNT(*) FROM files;"));
+            Assert.AreEqual(2L, DatabaseMigrationFixtures.Scalar<long>(connection, "SELECT COUNT(*) FROM tags;"));
+            Assert.AreEqual(2L, DatabaseMigrationFixtures.Scalar<long>(connection, "SELECT COUNT(*) FROM file_tags;"));
+
+            // Scan sessions intact
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(connection, "SELECT COUNT(*) FROM scan_sessions;"));
+
+            // File operation intents intact
+            Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(connection, "SELECT COUNT(*) FROM file_operation_intents;"));
+            Assert.AreEqual("committed", DatabaseMigrationFixtures.Scalar<string>(connection, "SELECT status FROM file_operation_intents WHERE id = 1;"));
+            Assert.AreEqual("copy", DatabaseMigrationFixtures.Scalar<string>(connection, "SELECT operation_type FROM file_operation_intents WHERE id = 1;"));
+            Assert.AreEqual("indeterminate", DatabaseMigrationFixtures.Scalar<string>(connection, "SELECT status FROM file_operation_intents WHERE id = 2;"));
+            Assert.AreEqual("move", DatabaseMigrationFixtures.Scalar<string>(connection, "SELECT operation_type FROM file_operation_intents WHERE id = 2;"));
+            Assert.AreEqual("pending", DatabaseMigrationFixtures.Scalar<string>(connection, "SELECT status FROM file_operation_intents WHERE id = 3;"));
+            Assert.AreEqual("recycle_bin_delete", DatabaseMigrationFixtures.Scalar<string>(connection, "SELECT operation_type FROM file_operation_intents WHERE id = 3;"));
+
+            // File operation intent items intact
+            Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(connection, "SELECT COUNT(*) FROM file_operation_intent_items;"));
+            Assert.AreEqual("committed", DatabaseMigrationFixtures.Scalar<string>(connection, "SELECT commit_status FROM file_operation_intent_items WHERE id = 1;"));
+            Assert.AreEqual("indeterminate", DatabaseMigrationFixtures.Scalar<string>(connection, "SELECT commit_status FROM file_operation_intent_items WHERE id = 2;"));
+            Assert.AreEqual("pending", DatabaseMigrationFixtures.Scalar<string>(connection, "SELECT commit_status FROM file_operation_intent_items WHERE id = 3;"));
+        }
+    }
+
+    [TestMethod]
+    public void Chained_Stepwise_Migration_From_Version1_To_Version7()
     {
         using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(1);
 
@@ -420,6 +487,22 @@ public sealed class DatabaseMigrationMatrixTests
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_scan_sessions_root_status';"));
             DatabaseMigrationFixtures.AssertForeignKeys(v6Conn);
             DatabaseMigrationFixtures.AssertNoTemporaryTables(v6Conn);
+        }
+
+        // Step 6 -> 7
+        using (var v7Conn = SqliteDatabase.Open(fixture.Path, 7))
+        {
+            Assert.AreEqual(7L, DatabaseMigrationFixtures.Scalar<long>(v7Conn, "PRAGMA user_version;"));
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(v7Conn,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'file_operation_intents';"));
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(v7Conn,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'file_operation_intent_items';"));
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(v7Conn,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_file_op_intents_status';"));
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(v7Conn,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_file_op_intent_items_intent_id';"));
+            DatabaseMigrationFixtures.AssertForeignKeys(v7Conn);
+            DatabaseMigrationFixtures.AssertNoTemporaryTables(v7Conn);
         }
     }
 
@@ -583,14 +666,47 @@ public sealed class DatabaseMigrationMatrixTests
     }
 
     [TestMethod]
-    public void FutureSchema_V7_Rejected_WithoutModifyingJournalMode()
+    public void MigrationStep_V6_To_V7_RollsBack_OnFailure()
     {
-        var dbPath = Path.Combine(Path.GetTempPath(), $"GuraFile.FutureV7.{Guid.NewGuid():N}.db");
+        using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(6);
+
+        // Inject conflicting file_operation_intents table with bad schema in v6
+        using (var raw = DatabaseMigrationFixtures.OpenRaw(fixture.Path))
+        {
+            DatabaseMigrationFixtures.Execute(raw, "CREATE TABLE file_operation_intents (invalid_column TEXT);");
+        }
+
+        Assert.ThrowsExactly<SqliteException>(() =>
+        {
+            using var _ = SqliteDatabase.Open(fixture.Path, 7);
+        });
+
+        using (var raw = DatabaseMigrationFixtures.OpenRaw(fixture.Path))
+        {
+            Assert.AreEqual(6L, DatabaseMigrationFixtures.Scalar<long>(raw, "PRAGMA user_version;"));
+            // idx_file_op_intents_status must NOT exist because migration rolled back
+            Assert.AreEqual(0L, DatabaseMigrationFixtures.Scalar<long>(raw,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_file_op_intents_status';"));
+            // file_operation_intent_items must NOT exist
+            Assert.AreEqual(0L, DatabaseMigrationFixtures.Scalar<long>(raw,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'file_operation_intent_items';"));
+            // Original roots, files, tags, scan_sessions data preserved
+            Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(raw, "SELECT COUNT(*) FROM roots;"));
+            Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(raw, "SELECT COUNT(*) FROM files;"));
+            Assert.AreEqual(2L, DatabaseMigrationFixtures.Scalar<long>(raw, "SELECT COUNT(*) FROM tags;"));
+            Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(raw, "SELECT COUNT(*) FROM scan_sessions;"));
+        }
+    }
+
+    [TestMethod]
+    public void FutureSchema_V8_Rejected_WithoutModifyingJournalMode()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"GuraFile.FutureV8.{Guid.NewGuid():N}.db");
         try
         {
             using (var raw = DatabaseMigrationFixtures.OpenRaw(dbPath))
             {
-                DatabaseMigrationFixtures.Execute(raw, "PRAGMA user_version = 7;");
+                DatabaseMigrationFixtures.Execute(raw, "PRAGMA user_version = 8;");
                 DatabaseMigrationFixtures.Execute(raw, "PRAGMA journal_mode = DELETE;");
             }
 
@@ -599,7 +715,7 @@ public sealed class DatabaseMigrationMatrixTests
                 using var _ = SqliteDatabase.Open(dbPath);
             });
 
-            StringAssert.Contains(ex.Message, "v7 is newer than supported v6");
+            StringAssert.Contains(ex.Message, "v8 is newer than supported v7");
 
             // Verify journal_mode was untouched before exception
             using (var raw = DatabaseMigrationFixtures.OpenRaw(dbPath))
@@ -636,7 +752,7 @@ public sealed class DatabaseMigrationMatrixTests
                 using var _ = SqliteDatabase.Open(dbPath);
             });
 
-            StringAssert.Contains(ex.Message, "v99 is newer than supported v6");
+            StringAssert.Contains(ex.Message, "v99 is newer than supported v7");
 
             using (var raw = DatabaseMigrationFixtures.OpenRaw(dbPath))
             {
@@ -674,7 +790,7 @@ public sealed class DatabaseMigrationMatrixTests
             // Target version out of range (> CurrentVersion) throws ArgumentOutOfRangeException
             Assert.ThrowsExactly<ArgumentOutOfRangeException>(() =>
             {
-                using var _ = SqliteDatabase.Open(dbPath, 7);
+                using var _ = SqliteDatabase.Open(dbPath, 8);
             });
 
             // Target version out of range (< 0) throws ArgumentOutOfRangeException

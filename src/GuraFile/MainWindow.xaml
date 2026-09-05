@@ -86,6 +86,7 @@
                         <Button x:Name="DatabaseNoticeActionButton" AutomationProperties.Name="数据库状态操作" Click="DatabaseNoticeActionButton_Click" Visibility="Collapsed" />
                     </InfoBar.ActionButton>
                 </InfoBar>
+                <InfoBar x:Name="FileOperationRecoveryNoticeBar" AutomationProperties.Name="文件操作恢复提示" Severity="Warning" IsOpen="False" IsClosable="True" Title="中断操作提示" Message="存在需要检查的中断文件操作。" />
                 <Grid ColumnSpacing="8">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
