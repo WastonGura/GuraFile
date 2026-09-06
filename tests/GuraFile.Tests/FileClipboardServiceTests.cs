@@ -23,9 +23,7 @@ public sealed class FileClipboardServiceTests
             var clipboard = new FileClipboardService();
             clipboard.SetContent([file1, file2], FileClipboardEffect.Copy);
 
-            AssertClipboardHasFiles(clipboard);
-            var content = clipboard.GetContent();
-            Assert.IsNotNull(content);
+            var content = AssertClipboardHasFiles(clipboard);
             Assert.AreEqual(FileClipboardEffect.Copy, content.Effect);
             Assert.HasCount(2, content.Files);
             CollectionAssert.AreEquivalent(new[] { Path.GetFullPath(file1), Path.GetFullPath(file2) }, content.Files.ToArray());
@@ -43,9 +41,7 @@ public sealed class FileClipboardServiceTests
             var clipboard = new FileClipboardService();
             clipboard.SetContent([file1], FileClipboardEffect.Move);
 
-            AssertClipboardHasFiles(clipboard);
-            var content = clipboard.GetContent();
-            Assert.IsNotNull(content);
+            var content = AssertClipboardHasFiles(clipboard);
             Assert.AreEqual(FileClipboardEffect.Move, content.Effect);
             Assert.HasCount(1, content.Files);
             Assert.AreEqual(Path.GetFullPath(file1), content.Files[0]);
@@ -95,20 +91,27 @@ public sealed class FileClipboardServiceTests
         }
     }
 
-    private static void AssertClipboardHasFiles(IFileClipboardService clipboard, int timeoutMs = 2000)
+    private static FileClipboardContent AssertClipboardHasFiles(IFileClipboardService clipboard, int timeoutMs = 2000)
     {
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         while (stopwatch.ElapsedMilliseconds < timeoutMs)
         {
             if (clipboard.HasFiles())
             {
-                return;
+                var content = clipboard.GetContent();
+                if (content is not null)
+                {
+                    return content;
+                }
             }
 
             Thread.Sleep(30);
         }
 
         Assert.IsTrue(clipboard.HasFiles());
+        var finalContent = clipboard.GetContent();
+        Assert.IsNotNull(finalContent);
+        return finalContent;
     }
 
     private static void AssertClipboardEmpty(IFileClipboardService clipboard, int timeoutMs = 2000)
