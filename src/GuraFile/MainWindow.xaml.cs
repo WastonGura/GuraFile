@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using GuraFile.Storage;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
@@ -21,6 +22,8 @@ public sealed partial class MainWindow : Window
     private RollingTagBackupService _rollingBackup = null!;
     private readonly ShellFileActions _shell = new();
     private readonly IFileClipboardService _clipboard;
+    private UserSettingsService _userSettingsService = null!;
+    private UserSettings _userSettings = null!;
     private FileListOperationService _fileOperations = null!;
     private GraphSnapshotService _graphSnapshotService = null!;
     private SavedFilterViewService _savedFilterViews = null!;
@@ -57,6 +60,10 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
         Title = "GuraFile";
         _clipboard = new FileClipboardService();
+        _userSettingsService = new UserSettingsService();
+        _userSettings = _userSettingsService.Load();
+        ApplyAppTheme(_userSettings.AppTheme);
+        DiagnosticLogger.Default.MinLogLevel = _userSettings.ToDiagnosticLogLevel();
 
         Closed += async (_, _) =>
         {
@@ -98,7 +105,7 @@ public sealed partial class MainWindow : Window
                 ProgressText.Text = "空闲";
                 EnableControlsForHealthyDatabase();
 
-                _rollingBackup = new(_databasePath);
+                _rollingBackup = new(_databasePath, retentionLimit: _userSettings.RollingBackupRetainCount);
                 _scanner = new(_databasePath);
                 _fileChanges = new(
                     _scanner,
@@ -127,6 +134,7 @@ public sealed partial class MainWindow : Window
                 _ = RefreshSavedFilterViewsAsync();
                 _ = RefreshFilesAsync();
                 UpdateFileButtonsState();
+                UpdateViewModeFocusability(isGraph: false);
                 _ = StartFileOperationCrashRecoveryAsync(committer);
                 break;
 
@@ -182,6 +190,42 @@ public sealed partial class MainWindow : Window
                 FilesStateText.Text = "数据库无法访问。";
                 break;
         }
+    }
+
+    private void ApplyAppTheme(string themeName)
+    {
+        var theme = UserSettings.NormalizeAppTheme(themeName) switch
+        {
+            "Light" => ElementTheme.Light,
+            "Dark" => ElementTheme.Dark,
+            _ => ElementTheme.Default
+        };
+
+        if (Content is FrameworkElement root)
+        {
+            root.RequestedTheme = theme;
+        }
+    }
+
+    private void UpdateViewModeFocusability(bool isGraph)
+    {
+        FilesList.IsTabStop = !isGraph;
+        SortNameButton.IsTabStop = !isGraph;
+        SortPathButton.IsTabStop = !isGraph;
+        SortExtensionButton.IsTabStop = !isGraph;
+        SortSizeButton.IsTabStop = !isGraph;
+        SortModifiedButton.IsTabStop = !isGraph;
+        CopyFileButton.IsTabStop = !isGraph;
+        CutFileButton.IsTabStop = !isGraph;
+        PasteToFileButton.IsTabStop = !isGraph;
+        MoveToFileButton.IsTabStop = !isGraph;
+        RenameFileButton.IsTabStop = !isGraph;
+        DeleteFileButton.IsTabStop = !isGraph;
+        CollisionPolicyBox.IsTabStop = !isGraph;
+
+        FitViewportButton.IsTabStop = isGraph;
+        BroadTagsCheckBox.IsTabStop = isGraph;
+        GraphWebView.IsTabStop = isGraph;
     }
 
     private void DisableControlsForUnhealthyDatabase()
@@ -2029,7 +2073,8 @@ public sealed partial class MainWindow : Window
                 databasePath: _databasePath,
                 logsDirectory: AppPaths.DefaultLogsDirectory,
                 backupDirectory: AppPaths.DefaultTagBackupDirectory,
-                getRoots: _initialized ? _scanner.ListRoots : null);
+                getRoots: _initialized ? _scanner.ListRoots : null,
+                anonymizePaths: _userSettings.DiagnosticExportAnonymizePaths);
 
             var result = await Task.Run(() => exportService.Export(file.Path));
             if (result.Succeeded)
@@ -2072,6 +2117,163 @@ public sealed partial class MainWindow : Window
         finally
         {
             SetTagTransfer(false);
+        }
+    }
+
+    private async void SettingsButton_Click(object sender, RoutedEventArgs e)
+    {
+        var xamlRoot = (Content as FrameworkElement)?.XamlRoot;
+        if (xamlRoot == null)
+        {
+            return;
+        }
+
+        var initialTheme = _userSettings.AppTheme;
+
+        var retainCountBox = new NumberBox
+        {
+            Header = "自动备份保留份数 (1-30)",
+            Value = _userSettings.RollingBackupRetainCount,
+            Minimum = UserSettings.MinRollingBackupRetainCount,
+            Maximum = UserSettings.MaxRollingBackupRetainCount,
+            SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Inline,
+            SmallChange = 1,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        AutomationProperties.SetName(retainCountBox, "自动备份保留份数");
+        AutomationProperties.SetHelpText(retainCountBox, "设置自动备份保留的最大历史份数 (1-30)");
+
+        var anonymizeSwitch = new ToggleSwitch
+        {
+            Header = "诊断日志导出脱敏",
+            IsOn = _userSettings.DiagnosticExportAnonymizePaths,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        AutomationProperties.SetName(anonymizeSwitch, "诊断日志导出脱敏");
+        AutomationProperties.SetHelpText(anonymizeSwitch, "导出诊断包时自动脱敏用户路径和个人标识");
+
+        var themeBox = new ComboBox
+        {
+            Header = "应用界面主题",
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        themeBox.Items.Add(new ComboBoxItem { Content = "跟随系统 (Default)", Tag = "Default" });
+        themeBox.Items.Add(new ComboBoxItem { Content = "浅色 (Light)", Tag = "Light" });
+        themeBox.Items.Add(new ComboBoxItem { Content = "深色 (Dark)", Tag = "Dark" });
+        themeBox.SelectedIndex = _userSettings.AppTheme switch
+        {
+            "Light" => 1,
+            "Dark" => 2,
+            _ => 0
+        };
+        AutomationProperties.SetName(themeBox, "应用界面主题");
+        AutomationProperties.SetHelpText(themeBox, "切换浅色、深色或跟随系统的界面主题");
+
+        themeBox.SelectionChanged += (_, _) =>
+        {
+            if (themeBox.SelectedItem is ComboBoxItem item && item.Tag is string themeTag)
+            {
+                ApplyAppTheme(themeTag);
+            }
+        };
+
+        var logLevelBox = new ComboBox
+        {
+            Header = "最低日志记录级别",
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        logLevelBox.Items.Add(new ComboBoxItem { Content = "Debug", Tag = "Debug" });
+        logLevelBox.Items.Add(new ComboBoxItem { Content = "Info", Tag = "Info" });
+        logLevelBox.Items.Add(new ComboBoxItem { Content = "Warning", Tag = "Warning" });
+        logLevelBox.Items.Add(new ComboBoxItem { Content = "Error", Tag = "Error" });
+        logLevelBox.SelectedIndex = _userSettings.MinLogLevel switch
+        {
+            "Debug" => 0,
+            "Warning" => 2,
+            "Error" => 3,
+            _ => 1
+        };
+        AutomationProperties.SetName(logLevelBox, "最低日志记录级别");
+        AutomationProperties.SetHelpText(logLevelBox, "设置写入日志文件的最低诊断记录级别");
+
+        var panel = new StackPanel
+        {
+            Spacing = 16,
+            Width = 360,
+            Children =
+            {
+                retainCountBox,
+                anonymizeSwitch,
+                themeBox,
+                logLevelBox
+            }
+        };
+
+        var dialog = new ContentDialog
+        {
+            Title = "应用设置",
+            Content = panel,
+            PrimaryButtonText = "保存",
+            SecondaryButtonText = "恢复默认",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = xamlRoot
+        };
+
+        try
+        {
+            var dialogResult = await dialog.ShowAsync();
+            if (dialogResult == ContentDialogResult.Primary)
+            {
+                var newRetainCount = double.IsNaN(retainCountBox.Value)
+                    ? UserSettings.DefaultRollingBackupRetainCount
+                    : (int)Math.Round(retainCountBox.Value);
+                var newAnonymize = anonymizeSwitch.IsOn;
+                var newTheme = (themeBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "Default";
+                var newLogLevel = (logLevelBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "Info";
+
+                var newSettings = new UserSettings
+                {
+                    RollingBackupRetainCount = newRetainCount,
+                    DiagnosticExportAnonymizePaths = newAnonymize,
+                    AppTheme = newTheme,
+                    MinLogLevel = newLogLevel
+                };
+
+                _userSettingsService.Save(newSettings);
+                _userSettings = newSettings;
+
+                ApplyAppTheme(_userSettings.AppTheme);
+                DiagnosticLogger.Default.MinLogLevel = _userSettings.ToDiagnosticLogLevel();
+                if (_rollingBackup != null)
+                {
+                    _rollingBackup.RetentionLimit = _userSettings.RollingBackupRetainCount;
+                }
+
+                TagStatusText.Text = "应用设置已保存。";
+            }
+            else if (dialogResult == ContentDialogResult.Secondary)
+            {
+                var defaultSettings = _userSettingsService.ResetToDefault();
+                _userSettings = defaultSettings;
+
+                ApplyAppTheme(_userSettings.AppTheme);
+                DiagnosticLogger.Default.MinLogLevel = _userSettings.ToDiagnosticLogLevel();
+                if (_rollingBackup != null)
+                {
+                    _rollingBackup.RetentionLimit = _userSettings.RollingBackupRetainCount;
+                }
+
+                TagStatusText.Text = "应用设置已恢复为默认值。";
+            }
+            else
+            {
+                ApplyAppTheme(initialTheme);
+            }
+        }
+        finally
+        {
+            SettingsButton.Focus(FocusState.Programmatic);
         }
     }
 
@@ -2660,6 +2862,7 @@ public sealed partial class MainWindow : Window
         FileActionsPanel.Visibility = isGraph ? Visibility.Collapsed : Visibility.Visible;
         FilesList.Visibility = isGraph ? Visibility.Collapsed : Visibility.Visible;
         GraphHostContainer.Visibility = isGraph ? Visibility.Visible : Visibility.Collapsed;
+        UpdateViewModeFocusability(isGraph);
 
         if (isGraph)
         {

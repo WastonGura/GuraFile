@@ -393,6 +393,30 @@ public sealed class RollingTagBackupServiceTests
         Assert.IsTrue(events.Any(e => e.Category == "Backup" && e.Event == "TagRestoreCompleted" && e.Status == "Success"));
     }
 
+    [TestMethod]
+    public void RetentionLimit_CanBeDynamicallyUpdated_AndClampsInvalidValues()
+    {
+        using var tempDir = new TempDirectory();
+        using var db = TestDatabase.Create();
+
+        var service = new RollingTagBackupService(
+            db.Path,
+            tempDir.Path,
+            retentionLimit: 10);
+
+        Assert.AreEqual(10, service.RetentionLimit);
+
+        service.RetentionLimit = 25;
+        Assert.AreEqual(25, service.RetentionLimit);
+
+        // Clamping / fallback for <= 0 to DefaultRetentionLimit
+        service.RetentionLimit = 0;
+        Assert.AreEqual(RollingTagBackupService.DefaultRetentionLimit, service.RetentionLimit);
+
+        service.RetentionLimit = -5;
+        Assert.AreEqual(RollingTagBackupService.DefaultRetentionLimit, service.RetentionLimit);
+    }
+
     private sealed class TempDirectory : IDisposable
     {
         public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"GuraFile.BackupTests.{Guid.NewGuid():N}");

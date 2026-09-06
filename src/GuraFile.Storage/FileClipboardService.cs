@@ -163,45 +163,66 @@ public sealed class FileClipboardService : IFileClipboardService
             return;
         }
 
-        var dropFilesHandle = CreateDropFilesHandle(normalizedPaths);
-        var dropEffectHandle = CreateDropEffectHandle(effect);
-
-        OleSetClipboard(IntPtr.Zero);
-
-        if (!TryOpenClipboard())
+        const int maxAttempts = 5;
+        for (int attempt = 0; attempt < maxAttempts; attempt++)
         {
-            GlobalFree(dropFilesHandle);
-            GlobalFree(dropEffectHandle);
-            throw new InvalidOperationException("无法打开 Windows 剪贴板。");
-        }
+            var dropFilesHandle = CreateDropFilesHandle(normalizedPaths);
+            var dropEffectHandle = CreateDropEffectHandle(effect);
 
-        try
-        {
-            EmptyClipboard();
+            OleSetClipboard(IntPtr.Zero);
 
-            var resDrop = SetClipboardData(CF_HDROP, dropFilesHandle);
-            if (resDrop == IntPtr.Zero)
+            if (!TryOpenClipboard(retries: 25, delayMs: 25))
             {
                 GlobalFree(dropFilesHandle);
+                GlobalFree(dropEffectHandle);
+                if (attempt == maxAttempts - 1)
+                {
+                    throw new InvalidOperationException("无法打开 Windows 剪贴板。");
+                }
+
+                Thread.Sleep(50);
+                continue;
             }
 
-            var formatId = PreferredDropEffectFormat.Value;
-            if (formatId != 0)
+            try
             {
-                var resEffect = SetClipboardData(formatId, dropEffectHandle);
-                if (resEffect == IntPtr.Zero)
+                EmptyClipboard();
+
+                var resDrop = SetClipboardData(CF_HDROP, dropFilesHandle);
+                if (resDrop == IntPtr.Zero)
+                {
+                    GlobalFree(dropFilesHandle);
+                    GlobalFree(dropEffectHandle);
+                    if (attempt == maxAttempts - 1)
+                    {
+                        var error = Marshal.GetLastWin32Error();
+                        throw new Win32Exception(error, "无法设置剪贴板文件数据 (SetClipboardData CF_HDROP)。");
+                    }
+
+                    Thread.Sleep(50);
+                    continue;
+                }
+
+                var formatId = PreferredDropEffectFormat.Value;
+                if (formatId != 0)
+                {
+                    var resEffect = SetClipboardData(formatId, dropEffectHandle);
+                    if (resEffect == IntPtr.Zero)
+                    {
+                        GlobalFree(dropEffectHandle);
+                    }
+                }
+                else
                 {
                     GlobalFree(dropEffectHandle);
                 }
+
+                return;
             }
-            else
+            finally
             {
-                GlobalFree(dropEffectHandle);
+                CloseClipboard();
             }
-        }
-        finally
-        {
-            CloseClipboard();
         }
     }
 
@@ -209,18 +230,24 @@ public sealed class FileClipboardService : IFileClipboardService
     {
         OleSetClipboard(IntPtr.Zero);
 
-        if (!TryOpenClipboard())
+        for (int attempt = 0; attempt < 10; attempt++)
         {
-            return;
-        }
+            if (TryOpenClipboard(retries: 30, delayMs: 25))
+            {
+                try
+                {
+                    if (EmptyClipboard())
+                    {
+                        return;
+                    }
+                }
+                finally
+                {
+                    CloseClipboard();
+                }
+            }
 
-        try
-        {
-            EmptyClipboard();
-        }
-        finally
-        {
-            CloseClipboard();
+            Thread.Sleep(50);
         }
     }
 
@@ -311,7 +338,7 @@ public sealed class FileClipboardService : IFileClipboardService
         return hGlobal;
     }
 
-    private static bool TryOpenClipboard(int retries = 10, int delayMs = 25)
+    private static bool TryOpenClipboard(int retries = 25, int delayMs = 25)
     {
         for (int i = 0; i < retries; i++)
         {
@@ -322,7 +349,8 @@ public sealed class FileClipboardService : IFileClipboardService
 
             if (i < retries - 1)
             {
-                Thread.Sleep(delayMs);
+                var delay = Math.Min(60, delayMs + (i * 2));
+                Thread.Sleep(delay);
             }
         }
 
