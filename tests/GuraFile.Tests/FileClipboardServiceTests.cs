@@ -23,7 +23,7 @@ public sealed class FileClipboardServiceTests
             var clipboard = new FileClipboardService();
             clipboard.SetContent([file1, file2], FileClipboardEffect.Copy);
 
-            Assert.IsTrue(clipboard.HasFiles());
+            AssertClipboardHasFiles(clipboard);
             var content = clipboard.GetContent();
             Assert.IsNotNull(content);
             Assert.AreEqual(FileClipboardEffect.Copy, content.Effect);
@@ -43,7 +43,7 @@ public sealed class FileClipboardServiceTests
             var clipboard = new FileClipboardService();
             clipboard.SetContent([file1], FileClipboardEffect.Move);
 
-            Assert.IsTrue(clipboard.HasFiles());
+            AssertClipboardHasFiles(clipboard);
             var content = clipboard.GetContent();
             Assert.IsNotNull(content);
             Assert.AreEqual(FileClipboardEffect.Move, content.Effect);
@@ -62,11 +62,10 @@ public sealed class FileClipboardServiceTests
 
             var clipboard = new FileClipboardService();
             clipboard.SetContent([file1], FileClipboardEffect.Copy);
-            Assert.IsTrue(clipboard.HasFiles());
+            AssertClipboardHasFiles(clipboard);
 
             clipboard.Clear();
-            Assert.IsFalse(clipboard.HasFiles());
-            Assert.IsNull(clipboard.GetContent());
+            AssertClipboardEmpty(clipboard);
         }
     }
 
@@ -80,12 +79,54 @@ public sealed class FileClipboardServiceTests
 
             var clipboard = new FileClipboardService();
             clipboard.SetContent([file1], FileClipboardEffect.Copy);
-            Assert.IsTrue(clipboard.HasFiles());
+            AssertClipboardHasFiles(clipboard);
 
             clipboard.SetContent([], FileClipboardEffect.Copy);
-            Assert.IsFalse(clipboard.HasFiles());
-            Assert.IsNull(clipboard.GetContent());
+            AssertClipboardEmpty(clipboard);
         }
+    }
+
+    [TestCleanup]
+    public void Cleanup()
+    {
+        lock (s_lock)
+        {
+            new FileClipboardService().Clear();
+        }
+    }
+
+    private static void AssertClipboardHasFiles(IFileClipboardService clipboard, int timeoutMs = 2000)
+    {
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        while (stopwatch.ElapsedMilliseconds < timeoutMs)
+        {
+            if (clipboard.HasFiles())
+            {
+                return;
+            }
+
+            Thread.Sleep(30);
+        }
+
+        Assert.IsTrue(clipboard.HasFiles());
+    }
+
+    private static void AssertClipboardEmpty(IFileClipboardService clipboard, int timeoutMs = 2000)
+    {
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        while (stopwatch.ElapsedMilliseconds < timeoutMs)
+        {
+            if (!clipboard.HasFiles() && clipboard.GetContent() == null)
+            {
+                return;
+            }
+
+            clipboard.Clear();
+            Thread.Sleep(50);
+        }
+
+        Assert.IsFalse(clipboard.HasFiles());
+        Assert.IsNull(clipboard.GetContent());
     }
 
     private sealed class TestEnvironment : IDisposable

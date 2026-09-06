@@ -178,4 +178,34 @@ public sealed class DiagnosticExportServiceTests
         var result = service.Export(_exportZipPath);
         Assert.IsTrue(result.Succeeded);
     }
+
+    [TestMethod]
+    public void Export_WithoutAnonymization_PreservesOriginalPaths()
+    {
+        var rawUserPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Documents");
+        var service = new DiagnosticExportService(
+            databasePath: _dbPath,
+            logsDirectory: _logsDir,
+            backupDirectory: _backupDir,
+            getRoots: () =>
+            [
+                new ManagedRoot(1, rawUserPath)
+            ],
+            anonymizePaths: false);
+
+        var result = service.Export(_exportZipPath);
+        Assert.IsTrue(result.Succeeded, $"Export failed: {result.ErrorMessage}");
+
+        using var archive = ZipFile.OpenRead(_exportZipPath);
+        var configEntry = archive.GetEntry("config_summary.json");
+        Assert.IsNotNull(configEntry);
+        using var reader = new StreamReader(configEntry.Open());
+        var json = reader.ReadToEnd();
+
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        Assert.IsTrue(root.TryGetProperty("managedRoots", out var roots));
+        var pathInJson = roots[0].GetProperty("path").GetString();
+        Assert.AreEqual(rawUserPath, pathInJson);
+    }
 }
