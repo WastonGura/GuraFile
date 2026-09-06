@@ -105,7 +105,12 @@ public sealed class RollingTagBackupService
 
     public string BackupDirectory { get; }
 
-    public int RetentionLimit { get; }
+    private int _retentionLimit;
+    public int RetentionLimit
+    {
+        get => _retentionLimit;
+        set => _retentionLimit = value > 0 ? value : DefaultRetentionLimit;
+    }
 
     public string? LastError { get; private set; }
 

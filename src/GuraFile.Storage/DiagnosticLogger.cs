@@ -9,9 +9,10 @@ namespace GuraFile.Storage;
 
 public enum DiagnosticLogLevel
 {
-    Info,
-    Warn,
-    Error
+    Debug = 0,
+    Info = 1,
+    Warn = 2,
+    Error = 3
 }
 
 public enum DiagnosticCategory
@@ -139,6 +140,21 @@ public class DiagnosticLogger
 
     public string LogsDirectory => _logsDirectory;
 
+    public DiagnosticLogLevel MinLogLevel { get; set; } = DiagnosticLogLevel.Info;
+
+    public void LogDebug(
+        DiagnosticCategory category,
+        string eventName,
+        string? correlationId = null,
+        DiagnosticResultStatus status = DiagnosticResultStatus.None,
+        string? message = null,
+        string? errorCode = null,
+        Exception? exception = null,
+        IReadOnlyDictionary<string, object?>? properties = null)
+    {
+        Log(DiagnosticLogLevel.Debug, category, eventName, correlationId, status, message, errorCode, exception, properties);
+    }
+
     public void LogInfo(
         DiagnosticCategory category,
         string eventName,
@@ -188,6 +204,11 @@ public class DiagnosticLogger
         Exception? exception = null,
         IReadOnlyDictionary<string, object?>? properties = null)
     {
+        if (level < MinLogLevel)
+        {
+            return;
+        }
+
         try
         {
             var utcNow = _clock();

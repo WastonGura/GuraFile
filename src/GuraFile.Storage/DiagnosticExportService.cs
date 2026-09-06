@@ -29,12 +29,14 @@ public sealed class DiagnosticExportService
     private readonly string _logsDirectory;
     private readonly string _backupDirectory;
     private readonly Func<IReadOnlyList<ManagedRoot>>? _getRoots;
+    private readonly bool _anonymizePaths;
 
     public DiagnosticExportService(
         string? databasePath = null,
         string? logsDirectory = null,
         string? backupDirectory = null,
-        Func<IReadOnlyList<ManagedRoot>>? getRoots = null)
+        Func<IReadOnlyList<ManagedRoot>>? getRoots = null,
+        bool anonymizePaths = true)
     {
         _databasePath = string.IsNullOrWhiteSpace(databasePath)
             ? AppPaths.DefaultDatabasePath
@@ -46,7 +48,10 @@ public sealed class DiagnosticExportService
             ? AppPaths.DefaultTagBackupDirectory
             : Path.GetFullPath(backupDirectory);
         _getRoots = getRoots;
+        _anonymizePaths = anonymizePaths;
     }
+
+    public bool AnonymizePaths => _anonymizePaths;
 
     public Task<DiagnosticExportResult> ExportAsync(
         string destinationZipPath,
@@ -155,10 +160,15 @@ public sealed class DiagnosticExportService
         writer.Write(content);
     }
 
-    private static string ReadAndSanitizeLogFile(string logFilePath)
+    private string ReadAndSanitizeLogFile(string logFilePath)
     {
         try
         {
+            if (!_anonymizePaths)
+            {
+                return File.ReadAllText(logFilePath);
+            }
+
             var lines = File.ReadAllLines(logFilePath);
             var sb = new StringBuilder();
             foreach (var line in lines)
@@ -221,7 +231,7 @@ public sealed class DiagnosticExportService
 
         var sanitizedRoots = roots.Select(r => new Dictionary<string, object?>
         {
-            ["path"] = DiagnosticLogger.SanitizePath(r.Path),
+            ["path"] = _anonymizePaths ? DiagnosticLogger.SanitizePath(r.Path) : r.Path,
             ["status"] = r.Status.ToString(),
             ["lastCheckedUtc"] = r.LastCheckedUtc
         }).ToList();

@@ -34,62 +34,62 @@
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
             <TextBlock FontSize="20" FontWeight="SemiBold" Text="管理根目录" />
-            <ListView x:Name="RootsList" Grid.Row="1" AutomationProperties.Name="管理根目录" DisplayMemberPath="DisplayName" SelectionMode="Single" AllowDrop="True" DragOver="RootsList_DragOver" Drop="RootsList_Drop" SelectionChanged="RootsList_SelectionChanged" MaxHeight="100" />
+            <ListView x:Name="RootsList" Grid.Row="1" TabIndex="100" AutomationProperties.Name="管理根目录" AutomationProperties.HelpText="管理被监控与索引的文件根目录列表" DisplayMemberPath="DisplayName" SelectionMode="Single" AllowDrop="True" DragOver="RootsList_DragOver" Drop="RootsList_Drop" SelectionChanged="RootsList_SelectionChanged" MaxHeight="140" />
             <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
-                <Button x:Name="AddRootButton" AutomationProperties.Name="添加管理根目录" Click="AddRootButton_Click" Content="添加" />
-                <Button x:Name="RemoveRootButton" AutomationProperties.Name="移除管理根目录" Click="RemoveRootButton_Click" Content="移除" />
-                <Button x:Name="ScanButton" AutomationProperties.Name="扫描所选根目录" Click="ScanButton_Click" Content="扫描" />
+                <Button x:Name="AddRootButton" TabIndex="101" AutomationProperties.Name="添加管理根目录" AutomationProperties.HelpText="选择文件夹添加为管理根目录" Click="AddRootButton_Click" Content="添加" />
+                <Button x:Name="RemoveRootButton" TabIndex="102" AutomationProperties.Name="移除管理根目录" AutomationProperties.HelpText="从应用中移除所选管理根目录" Click="RemoveRootButton_Click" Content="移除" />
+                <Button x:Name="ScanButton" TabIndex="103" AutomationProperties.Name="扫描所选根目录" AutomationProperties.HelpText="对所选管理根目录执行手动差异扫描" Click="ScanButton_Click" Content="扫描" />
             </StackPanel>
             <Border Grid.Row="3" Height="1" Margin="0,4" Background="{ThemeResource CardStrokeColorDefaultBrush}" />
             <TextBlock Grid.Row="4" FontSize="20" FontWeight="SemiBold" Text="标签" />
-            <TextBox x:Name="TagNameBox" Grid.Row="5" AutomationProperties.Name="标签名称" MaxLength="100" PlaceholderText="输入标签名称" />
+            <TextBox x:Name="TagNameBox" Grid.Row="5" TabIndex="110" AutomationProperties.Name="标签名称" AutomationProperties.HelpText="输入新建或重命名的标签名称" MaxLength="100" PlaceholderText="输入标签名称" />
             <Grid Grid.Row="6" ColumnSpacing="8" MaxHeight="140">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
-                <ListView x:Name="TagsList" AutomationProperties.Name="用户标签" DisplayMemberPath="Name" Header="用户标签" SelectionChanged="TagsList_SelectionChanged" SelectionMode="Extended" />
-                <ListView x:Name="AutomaticTagsList" Grid.Column="1" AutomationProperties.Name="自动标签" DisplayMemberPath="Name" Header="自动标签（只读）" SelectionChanged="AutomaticTagsList_SelectionChanged" SelectionMode="Extended" />
+                <ListView x:Name="TagsList" TabIndex="111" AutomationProperties.Name="用户标签" AutomationProperties.HelpText="选择用户自定义标签以筛选或管理" DisplayMemberPath="Name" Header="用户标签" SelectionChanged="TagsList_SelectionChanged" SelectionMode="Extended" />
+                <ListView x:Name="AutomaticTagsList" Grid.Column="1" TabIndex="112" AutomationProperties.Name="自动标签" AutomationProperties.HelpText="查看文件系统与类型自动生成的只读标签" DisplayMemberPath="Name" Header="自动标签（只读）" SelectionChanged="AutomaticTagsList_SelectionChanged" SelectionMode="Extended" />
             </Grid>
             <StackPanel Grid.Row="7" Orientation="Horizontal" Spacing="6">
-                <Button x:Name="CreateTagButton" AutomationProperties.Name="新建标签" Click="CreateTagButton_Click" Content="新建" />
-                <Button x:Name="RenameTagButton" AutomationProperties.Name="重命名标签" Click="RenameTagButton_Click" Content="重命名" />
-                <Button x:Name="DeleteTagButton" AutomationProperties.Name="删除标签" Click="DeleteTagButton_Click" Content="删除" />
+                <Button x:Name="CreateTagButton" TabIndex="113" AutomationProperties.Name="新建标签" AutomationProperties.HelpText="以输入框内容创建新的用户标签" Click="CreateTagButton_Click" Content="新建" />
+                <Button x:Name="RenameTagButton" TabIndex="114" AutomationProperties.Name="重命名标签" AutomationProperties.HelpText="重命名当前选中的用户标签" Click="RenameTagButton_Click" Content="重命名" />
+                <Button x:Name="DeleteTagButton" TabIndex="115" AutomationProperties.Name="删除标签" AutomationProperties.HelpText="删除当前选中的用户标签" Click="DeleteTagButton_Click" Content="删除" />
             </StackPanel>
             <StackPanel Grid.Row="8" Orientation="Horizontal" Spacing="6">
-                <Button x:Name="ApplyTagButton" AutomationProperties.Name="给所选文件贴标签" Click="ApplyTagButton_Click" Content="贴到文件" />
-                <Button x:Name="RemoveTagButton" AutomationProperties.Name="从所选文件移除标签" Click="RemoveTagButton_Click" Content="从文件移除" />
+                <Button x:Name="ApplyTagButton" TabIndex="116" AutomationProperties.Name="给所选文件贴标签" AutomationProperties.HelpText="将选中的用户标签关联至所选文件" Click="ApplyTagButton_Click" Content="贴到文件" />
+                <Button x:Name="RemoveTagButton" TabIndex="117" AutomationProperties.Name="从所选文件移除标签" AutomationProperties.HelpText="从所选文件中解绑所选用户标签" Click="RemoveTagButton_Click" Content="从文件移除" />
             </StackPanel>
-            <ToggleSwitch x:Name="TagFilterToggle" Grid.Row="9" AutomationProperties.Name="按所选标签筛选" Header="按所选标签筛选" Toggled="TagFilterToggle_Toggled" />
-            <ComboBox x:Name="TagMatchBox" Grid.Row="10" AutomationProperties.Name="标签筛选匹配方式" SelectedIndex="0" SelectionChanged="TagMatchBox_SelectionChanged">
+            <ToggleSwitch x:Name="TagFilterToggle" Grid.Row="9" TabIndex="118" AutomationProperties.Name="按所选标签筛选" AutomationProperties.HelpText="启用或关闭按左侧选中标签进行文件筛选" Header="按所选标签筛选" Toggled="TagFilterToggle_Toggled" />
+            <ComboBox x:Name="TagMatchBox" Grid.Row="10" TabIndex="119" AutomationProperties.Name="标签筛选匹配方式" AutomationProperties.HelpText="切换满足任一标签或满足全部标签" SelectedIndex="0" SelectionChanged="TagMatchBox_SelectionChanged">
                 <ComboBoxItem Content="满足任一标签" />
                 <ComboBoxItem Content="满足全部标签" />
             </ComboBox>
             <StackPanel Grid.Row="11" Spacing="6">
                 <StackPanel Orientation="Horizontal" Spacing="6">
-                    <Button x:Name="ExportTagsButton" AutomationProperties.Name="导出用户标签备份" Click="ExportTagsButton_Click" Content="导出备份" />
-                    <Button x:Name="ImportTagsButton" AutomationProperties.Name="导入用户标签备份" Click="ImportTagsButton_Click" Content="导入备份" />
+                    <Button x:Name="ExportTagsButton" TabIndex="120" AutomationProperties.Name="导出用户标签备份" AutomationProperties.HelpText="将用户标签和关联关系导出为 JSON 备份文件" Click="ExportTagsButton_Click" Content="导出备份" />
+                    <Button x:Name="ImportTagsButton" TabIndex="121" AutomationProperties.Name="导入用户标签备份" AutomationProperties.HelpText="从 JSON 备份文件导入恢复用户标签与关联" Click="ImportTagsButton_Click" Content="导入备份" />
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Spacing="6">
-                    <Button x:Name="BackupNowButton" AutomationProperties.Name="立即备份用户标签" Click="BackupNowButton_Click" Content="立即备份" />
-                    <Button x:Name="RollingBackupsButton" AutomationProperties.Name="自动备份与恢复" Click="RollingBackupsButton_Click" Content="历史备份..." />
+                    <Button x:Name="BackupNowButton" TabIndex="122" AutomationProperties.Name="立即备份用户标签" AutomationProperties.HelpText="立即创建当前用户标签与关系的快照备份" Click="BackupNowButton_Click" Content="立即备份" />
+                    <Button x:Name="RollingBackupsButton" TabIndex="123" AutomationProperties.Name="自动备份与恢复" AutomationProperties.HelpText="查看自动滚动的历史备份列表并选择恢复" Click="RollingBackupsButton_Click" Content="历史备份..." />
                 </StackPanel>
-                <Button x:Name="ExportDiagnosticsButton" AutomationProperties.Name="导出诊断日志" Click="ExportDiagnosticsButton_Click" Content="导出诊断日志..." />
+                <Button x:Name="ExportDiagnosticsButton" TabIndex="124" AutomationProperties.Name="导出诊断日志" AutomationProperties.HelpText="导出系统环境与脱敏日志压缩包以供故障排查" Click="ExportDiagnosticsButton_Click" Content="导出诊断日志..." />
             </StackPanel>
-            <TextBlock x:Name="TagStatusText" Grid.Row="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+            <TextBlock x:Name="TagStatusText" Grid.Row="12" AutomationProperties.LiveSetting="Polite" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
             <Border Grid.Row="13" Height="1" Margin="0,4" Background="{ThemeResource CardStrokeColorDefaultBrush}" />
             <TextBlock Grid.Row="14" FontSize="20" FontWeight="SemiBold" Text="已保存视图" />
-            <TextBox x:Name="ViewNameBox" Grid.Row="15" AutomationProperties.Name="视图名称" MaxLength="100" PlaceholderText="输入视图名称" />
-            <ListView x:Name="SavedFilterViewsList" Grid.Row="16" AutomationProperties.Name="已保存视图" DisplayMemberPath="DisplayName" SelectionMode="Single" SelectionChanged="SavedFilterViewsList_SelectionChanged" MaxHeight="120" />
+            <TextBox x:Name="ViewNameBox" Grid.Row="15" TabIndex="130" AutomationProperties.Name="视图名称" AutomationProperties.HelpText="输入保存筛选条件的视图名称" MaxLength="100" PlaceholderText="输入视图名称" />
+            <ListView x:Name="SavedFilterViewsList" Grid.Row="16" TabIndex="131" AutomationProperties.Name="已保存视图" AutomationProperties.HelpText="选择已保存的筛选视图以快速应用筛选条件" DisplayMemberPath="DisplayName" SelectionMode="Single" SelectionChanged="SavedFilterViewsList_SelectionChanged" MaxHeight="120" />
             <StackPanel Grid.Row="17" Spacing="6">
-                <Button x:Name="SaveViewButton" AutomationProperties.Name="保存当前筛选" Click="SaveViewButton_Click" Content="保存当前筛选" HorizontalAlignment="Stretch" />
+                <Button x:Name="SaveViewButton" TabIndex="132" AutomationProperties.Name="保存当前筛选" AutomationProperties.HelpText="将当前的搜索词与标签筛选条件保存为新视图" Click="SaveViewButton_Click" Content="保存当前筛选" HorizontalAlignment="Stretch" />
                 <StackPanel Orientation="Horizontal" Spacing="6">
-                    <Button x:Name="UpdateViewButton" AutomationProperties.Name="更新已保存视图" Click="UpdateViewButton_Click" Content="更新" IsEnabled="False" />
-                    <Button x:Name="RenameViewButton" AutomationProperties.Name="重命名已保存视图" Click="RenameViewButton_Click" Content="重命名" IsEnabled="False" />
-                    <Button x:Name="DeleteViewButton" AutomationProperties.Name="删除已保存视图" Click="DeleteViewButton_Click" Content="删除" IsEnabled="False" />
+                    <Button x:Name="UpdateViewButton" TabIndex="133" AutomationProperties.Name="更新已保存视图" AutomationProperties.HelpText="将当前筛选条件更新至所选视图" Click="UpdateViewButton_Click" Content="更新" IsEnabled="False" />
+                    <Button x:Name="RenameViewButton" TabIndex="134" AutomationProperties.Name="重命名已保存视图" AutomationProperties.HelpText="重命名当前所选已保存视图" Click="RenameViewButton_Click" Content="重命名" IsEnabled="False" />
+                    <Button x:Name="DeleteViewButton" TabIndex="135" AutomationProperties.Name="删除已保存视图" AutomationProperties.HelpText="删除所选已保存视图" Click="DeleteViewButton_Click" Content="删除" IsEnabled="False" />
                 </StackPanel>
             </StackPanel>
-            <TextBlock x:Name="ViewStatusText" Grid.Row="18" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+            <TextBlock x:Name="ViewStatusText" Grid.Row="18" AutomationProperties.LiveSetting="Polite" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
         </Grid>
 
         <Grid Grid.Column="1" RowSpacing="8">
@@ -100,22 +100,24 @@
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
             <StackPanel Grid.Row="0" Spacing="8">
-                <InfoBar x:Name="DatabaseNoticeBar" AutomationProperties.Name="数据库状态提示" IsOpen="False" IsClosable="False">
+                <InfoBar x:Name="DatabaseNoticeBar" AutomationProperties.Name="数据库状态提示" AutomationProperties.LiveSetting="Assertive" IsOpen="False" IsClosable="False">
                     <InfoBar.ActionButton>
-                        <Button x:Name="DatabaseNoticeActionButton" AutomationProperties.Name="数据库状态操作" Click="DatabaseNoticeActionButton_Click" Visibility="Collapsed" />
+                        <Button x:Name="DatabaseNoticeActionButton" AutomationProperties.Name="数据库状态操作" AutomationProperties.HelpText="执行数据库维护或重建操作" Click="DatabaseNoticeActionButton_Click" Visibility="Collapsed" />
                     </InfoBar.ActionButton>
                 </InfoBar>
-                <InfoBar x:Name="FileOperationRecoveryNoticeBar" AutomationProperties.Name="文件操作恢复提示" Severity="Warning" IsOpen="False" IsClosable="True" Title="中断操作提示" Message="存在需要检查的中断文件操作。" />
+                <InfoBar x:Name="FileOperationRecoveryNoticeBar" AutomationProperties.Name="文件操作恢复提示" AutomationProperties.LiveSetting="Assertive" Severity="Warning" IsOpen="False" IsClosable="True" Title="中断操作提示" Message="存在需要检查的中断文件操作。" />
                 <Grid ColumnSpacing="8">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <TextBox x:Name="SearchBox" AutomationProperties.Name="筛选文件" PlaceholderText="按名称、路径或扩展名筛选" TextChanged="SearchBox_TextChanged" />
-                    <ComboBox x:Name="ViewModeBox" Grid.Column="1" AutomationProperties.Name="视图模式" SelectedIndex="0" SelectionChanged="ViewModeBox_SelectionChanged">
+                    <TextBox x:Name="SearchBox" TabIndex="200" AutomationProperties.Name="筛选文件" AutomationProperties.HelpText="按名称、路径或扩展名筛选" PlaceholderText="按名称、路径或扩展名筛选" TextChanged="SearchBox_TextChanged" />
+                    <ComboBox x:Name="ViewModeBox" Grid.Column="1" TabIndex="201" AutomationProperties.Name="视图模式" AutomationProperties.HelpText="切换列表视图与关系图谱视图" SelectedIndex="0" SelectionChanged="ViewModeBox_SelectionChanged">
                         <ComboBoxItem Content="列表" />
                         <ComboBoxItem Content="图谱" />
                     </ComboBox>
+                    <Button x:Name="SettingsButton" Grid.Column="2" TabIndex="202" AutomationProperties.Name="设置" AutomationProperties.HelpText="打开应用设置" Click="SettingsButton_Click" Content="设置" />
                 </Grid>
             </StackPanel>
             <Grid x:Name="SortBarGrid" Grid.Row="1" ColumnSpacing="4">
@@ -127,22 +129,22 @@
                     <ColumnDefinition Width="120" />
                     <ColumnDefinition Width="48" />
                 </Grid.ColumnDefinitions>
-                <Button x:Name="SortNameButton" AutomationProperties.Name="按名称排序" Click="SortButton_Click" Content="名称 ▲" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Tag="Name" />
-                <Button x:Name="SortPathButton" Grid.Column="1" AutomationProperties.Name="按路径排序" Click="SortButton_Click" Content="路径" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Tag="Path" />
-                <Button x:Name="SortExtensionButton" Grid.Column="2" AutomationProperties.Name="按扩展名排序" Click="SortButton_Click" Content="扩展名" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Tag="Extension" />
-                <Button x:Name="SortSizeButton" Grid.Column="3" AutomationProperties.Name="按大小排序" Click="SortButton_Click" Content="大小（字节）" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Tag="Size" />
-                <Button x:Name="SortModifiedButton" Grid.Column="4" AutomationProperties.Name="按修改时间排序" Click="SortButton_Click" Content="修改时间" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Tag="Modified" />
+                <Button x:Name="SortNameButton" TabIndex="210" AutomationProperties.Name="按名称排序" AutomationProperties.HelpText="按名称升序或降序排列" Click="SortButton_Click" Content="名称 ▲" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Tag="Name" />
+                <Button x:Name="SortPathButton" Grid.Column="1" TabIndex="211" AutomationProperties.Name="按路径排序" AutomationProperties.HelpText="按路径升序或降序排列" Click="SortButton_Click" Content="路径" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Tag="Path" />
+                <Button x:Name="SortExtensionButton" Grid.Column="2" TabIndex="212" AutomationProperties.Name="按扩展名排序" AutomationProperties.HelpText="按扩展名升序或降序排列" Click="SortButton_Click" Content="扩展名" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Tag="Extension" />
+                <Button x:Name="SortSizeButton" Grid.Column="3" TabIndex="213" AutomationProperties.Name="按大小排序" AutomationProperties.HelpText="按大小升序或降序排列" Click="SortButton_Click" Content="大小（字节）" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Tag="Size" />
+                <Button x:Name="SortModifiedButton" Grid.Column="4" TabIndex="214" AutomationProperties.Name="按修改时间排序" AutomationProperties.HelpText="按修改时间升序或降序排列" Click="SortButton_Click" Content="修改时间" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Tag="Modified" />
                 <TextBlock Grid.Column="5" VerticalAlignment="Center" Text="状态" />
             </Grid>
             <StackPanel x:Name="FileActionsPanel" Grid.Row="2" Spacing="6">
                 <StackPanel Orientation="Horizontal" Spacing="6">
-                    <Button x:Name="CopyFileButton" AutomationProperties.Name="复制所选文件" ToolTipService.ToolTip="复制 (Ctrl+C)" Click="CopyFileButton_Click" Content="复制" IsEnabled="False" />
-                    <Button x:Name="CutFileButton" AutomationProperties.Name="剪切所选文件" ToolTipService.ToolTip="剪切 (Ctrl+X)" Click="CutFileButton_Click" Content="剪切" IsEnabled="False" />
-                    <Button x:Name="PasteToFileButton" AutomationProperties.Name="粘贴文件到目标文件夹" ToolTipService.ToolTip="粘贴到… (Ctrl+V)" Click="PasteToFileButton_Click" Content="粘贴到…" IsEnabled="False" />
-                    <Button x:Name="MoveToFileButton" AutomationProperties.Name="移动所选文件到目标文件夹" ToolTipService.ToolTip="移动到…" Click="MoveToFileButton_Click" Content="移动到…" IsEnabled="False" />
-                    <Button x:Name="RenameFileButton" AutomationProperties.Name="重命名所选文件" ToolTipService.ToolTip="重命名 (F2)" Click="RenameFileButton_Click" Content="重命名" IsEnabled="False" />
-                    <Button x:Name="DeleteFileButton" AutomationProperties.Name="删除所选文件到回收站" ToolTipService.ToolTip="删除到回收站 (Delete)" Click="DeleteFileButton_Click" Content="删除" IsEnabled="False" />
-                    <ComboBox x:Name="CollisionPolicyBox" AutomationProperties.Name="冲突处理策略" SelectedIndex="0">
+                    <Button x:Name="CopyFileButton" TabIndex="220" AutomationProperties.Name="复制所选文件" AutomationProperties.HelpText="复制所选文件 (Ctrl+C)" ToolTipService.ToolTip="复制 (Ctrl+C)" Click="CopyFileButton_Click" Content="复制" IsEnabled="False" />
+                    <Button x:Name="CutFileButton" TabIndex="221" AutomationProperties.Name="剪切所选文件" AutomationProperties.HelpText="剪切所选文件 (Ctrl+X)" ToolTipService.ToolTip="剪切 (Ctrl+X)" Click="CutFileButton_Click" Content="剪切" IsEnabled="False" />
+                    <Button x:Name="PasteToFileButton" TabIndex="222" AutomationProperties.Name="粘贴文件到目标文件夹" AutomationProperties.HelpText="粘贴文件到目标文件夹 (Ctrl+V)" ToolTipService.ToolTip="粘贴到… (Ctrl+V)" Click="PasteToFileButton_Click" Content="粘贴到…" IsEnabled="False" />
+                    <Button x:Name="MoveToFileButton" TabIndex="223" AutomationProperties.Name="移动所选文件到目标文件夹" AutomationProperties.HelpText="移动所选文件到目标文件夹" ToolTipService.ToolTip="移动到…" Click="MoveToFileButton_Click" Content="移动到…" IsEnabled="False" />
+                    <Button x:Name="RenameFileButton" TabIndex="224" AutomationProperties.Name="重命名所选文件" AutomationProperties.HelpText="重命名所选文件 (F2)" ToolTipService.ToolTip="重命名 (F2)" Click="RenameFileButton_Click" Content="重命名" IsEnabled="False" />
+                    <Button x:Name="DeleteFileButton" TabIndex="225" AutomationProperties.Name="删除所选文件到回收站" AutomationProperties.HelpText="删除所选文件到回收站 (Delete)" ToolTipService.ToolTip="删除到回收站 (Delete)" Click="DeleteFileButton_Click" Content="删除" IsEnabled="False" />
+                    <ComboBox x:Name="CollisionPolicyBox" TabIndex="226" AutomationProperties.Name="冲突处理策略" AutomationProperties.HelpText="冲突处理策略" SelectedIndex="0">
                         <ComboBoxItem Content="自动重命名" />
                         <ComboBoxItem Content="跳过" />
                         <ComboBoxItem Content="覆盖" />
@@ -151,11 +153,11 @@
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <ProgressRing x:Name="FilesLoadingRing" Width="18" Height="18" Visibility="Collapsed" />
                     <ProgressRing x:Name="FileOperationProgressRing" Width="18" Height="18" Visibility="Collapsed" />
-                    <TextBlock x:Name="FilesStateText" VerticalAlignment="Center" Text="正在加载文件…" />
-                    <Button x:Name="CancelFileOperationButton" AutomationProperties.Name="取消文件操作" Click="CancelFileOperationButton_Click" Content="取消操作" Visibility="Collapsed" />
+                    <TextBlock x:Name="FilesStateText" AutomationProperties.LiveSetting="Polite" VerticalAlignment="Center" Text="正在加载文件…" />
+                    <Button x:Name="CancelFileOperationButton" TabIndex="227" AutomationProperties.Name="取消文件操作" AutomationProperties.HelpText="取消文件操作" Click="CancelFileOperationButton_Click" Content="取消操作" Visibility="Collapsed" />
                 </StackPanel>
             </StackPanel>
-            <ListView x:Name="FilesList" Grid.Row="3" AutomationProperties.Name="文件列表" DoubleTapped="FilesList_DoubleTapped" SelectionChanged="FilesList_SelectionChanged" SelectionMode="Extended" CanDragItems="True" DragItemsStarting="FilesList_DragItemsStarting" KeyDown="FilesList_KeyDown">
+            <ListView x:Name="FilesList" Grid.Row="3" TabIndex="230" AutomationProperties.Name="文件列表" AutomationProperties.HelpText="满足当前筛选条件的文件列表" DoubleTapped="FilesList_DoubleTapped" SelectionChanged="FilesList_SelectionChanged" SelectionMode="Extended" CanDragItems="True" DragItemsStarting="FilesList_DragItemsStarting" KeyDown="FilesList_KeyDown">
                 <ListView.ItemsPanel>
                     <ItemsPanelTemplate>
                         <ItemsStackPanel />
@@ -168,28 +170,28 @@
                 </ListView.ItemContainerStyle>
                 <ListView.ContextFlyout>
                     <MenuFlyout>
-                        <MenuFlyoutItem x:Name="MenuCopy" AutomationProperties.Name="右键复制" Click="CopyFileButton_Click" Text="复制">
+                        <MenuFlyoutItem x:Name="MenuCopy" AutomationProperties.Name="右键复制" AutomationProperties.HelpText="复制所选文件 (Ctrl+C)" Click="CopyFileButton_Click" Text="复制">
                             <MenuFlyoutItem.KeyboardAccelerators>
                                 <KeyboardAccelerator Modifiers="Control" Key="C" />
                             </MenuFlyoutItem.KeyboardAccelerators>
                         </MenuFlyoutItem>
-                        <MenuFlyoutItem x:Name="MenuCut" AutomationProperties.Name="右键剪切" Click="CutFileButton_Click" Text="剪切">
+                        <MenuFlyoutItem x:Name="MenuCut" AutomationProperties.Name="右键剪切" AutomationProperties.HelpText="剪切所选文件 (Ctrl+X)" Click="CutFileButton_Click" Text="剪切">
                             <MenuFlyoutItem.KeyboardAccelerators>
                                 <KeyboardAccelerator Modifiers="Control" Key="X" />
                             </MenuFlyoutItem.KeyboardAccelerators>
                         </MenuFlyoutItem>
-                        <MenuFlyoutItem x:Name="MenuPasteTo" AutomationProperties.Name="右键粘贴到" Click="PasteToFileButton_Click" Text="粘贴到…">
+                        <MenuFlyoutItem x:Name="MenuPasteTo" AutomationProperties.Name="右键粘贴到" AutomationProperties.HelpText="粘贴文件到目标文件夹 (Ctrl+V)" Click="PasteToFileButton_Click" Text="粘贴到…">
                             <MenuFlyoutItem.KeyboardAccelerators>
                                 <KeyboardAccelerator Modifiers="Control" Key="V" />
                             </MenuFlyoutItem.KeyboardAccelerators>
                         </MenuFlyoutItem>
-                        <MenuFlyoutItem x:Name="MenuMoveTo" AutomationProperties.Name="右键移动到" Click="MoveToFileButton_Click" Text="移动到…" />
-                        <MenuFlyoutItem x:Name="MenuRename" AutomationProperties.Name="右键重命名" Click="RenameFileButton_Click" Text="重命名">
+                        <MenuFlyoutItem x:Name="MenuMoveTo" AutomationProperties.Name="右键移动到" AutomationProperties.HelpText="移动所选文件到目标文件夹" Click="MoveToFileButton_Click" Text="移动到…" />
+                        <MenuFlyoutItem x:Name="MenuRename" AutomationProperties.Name="右键重命名" AutomationProperties.HelpText="重命名所选文件 (F2)" Click="RenameFileButton_Click" Text="重命名">
                             <MenuFlyoutItem.KeyboardAccelerators>
                                 <KeyboardAccelerator Key="F2" />
                             </MenuFlyoutItem.KeyboardAccelerators>
                         </MenuFlyoutItem>
-                        <MenuFlyoutItem x:Name="MenuDelete" AutomationProperties.Name="右键删除到回收站" Click="DeleteFileButton_Click" Text="删除">
+                        <MenuFlyoutItem x:Name="MenuDelete" AutomationProperties.Name="右键删除到回收站" AutomationProperties.HelpText="删除所选文件到回收站 (Delete)" Click="DeleteFileButton_Click" Text="删除">
                             <MenuFlyoutItem.KeyboardAccelerators>
                                 <KeyboardAccelerator Key="Delete" />
                             </MenuFlyoutItem.KeyboardAccelerators>
@@ -228,15 +230,15 @@
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
-                    <Button x:Name="FitViewportButton" AutomationProperties.Name="适配图谱视口" Content="适配视口" Click="FitViewportButton_Click" />
-                    <CheckBox x:Name="BroadTagsCheckBox" Grid.Column="1" AutomationProperties.Name="显示宽泛类型标签" Content="显示宽泛类型标签" Click="BroadTagsCheckBox_Click" IsChecked="False" />
-                    <TextBlock x:Name="GraphInfoText" Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <Button x:Name="FitViewportButton" TabIndex="240" IsTabStop="False" AutomationProperties.Name="适配图谱视口" AutomationProperties.HelpText="适配图谱视口" Content="适配视口" Click="FitViewportButton_Click" />
+                    <CheckBox x:Name="BroadTagsCheckBox" Grid.Column="1" TabIndex="241" IsTabStop="False" AutomationProperties.Name="显示宽泛类型标签" AutomationProperties.HelpText="在图谱中包含或排除宽泛的文件类型自动标签" Content="显示宽泛类型标签" Click="BroadTagsCheckBox_Click" IsChecked="False" />
+                    <TextBlock x:Name="GraphInfoText" Grid.Column="2" AutomationProperties.LiveSetting="Polite" VerticalAlignment="Center" HorizontalAlignment="Right" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </Grid>
                 <Grid Grid.Row="1">
-                    <WebView2 x:Name="GraphWebView" AutomationProperties.Name="关系图谱宿主" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" />
+                    <WebView2 x:Name="GraphWebView" TabIndex="242" IsTabStop="False" AutomationProperties.Name="关系图谱宿主" AutomationProperties.HelpText="关系图谱交互区域" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" />
                     <ProgressRing x:Name="GraphLoadingRing" Width="36" Height="36" HorizontalAlignment="Center" VerticalAlignment="Center" IsActive="False" Visibility="Collapsed" />
                     <StackPanel x:Name="GraphMessagePanel" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8" Visibility="Collapsed">
-                        <TextBlock x:Name="GraphStateText" AutomationProperties.Name="图谱状态提示" FontSize="14" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBlock x:Name="GraphStateText" AutomationProperties.Name="图谱状态提示" AutomationProperties.LiveSetting="Polite" FontSize="14" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     </StackPanel>
                 </Grid>
             </Grid>
@@ -255,25 +257,25 @@
             <TextBlock FontSize="20" FontWeight="SemiBold" Text="文件详情" />
             <StackPanel Grid.Row="1" Spacing="4">
                 <TextBlock x:Name="DetailsTitleText" FontWeight="SemiBold" Text="未选择文件" TextWrapping="Wrap" />
-                <TextBlock x:Name="DetailsRootOfflineNoticeText" AutomationProperties.Name="根目录离线提示" Foreground="{ThemeResource SystemFillColorCautionBrush}" FontWeight="SemiBold" TextWrapping="Wrap" Visibility="Collapsed" />
+                <TextBlock x:Name="DetailsRootOfflineNoticeText" AutomationProperties.Name="根目录离线提示" AutomationProperties.LiveSetting="Assertive" Foreground="{ThemeResource SystemFillColorCautionBrush}" FontWeight="SemiBold" TextWrapping="Wrap" Visibility="Collapsed" />
                 <TextBlock x:Name="DetailsPathText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
                 <TextBlock x:Name="DetailsMetaText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
                 <TextBlock x:Name="DetailsStatusText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
                 <TextBlock x:Name="DetailsIdentityText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
                 <TextBlock x:Name="DetailsUserTagsText" TextWrapping="Wrap" Visibility="Collapsed" />
                 <TextBlock x:Name="DetailsAutoTagsText" TextWrapping="Wrap" Visibility="Collapsed" />
-                <TextBlock x:Name="DetailsDiagnosticText" Foreground="{ThemeResource SystemFillColorCautionBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
+                <TextBlock x:Name="DetailsDiagnosticText" AutomationProperties.LiveSetting="Polite" Foreground="{ThemeResource SystemFillColorCautionBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
                 <TextBlock x:Name="DetailsText" Visibility="Collapsed" />
             </StackPanel>
             <StackPanel Grid.Row="2" Spacing="8">
                 <StackPanel Orientation="Horizontal" Spacing="6">
-                    <Button x:Name="OpenFileButton" AutomationProperties.Name="使用默认应用打开文件" Click="OpenFileButton_Click" Content="打开" IsEnabled="False" />
-                    <Button x:Name="RevealFileButton" AutomationProperties.Name="在资源管理器中显示文件" Click="RevealFileButton_Click" Content="在资源管理器中显示" IsEnabled="False" />
-                    <Button x:Name="CopyPathButton" AutomationProperties.Name="复制文件完整路径" Click="CopyPathButton_Click" Content="复制路径" IsEnabled="False" />
+                    <Button x:Name="OpenFileButton" TabIndex="300" AutomationProperties.Name="使用默认应用打开文件" AutomationProperties.HelpText="使用系统默认关联程序打开所选文件" Click="OpenFileButton_Click" Content="打开" IsEnabled="False" />
+                    <Button x:Name="RevealFileButton" TabIndex="301" AutomationProperties.Name="在资源管理器中显示文件" AutomationProperties.HelpText="在资源管理器中显示所选文件" Click="RevealFileButton_Click" Content="在资源管理器中显示" IsEnabled="False" />
+                    <Button x:Name="CopyPathButton" TabIndex="302" AutomationProperties.Name="复制文件完整路径" AutomationProperties.HelpText="复制所选文件的完整路径到剪贴板" Click="CopyPathButton_Click" Content="复制路径" IsEnabled="False" />
                 </StackPanel>
-                <Button x:Name="ReidentifyTypeButton" AutomationProperties.Name="重新识别文件类型" Click="ReidentifyTypeButton_Click" Content="重新识别类型" IsEnabled="False" />
+                <Button x:Name="ReidentifyTypeButton" TabIndex="303" AutomationProperties.Name="重新识别文件类型" AutomationProperties.HelpText="重新识别所选文件的自动类型" Click="ReidentifyTypeButton_Click" Content="重新识别类型" IsEnabled="False" />
             </StackPanel>
-            <TextBlock x:Name="FileActionStatusText" Grid.Row="3" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+            <TextBlock x:Name="FileActionStatusText" Grid.Row="3" AutomationProperties.LiveSetting="Polite" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
             <Border Grid.Row="4" Height="1" Background="{ThemeResource CardStrokeColorDefaultBrush}" />
             <TextBlock Grid.Row="5" FontSize="20" FontWeight="SemiBold" Text="扫描状态" />
             <Grid Grid.Row="6" RowSpacing="8">
@@ -284,11 +286,11 @@
                 </Grid.RowDefinitions>
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <ProgressRing x:Name="ScanProgressRing" Width="20" Height="20" Visibility="Collapsed" />
-                    <TextBlock x:Name="ProgressText" VerticalAlignment="Center" Text="空闲" />
-                    <Button x:Name="CancelButton" AutomationProperties.Name="取消扫描" Click="CancelButton_Click" Content="取消" IsEnabled="False" />
+                    <TextBlock x:Name="ProgressText" AutomationProperties.LiveSetting="Polite" VerticalAlignment="Center" Text="空闲" />
+                    <Button x:Name="CancelButton" TabIndex="310" AutomationProperties.Name="取消扫描" AutomationProperties.HelpText="取消正在运行的扫描任务" Click="CancelButton_Click" Content="取消" IsEnabled="False" />
                 </StackPanel>
                 <TextBlock Grid.Row="1" FontWeight="SemiBold" Text="失败项" />
-                <ListView x:Name="FailureList" Grid.Row="2" AutomationProperties.Name="扫描失败项" />
+                <ListView x:Name="FailureList" Grid.Row="2" TabIndex="311" AutomationProperties.Name="扫描失败项" AutomationProperties.HelpText="显示扫描失败的项目列表" />
             </Grid>
         </Grid>
     </Grid>
