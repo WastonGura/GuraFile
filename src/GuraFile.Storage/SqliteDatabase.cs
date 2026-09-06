@@ -4,7 +4,7 @@ namespace GuraFile.Storage;
 
 public static class SqliteDatabase
 {
-    public const int CurrentVersion = 9;
+    public const int CurrentVersion = 10;
 
     private static readonly string[] Migrations =
     [
@@ -227,6 +227,27 @@ public static class SqliteDatabase
         END;
 
         INSERT INTO files_fts(rowid, name, path) SELECT id, name, path FROM files;
+        """,
+        """
+        CREATE TABLE saved_filter_views (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            normalized_name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+            search_text TEXT,
+            sort_column TEXT NOT NULL DEFAULT 'Name',
+            sort_descending INTEGER NOT NULL DEFAULT 0,
+            tag_match_mode TEXT NOT NULL DEFAULT 'Any',
+            is_tag_filter_enabled INTEGER NOT NULL DEFAULT 0,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_utc TEXT NOT NULL,
+            updated_utc TEXT NOT NULL
+        );
+
+        CREATE TABLE saved_filter_view_tags (
+            view_id INTEGER NOT NULL REFERENCES saved_filter_views(id) ON DELETE CASCADE,
+            tag_id INTEGER NOT NULL,
+            PRIMARY KEY (view_id, tag_id)
+        );
         """
     ];
 

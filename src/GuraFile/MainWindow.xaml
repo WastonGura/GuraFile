@@ -26,9 +26,15 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
             <TextBlock FontSize="20" FontWeight="SemiBold" Text="管理根目录" />
-            <ListView x:Name="RootsList" Grid.Row="1" AutomationProperties.Name="管理根目录" DisplayMemberPath="DisplayName" SelectionMode="Single" AllowDrop="True" DragOver="RootsList_DragOver" Drop="RootsList_Drop" SelectionChanged="RootsList_SelectionChanged" />
+            <ListView x:Name="RootsList" Grid.Row="1" AutomationProperties.Name="管理根目录" DisplayMemberPath="DisplayName" SelectionMode="Single" AllowDrop="True" DragOver="RootsList_DragOver" Drop="RootsList_Drop" SelectionChanged="RootsList_SelectionChanged" MaxHeight="100" />
             <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
                 <Button x:Name="AddRootButton" AutomationProperties.Name="添加管理根目录" Click="AddRootButton_Click" Content="添加" />
                 <Button x:Name="RemoveRootButton" AutomationProperties.Name="移除管理根目录" Click="RemoveRootButton_Click" Content="移除" />
@@ -37,7 +43,7 @@
             <Border Grid.Row="3" Height="1" Margin="0,4" Background="{ThemeResource CardStrokeColorDefaultBrush}" />
             <TextBlock Grid.Row="4" FontSize="20" FontWeight="SemiBold" Text="标签" />
             <TextBox x:Name="TagNameBox" Grid.Row="5" AutomationProperties.Name="标签名称" MaxLength="100" PlaceholderText="输入标签名称" />
-            <Grid Grid.Row="6" ColumnSpacing="8">
+            <Grid Grid.Row="6" ColumnSpacing="8" MaxHeight="140">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="*" />
@@ -71,6 +77,19 @@
                 <Button x:Name="ExportDiagnosticsButton" AutomationProperties.Name="导出诊断日志" Click="ExportDiagnosticsButton_Click" Content="导出诊断日志..." />
             </StackPanel>
             <TextBlock x:Name="TagStatusText" Grid.Row="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+            <Border Grid.Row="13" Height="1" Margin="0,4" Background="{ThemeResource CardStrokeColorDefaultBrush}" />
+            <TextBlock Grid.Row="14" FontSize="20" FontWeight="SemiBold" Text="已保存视图" />
+            <TextBox x:Name="ViewNameBox" Grid.Row="15" AutomationProperties.Name="视图名称" MaxLength="100" PlaceholderText="输入视图名称" />
+            <ListView x:Name="SavedFilterViewsList" Grid.Row="16" AutomationProperties.Name="已保存视图" DisplayMemberPath="DisplayName" SelectionMode="Single" SelectionChanged="SavedFilterViewsList_SelectionChanged" MaxHeight="120" />
+            <StackPanel Grid.Row="17" Spacing="6">
+                <Button x:Name="SaveViewButton" AutomationProperties.Name="保存当前筛选" Click="SaveViewButton_Click" Content="保存当前筛选" HorizontalAlignment="Stretch" />
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <Button x:Name="UpdateViewButton" AutomationProperties.Name="更新已保存视图" Click="UpdateViewButton_Click" Content="更新" IsEnabled="False" />
+                    <Button x:Name="RenameViewButton" AutomationProperties.Name="重命名已保存视图" Click="RenameViewButton_Click" Content="重命名" IsEnabled="False" />
+                    <Button x:Name="DeleteViewButton" AutomationProperties.Name="删除已保存视图" Click="DeleteViewButton_Click" Content="删除" IsEnabled="False" />
+                </StackPanel>
+            </StackPanel>
+            <TextBlock x:Name="ViewStatusText" Grid.Row="18" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
         </Grid>
 
         <Grid Grid.Column="1" RowSpacing="8">

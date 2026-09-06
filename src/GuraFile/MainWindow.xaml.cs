@@ -23,6 +23,8 @@ public sealed partial class MainWindow : Window
     private readonly IFileClipboardService _clipboard;
     private FileListOperationService _fileOperations = null!;
     private GraphSnapshotService _graphSnapshotService = null!;
+    private SavedFilterViewService _savedFilterViews = null!;
+    private bool _isApplyingSavedView;
     private readonly DatabaseHealthService _healthService = new();
     private readonly DatabaseRecoveryService _recoveryService = new();
     private readonly string _databasePath = AppPaths.DefaultDatabasePath;
@@ -106,6 +108,7 @@ public sealed partial class MainWindow : Window
                 _fileQuery = new(_databasePath);
                 _tags = new(_databasePath, _rollingBackup);
                 _tagBackup = new(_databasePath);
+                _savedFilterViews = new(_databasePath);
                 _graphSnapshotService = new(_databasePath);
                 var committer = new FileOperationIndexCommitter(_scanner);
                 _fileOperations = new FileListOperationService(committer, _scanner, _clipboard);
@@ -121,6 +124,7 @@ public sealed partial class MainWindow : Window
                 }
                 _ = RefreshTagsAsync();
                 _ = RefreshAutomaticTagsAsync();
+                _ = RefreshSavedFilterViewsAsync();
                 _ = RefreshFilesAsync();
                 UpdateFileButtonsState();
                 _ = StartFileOperationCrashRecoveryAsync(committer);
@@ -204,6 +208,10 @@ public sealed partial class MainWindow : Window
         MoveToFileButton.IsEnabled = false;
         RenameFileButton.IsEnabled = false;
         DeleteFileButton.IsEnabled = false;
+        SaveViewButton.IsEnabled = false;
+        UpdateViewButton.IsEnabled = false;
+        RenameViewButton.IsEnabled = false;
+        DeleteViewButton.IsEnabled = false;
         ExportDiagnosticsButton.IsEnabled = true;
         FileOperationRecoveryNoticeBar.IsOpen = false;
     }
@@ -218,6 +226,10 @@ public sealed partial class MainWindow : Window
         ImportTagsButton.IsEnabled = true;
         BackupNowButton.IsEnabled = true;
         RollingBackupsButton.IsEnabled = true;
+        SaveViewButton.IsEnabled = true;
+        UpdateViewButton.IsEnabled = SavedFilterViewsList.SelectedItem is not null;
+        RenameViewButton.IsEnabled = SavedFilterViewsList.SelectedItem is not null;
+        DeleteViewButton.IsEnabled = SavedFilterViewsList.SelectedItem is not null;
         ExportDiagnosticsButton.IsEnabled = true;
     }
 
@@ -525,7 +537,7 @@ public sealed partial class MainWindow : Window
 
     private async void SearchBox_TextChanged(object sender, TextChangedEventArgs e)
     {
-        if (_initialized)
+        if (_initialized && !_isApplyingSavedView)
         {
             await RefreshFilesAsync(debounce: true);
         }
@@ -1418,7 +1430,7 @@ public sealed partial class MainWindow : Window
 
     private async void TagsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_refreshingTags || !_initialized)
+        if (_refreshingTags || !_initialized || _isApplyingSavedView)
         {
             return;
         }
@@ -1437,7 +1449,7 @@ public sealed partial class MainWindow : Window
 
     private async void AutomaticTagsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_refreshingAutomaticTags || !_initialized)
+        if (_refreshingAutomaticTags || !_initialized || _isApplyingSavedView)
         {
             return;
         }
@@ -1450,7 +1462,7 @@ public sealed partial class MainWindow : Window
 
     private async void TagFilterToggle_Toggled(object sender, RoutedEventArgs e)
     {
-        if (_initialized)
+        if (_initialized && !_isApplyingSavedView)
         {
             await RefreshFilesAsync();
         }
@@ -1458,7 +1470,7 @@ public sealed partial class MainWindow : Window
 
     private async void TagMatchBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_initialized && TagFilterToggle.IsOn)
+        if (_initialized && TagFilterToggle.IsOn && !_isApplyingSavedView)
         {
             await RefreshFilesAsync();
         }
@@ -1533,6 +1545,7 @@ public sealed partial class MainWindow : Window
             await Task.Run(() => _tags.DeleteTag(tag.Id));
             TagNameBox.Text = "";
             await RefreshTagsAsync();
+            await RefreshSavedFilterViewsAsync();
             await RefreshFilesAsync();
             TagStatusText.Text = $"已删除标签“{tag.Name}”；真实文件未更改。";
         }
@@ -2289,6 +2302,271 @@ public sealed partial class MainWindow : Window
 
             cancellation.Dispose();
         }
+    }
+
+    private async void SavedFilterViewsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_initialized)
+        {
+            return;
+        }
+
+        var view = SavedFilterViewsList.SelectedItem as SavedFilterView;
+        UpdateViewButtonsState();
+
+        if (view is null)
+        {
+            return;
+        }
+
+        ViewNameBox.Text = view.Name;
+
+        _isApplyingSavedView = true;
+        try
+        {
+            SearchBox.Text = view.SearchText ?? "";
+            _sortColumn = view.SortColumn;
+            _sortDescending = view.SortDescending;
+            UpdateSortLabels();
+
+            TagFilterToggle.IsOn = view.IsTagFilterEnabled;
+            TagMatchBox.SelectedIndex = view.TagMatchMode == TagMatchMode.All ? 1 : 0;
+
+            var viewTagIds = view.TagIds.ToHashSet();
+            var userTags = TagsList.ItemsSource as IReadOnlyList<UserTag> ?? [];
+            var autoTags = AutomaticTagsList.ItemsSource as IReadOnlyList<AutomaticTag> ?? [];
+
+            TagsList.SelectedItems.Clear();
+            foreach (var ut in userTags)
+            {
+                if (viewTagIds.Contains(ut.Id))
+                {
+                    TagsList.SelectedItems.Add(ut);
+                }
+            }
+
+            AutomaticTagsList.SelectedItems.Clear();
+            foreach (var at in autoTags)
+            {
+                if (viewTagIds.Contains(at.Id))
+                {
+                    AutomaticTagsList.SelectedItems.Add(at);
+                }
+            }
+        }
+        finally
+        {
+            _isApplyingSavedView = false;
+        }
+
+        await ApplySavedFilterViewAsync(view);
+    }
+
+    private async Task ApplySavedFilterViewAsync(SavedFilterView view)
+    {
+        var generation = _graphInteractionCoordinator.BeginQuery();
+        var cancellation = new CancellationTokenSource();
+        var previous = _fileQueryCancellation;
+        _fileQueryCancellation = cancellation;
+        previous?.Cancel();
+
+        try
+        {
+            if (!_graphInteractionCoordinator.CanCommitQuery(generation) || !ReferenceEquals(_fileQueryCancellation, cancellation))
+            {
+                return;
+            }
+
+            if (view.HasInvalidTags)
+            {
+                ViewStatusText.Text = $"视图“{view.Name}”包含已删除标签，筛选条件已失效。已判定为无匹配。请点击“更新”修复或“删除”。";
+            }
+            else
+            {
+                ViewStatusText.Text = $"已应用视图“{view.Name}”。";
+            }
+
+            FilesLoadingRing.IsActive = true;
+            FilesLoadingRing.Visibility = Visibility.Visible;
+            FilesStateText.Text = "正在加载文件…";
+
+            var query = _savedFilterViews.ToFileQuery(view);
+            var files = await _fileQuery.QueryAsync(query, cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+
+            if (!_graphInteractionCoordinator.CommitQuery(generation, files) || !ReferenceEquals(_fileQueryCancellation, cancellation))
+            {
+                return;
+            }
+
+            _currentFiles = files;
+            FilesList.ItemsSource = files;
+            FilesStateText.Text = files.Count == 0
+                ? (view.HasInvalidTags ? "已保存视图条件失效（0 个文件）" : "没有匹配的文件")
+                : $"{files.Count:N0} 个文件";
+
+            if (ViewModeBox.SelectedIndex == 1)
+            {
+                await RefreshGraphAsync();
+            }
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            if (_graphInteractionCoordinator.CanCommitQuery(generation) && ReferenceEquals(_fileQueryCancellation, cancellation))
+            {
+                _graphInteractionCoordinator.CommitQuery(generation, []);
+                _currentFiles = [];
+                FilesList.ItemsSource = null;
+                FilesStateText.Text = $"文件列表加载失败：{exception.Message}";
+                if (ViewModeBox.SelectedIndex == 1)
+                {
+                    UpdateGraphState(GraphViewState.Error(exception.Message));
+                }
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_fileQueryCancellation, cancellation))
+            {
+                FilesLoadingRing.IsActive = false;
+                FilesLoadingRing.Visibility = Visibility.Collapsed;
+                _fileQueryCancellation = null;
+            }
+
+            cancellation.Dispose();
+        }
+    }
+
+    private async void SaveViewButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var name = ViewNameBox.Text;
+            var searchText = string.IsNullOrWhiteSpace(SearchBox.Text) ? null : SearchBox.Text;
+            var tagIds = SelectedFilterTagIds();
+            var isTagFilterEnabled = TagFilterToggle.IsOn;
+            var matchMode = TagMatchBox.SelectedIndex == 1 ? TagMatchMode.All : TagMatchMode.Any;
+
+            var created = await Task.Run(() => _savedFilterViews.CreateView(
+                name: name,
+                searchText: searchText,
+                sortColumn: _sortColumn,
+                sortDescending: _sortDescending,
+                tagMatchMode: matchMode,
+                isTagFilterEnabled: isTagFilterEnabled,
+                tagIds: tagIds));
+
+            await RefreshSavedFilterViewsAsync(created.Id);
+            ViewStatusText.Text = $"视图“{created.Name}”已保存。";
+        }
+        catch (Exception ex)
+        {
+            ViewStatusText.Text = $"保存视图失败：{ex.Message}";
+        }
+    }
+
+    private async void UpdateViewButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (SavedFilterViewsList.SelectedItem is not SavedFilterView selected)
+        {
+            return;
+        }
+
+        try
+        {
+            var searchText = string.IsNullOrWhiteSpace(SearchBox.Text) ? null : SearchBox.Text;
+            var tagIds = SelectedFilterTagIds();
+            var isTagFilterEnabled = TagFilterToggle.IsOn;
+            var matchMode = TagMatchBox.SelectedIndex == 1 ? TagMatchMode.All : TagMatchMode.Any;
+
+            var updated = await Task.Run(() => _savedFilterViews.UpdateViewFilter(
+                id: selected.Id,
+                searchText: searchText,
+                sortColumn: _sortColumn,
+                sortDescending: _sortDescending,
+                tagMatchMode: matchMode,
+                isTagFilterEnabled: isTagFilterEnabled,
+                tagIds: tagIds));
+
+            await RefreshSavedFilterViewsAsync(updated.Id);
+            ViewStatusText.Text = $"视图“{updated.Name}”条件已更新。";
+        }
+        catch (Exception ex)
+        {
+            ViewStatusText.Text = $"更新视图失败：{ex.Message}";
+        }
+    }
+
+    private async void RenameViewButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (SavedFilterViewsList.SelectedItem is not SavedFilterView selected)
+        {
+            return;
+        }
+
+        try
+        {
+            var newName = ViewNameBox.Text;
+            var renamed = await Task.Run(() => _savedFilterViews.RenameView(selected.Id, newName));
+            await RefreshSavedFilterViewsAsync(renamed.Id);
+            ViewStatusText.Text = $"视图已重命名为“{renamed.Name}”。";
+        }
+        catch (Exception ex)
+        {
+            ViewStatusText.Text = $"重命名视图失败：{ex.Message}";
+        }
+    }
+
+    private async void DeleteViewButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (SavedFilterViewsList.SelectedItem is not SavedFilterView selected)
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.Run(() => _savedFilterViews.DeleteView(selected.Id));
+            await RefreshSavedFilterViewsAsync();
+            ViewStatusText.Text = $"视图“{selected.Name}”已删除。";
+            ViewNameBox.Text = "";
+        }
+        catch (Exception ex)
+        {
+            ViewStatusText.Text = $"删除视图失败：{ex.Message}";
+        }
+    }
+
+    private async Task RefreshSavedFilterViewsAsync(long? selectViewId = null)
+    {
+        if (!_initialized)
+        {
+            return;
+        }
+
+        try
+        {
+            var views = await Task.Run(_savedFilterViews.ListViews);
+            var previouslySelectedId = selectViewId ?? (SavedFilterViewsList.SelectedItem as SavedFilterView)?.Id;
+            SavedFilterViewsList.ItemsSource = views;
+            SavedFilterViewsList.SelectedItem = views.FirstOrDefault(v => v.Id == previouslySelectedId);
+            UpdateViewButtonsState();
+        }
+        catch (Exception ex)
+        {
+            ViewStatusText.Text = $"加载已保存视图失败：{ex.Message}";
+        }
+    }
+
+    private void UpdateViewButtonsState()
+    {
+        var hasSelection = SavedFilterViewsList.SelectedItem is not null;
+        UpdateViewButton.IsEnabled = hasSelection;
+        RenameViewButton.IsEnabled = hasSelection;
+        DeleteViewButton.IsEnabled = hasSelection;
     }
 
     private void RefreshRoots()

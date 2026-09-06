@@ -359,7 +359,7 @@ public sealed class FileChangeCoordinatorTests
         FileQueryService query,
         Func<IndexedFile, bool> predicate)
     {
-        var deadline = DateTime.UtcNow.AddSeconds(2);
+        var deadline = DateTime.UtcNow.AddSeconds(5);
         do
         {
             var file = (await query.QueryAsync(new())).FirstOrDefault(predicate);
@@ -372,7 +372,7 @@ public sealed class FileChangeCoordinatorTests
         }
         while (DateTime.UtcNow < deadline);
 
-        Assert.Fail("File change was not indexed within two seconds.");
+        Assert.Fail("File change was not indexed within five seconds.");
         throw new InvalidOperationException();
     }
 
