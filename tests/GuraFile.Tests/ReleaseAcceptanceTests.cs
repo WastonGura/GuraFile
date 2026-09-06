@@ -337,6 +337,381 @@ public sealed class ReleaseAcceptanceTests
     }
 
     [TestMethod]
+    public async Task FullBusinessChain_v050_CreateScanTagFtsSavedViewCopyMoveRenameRecycleCrashRecoveryRestart_PreservesConsistencyAndUserDataAsync()
+    {
+        using var temp = TempDirectory.Create();
+        var rootPath = Path.Combine(temp.Path, "业务链v050根目录");
+        Directory.CreateDirectory(rootPath);
+        var databasePath = Path.Combine(temp.Path, "beta_e2e_acceptance.db");
+
+        // 1. Create file on disk
+        var originalFileName = $"beta_acceptance_{Guid.NewGuid():N}.txt";
+        var originalPath = Path.Combine(rootPath, originalFileName);
+        await File.WriteAllTextAsync(originalPath, "GuraFile v0.5.0 Beta Release Full Chain Acceptance Data");
+
+        // 2. Add root and Scan
+        var scanner = new ManagedRootScanner(databasePath);
+        var root = scanner.AddRoot(rootPath);
+        var scanResult = await scanner.ScanAsync(root.Id);
+        Assert.AreEqual(1, scanResult.CommittedFiles);
+
+        var queryService = new FileQueryService(databasePath);
+        var initialFiles = await queryService.QueryAsync(new());
+        Assert.HasCount(1, initialFiles);
+        var initialFile = initialFiles[0];
+        Assert.AreEqual(originalPath, initialFile.Path);
+        Assert.IsTrue(initialFile.IsOnline);
+
+        // 3. User applies user tag
+        var tagService = new TagService(databasePath);
+        var userTag = tagService.CreateTag("BetaVerified");
+        tagService.AddTagToFiles(userTag.Id, [initialFile.Id]);
+        var tagsAfterTagging = tagService.ListTagsForFile(initialFile.Id);
+        Assert.AreEqual("BetaVerified", tagsAfterTagging.Single().Name);
+
+        var initialAutoTags = tagService.ListAutomaticTagsForFile(initialFile.Id);
+        CollectionAssert.Contains(initialAutoTags.Select(t => t.Name).ToArray(), "类型/文档");
+        CollectionAssert.Contains(initialAutoTags.Select(t => t.Name).ToArray(), "格式/TXT");
+
+        // 4. FTS5 Search verification
+        var ftsSearchResult = await queryService.QueryAsync(new(Search: "beta_acceptance"));
+        Assert.HasCount(1, ftsSearchResult);
+        Assert.AreEqual(initialFile.Id, ftsSearchResult[0].Id);
+
+        var ftsNoMatch = await queryService.QueryAsync(new(Search: "nonexistent_term_xyz"));
+        Assert.IsEmpty(ftsNoMatch);
+
+        // 5. Create Saved Filter View
+        var savedViewService = new SavedFilterViewService(databasePath);
+        var savedView = savedViewService.CreateView(
+            name: "BetaFilterView",
+            searchText: "beta_acceptance",
+            sortColumn: FileSortColumn.Name,
+            sortDescending: false,
+            tagMatchMode: TagMatchMode.Any,
+            isTagFilterEnabled: true,
+            tagIds: [userTag.Id]);
+        Assert.IsNotNull(savedView);
+        Assert.AreEqual("BetaFilterView", savedView.Name);
+        Assert.IsFalse(savedView.HasInvalidTags);
+        CollectionAssert.AreEqual(new[] { userTag.Id }, savedView.TagIds.ToArray());
+
+        var views = savedViewService.ListViews();
+        Assert.IsTrue(views.Any(v => v.Id == savedView.Id));
+
+        // 6. Copy operation (inherits user tags and computes automatic tags)
+        var copyDir = Path.Combine(rootPath, "Copied");
+        Directory.CreateDirectory(copyDir);
+        var committer = new FileOperationIndexCommitter(scanner);
+        var copyResult = await committer.CopyAsync([originalPath], copyDir, [root.Path]);
+        Assert.AreEqual(1, copyResult.SucceededCount);
+        var copiedPath = copyResult.Items[0].ActualTargetPath!;
+        Assert.IsTrue(File.Exists(originalPath));
+        Assert.IsTrue(File.Exists(copiedPath));
+
+        var filesAfterCopy = await queryService.QueryAsync(new());
+        Assert.HasCount(2, filesAfterCopy.Where(f => f.IsOnline));
+        var copiedDb = filesAfterCopy.Single(f => f.Path == copiedPath);
+        Assert.AreEqual("BetaVerified", tagService.ListTagsForFile(copiedDb.Id).Single().Name);
+
+        // 7. Same-volume rename operation (preserves user tags and updates automatic tags for .md extension)
+        var renamedFileName = $"beta_renamed_{Guid.NewGuid():N}.md";
+        var renameResult = await committer.RenameAsync(copiedPath, renamedFileName, [root.Path]);
+        Assert.AreEqual(FileOperationItemStatus.Completed, renameResult.Status);
+        var renamedPath = renameResult.ActualTargetPath!;
+        Assert.IsFalse(File.Exists(copiedPath));
+        Assert.IsTrue(File.Exists(renamedPath));
+
+        var filesAfterRename = await queryService.QueryAsync(new());
+        var renamedDb = filesAfterRename.Single(f => f.Path == renamedPath);
+        Assert.AreEqual(copiedDb.Id, renamedDb.Id);
+        Assert.AreEqual("BetaVerified", tagService.ListTagsForFile(renamedDb.Id).Single().Name);
+        var autoTagsAfterRename = tagService.ListAutomaticTagsForFile(renamedDb.Id);
+        CollectionAssert.Contains(autoTagsAfterRename.Select(t => t.Name).ToArray(), "格式/Markdown");
+
+        // 8. Move operation (preserves user tags and stable identity)
+        var moveDir = Path.Combine(rootPath, "Moved");
+        Directory.CreateDirectory(moveDir);
+        var moveResult = await committer.MoveAsync([renamedPath], moveDir, [root.Path]);
+        Assert.AreEqual(1, moveResult.SucceededCount);
+        var movedPath = moveResult.Items[0].ActualTargetPath!;
+        Assert.IsFalse(File.Exists(renamedPath));
+        Assert.IsTrue(File.Exists(movedPath));
+
+        var filesAfterMove = await queryService.QueryAsync(new());
+        var movedDb = filesAfterMove.Single(f => f.Path == movedPath);
+        Assert.AreEqual(copiedDb.Id, movedDb.Id);
+        Assert.AreEqual("BetaVerified", tagService.ListTagsForFile(movedDb.Id).Single().Name);
+
+        // 9. Delete to Recycle Bin (marks offline and preserves user tags)
+        var deleteResult = await committer.DeleteToRecycleBinAsync([movedPath], [root.Path]);
+        Assert.AreEqual(1, deleteResult.SucceededCount);
+        Assert.IsFalse(File.Exists(movedPath));
+        Assert.IsTrue(RecycleBinTestHelper.ExistsInRecycleBin(renamedFileName, Path.GetDirectoryName(movedPath)), "Deleted file was not found in Recycle Bin.");
+
+        using (var connection = SqliteDatabase.Open(databasePath))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT is_online FROM files WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$id", movedDb.Id);
+            var isOnline = (long)cmd.ExecuteScalar()!;
+            Assert.AreEqual(0, isOnline, "Deleted file must be marked offline in database.");
+        }
+
+        var offlineTags = tagService.ListTagsForFile(movedDb.Id);
+        Assert.AreEqual("BetaVerified", offlineTags.Single().Name, "Offline deleted file must preserve user tags.");
+
+        // 10. Simulate crash with pending uncommitted intent and execute recovery reconciliation
+        var simulatedTarget = Path.Combine(moveDir, "crash_simulated_target.txt");
+        long intentId;
+        using (var connection = SqliteDatabase.Open(databasePath))
+        {
+            intentId = committer.InsertIntent(
+                connection,
+                correlationId: "beta-acceptance-crash-intent",
+                operationType: "move",
+                collisionPolicy: "auto_rename",
+                items: [(originalPath, moveDir, Path.GetFileName(originalPath), simulatedTarget)]);
+        }
+
+        // Verify disk state before recovery: target does not exist
+        Assert.IsTrue(File.Exists(originalPath));
+        Assert.IsFalse(File.Exists(simulatedTarget));
+
+        var crashRecoveryService = new FileOperationCrashRecoveryService(databasePath, scanner, committer);
+        var recoveryReport = await crashRecoveryService.RecoverAsync();
+        Assert.AreEqual(1, recoveryReport.RecoveredIntentsCount);
+        Assert.AreEqual(0, recoveryReport.IndeterminateIntentsCount);
+
+        // Critical safety verification: never blindly replay physical Shell writes
+        Assert.IsFalse(File.Exists(simulatedTarget), "Crash recovery must never blindly replay Shell file operations.");
+        Assert.IsTrue(File.Exists(originalPath), "Original file must remain intact.");
+
+        using (var connection = SqliteDatabase.Open(databasePath))
+        {
+            var status = committer.GetIntentStatus(connection, intentId);
+            Assert.AreEqual("committed", status);
+        }
+
+        // 11. Restart application and rescan reconciliation
+        var restartedScanner = new ManagedRootScanner(databasePath);
+        var roots = restartedScanner.ListRoots();
+        Assert.HasCount(1, roots);
+        Assert.AreEqual(ManagedRootStatus.Online, roots[0].Status);
+
+        var restartScanResult = await restartedScanner.ScanAsync(roots[0].Id);
+        Assert.AreEqual(0, restartScanResult.AddedFiles);
+        Assert.AreEqual(0, restartScanResult.MissingFiles);
+
+        var filesAfterRestart = await queryService.QueryAsync(new());
+        var onlineAfterRestart = filesAfterRestart.Where(f => f.IsOnline).ToList();
+        var offlineAfterRestart = filesAfterRestart.Where(f => !f.IsOnline).ToList();
+
+        Assert.HasCount(1, onlineAfterRestart);
+        Assert.AreEqual(originalPath, onlineAfterRestart[0].Path);
+        Assert.AreEqual("BetaVerified", tagService.ListTagsForFile(onlineAfterRestart[0].Id).Single().Name);
+
+        Assert.HasCount(1, offlineAfterRestart);
+        Assert.AreEqual(movedDb.Id, offlineAfterRestart[0].Id);
+        Assert.AreEqual("BetaVerified", tagService.ListTagsForFile(offlineAfterRestart[0].Id).Single().Name);
+
+        // Verify saved filter view integrity after restart
+        var restartedViews = savedViewService.ListViews();
+        var persistedView = restartedViews.Single(v => v.Id == savedView.Id);
+        Assert.AreEqual("BetaFilterView", persistedView.Name);
+        Assert.IsFalse(persistedView.HasInvalidTags);
+
+        temp.Dispose();
+        Assert.IsFalse(RecycleBinTestHelper.ExistsInRecycleBin(renamedFileName, Path.GetDirectoryName(movedPath)), "Recycled file must be cleaned up from Recycle Bin after test disposal.");
+    }
+
+    [TestMethod]
+    public async Task DatabaseMigration_FromV1ToV10_PreservesUserTagsAndFullSchemaCapabilitiesAsync()
+    {
+        using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(1);
+        Assert.AreEqual(1L, DatabaseMigrationFixtures.GetUserVersion(fixture.Path));
+
+        // 1. Migrate database from v1 directly to v10 via SqliteDatabase.Open
+        using (var connection = SqliteDatabase.Open(fixture.Path))
+        {
+            Assert.AreEqual(10L, DatabaseMigrationFixtures.Scalar<long>(connection, "PRAGMA user_version;"));
+            Assert.AreEqual(SqliteDatabase.CurrentVersion, DatabaseMigrationFixtures.Scalar<long>(connection, "PRAGMA user_version;"));
+            Assert.AreEqual("wal", DatabaseMigrationFixtures.Scalar<string>(connection, "PRAGMA journal_mode;"));
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(connection, "PRAGMA foreign_keys;"));
+
+            DatabaseMigrationFixtures.AssertForeignKeys(connection);
+            DatabaseMigrationFixtures.AssertNoTemporaryTables(connection);
+        }
+
+        // 2. Verify all historical data preserved
+        var tagService = new TagService(fixture.Path);
+        var queryService = new FileQueryService(fixture.Path);
+
+        // Tags from v1: "Urgent", "Projects" (must be migrated as source = 'user')
+        var file1Tags = tagService.ListTagsForFile(1);
+        CollectionAssert.AreEquivalent(new[] { "Urgent", "Projects" }, file1Tags.Select(t => t.Name).ToArray());
+
+        var file2Tags = tagService.ListTagsForFile(2);
+        CollectionAssert.AreEquivalent(new[] { "Projects" }, file2Tags.Select(t => t.Name).ToArray());
+
+        var file3Tags = tagService.ListTagsForFile(3);
+        Assert.IsEmpty(file3Tags);
+
+        // Files from v1: 3 files (Report.pdf, Fallback.txt, Photo.jpg)
+        var allFiles = await queryService.QueryAsync(new());
+        Assert.HasCount(3, allFiles);
+        Assert.IsTrue(allFiles.All(f => f.IsOnline));
+
+        // 3. Verify FTS5 search works on the migrated files
+        var ftsReport = await queryService.QueryAsync(new(Search: "Report"));
+        Assert.HasCount(1, ftsReport);
+        Assert.AreEqual(1L, ftsReport[0].Id);
+        Assert.AreEqual("Report.pdf", ftsReport[0].Name);
+
+        // 4. Verify new schema v10 operations (e.g., SavedFilterView) work on migrated DB
+        var savedViewService = new SavedFilterViewService(fixture.Path);
+        var urgentTag = file1Tags.Single(t => t.Name == "Urgent");
+        var view = savedViewService.CreateView(
+            name: "MigratedUrgentView",
+            searchText: "Report",
+            sortColumn: FileSortColumn.Name,
+            sortDescending: false,
+            tagMatchMode: TagMatchMode.All,
+            isTagFilterEnabled: true,
+            tagIds: [urgentTag.Id]);
+
+        Assert.IsNotNull(view);
+        Assert.AreEqual("MigratedUrgentView", view.Name);
+        Assert.IsFalse(view.HasInvalidTags);
+
+        var loadedViews = savedViewService.ListViews();
+        Assert.HasCount(1, loadedViews);
+        Assert.AreEqual(view.Id, loadedViews[0].Id);
+
+        // 5. Verify adding user tags works cleanly on migrated DB
+        var newTag = tagService.CreateTag("V10NewTag");
+        tagService.AddTagToFiles(newTag.Id, [3L]);
+        var file3TagsAfter = tagService.ListTagsForFile(3L);
+        Assert.AreEqual("V10NewTag", file3TagsAfter.Single().Name);
+    }
+
+    [TestMethod]
+    public async Task CorruptedDatabase_RecoveryFromDiskAndRollingTagBackup_RestoresIndexAndReportsConflictsAsync()
+    {
+        using var temp = TempDirectory.Create();
+        var rootDir = Path.Combine(temp.Path, "RecoveryManagedRoot");
+        Directory.CreateDirectory(rootDir);
+        var backupDir = Path.Combine(temp.Path, "Backups");
+        Directory.CreateDirectory(backupDir);
+        var databasePath = Path.Combine(temp.Path, "corrupt_test.db");
+
+        // 1. Create real files on disk
+        var fileAlpha = Path.Combine(rootDir, "alpha.txt");
+        var fileBeta = Path.Combine(rootDir, "beta.txt");
+        var fileDeleted = Path.Combine(rootDir, "deleted_before_recovery.txt");
+
+        await File.WriteAllTextAsync(fileAlpha, "Content Alpha");
+        await File.WriteAllTextAsync(fileBeta, "Content Beta");
+        await File.WriteAllTextAsync(fileDeleted, "Content to be deleted");
+
+        // 2. Scan and tag files
+        var scanner = new ManagedRootScanner(databasePath);
+        var root = scanner.AddRoot(rootDir);
+        var scanResult = await scanner.ScanAsync(root.Id);
+        Assert.AreEqual(3, scanResult.CommittedFiles);
+
+        var rollingBackup = new RollingTagBackupService(databasePath, backupDir);
+        var tagService = new TagService(databasePath, rollingBackup);
+
+        var tagImportant = tagService.CreateTag("重要档案");
+        var tagProject = tagService.CreateTag("核心项目");
+
+        var queryService = new FileQueryService(databasePath);
+        var initialFiles = await queryService.QueryAsync(new());
+        var idAlpha = initialFiles.Single(f => f.Path == fileAlpha).Id;
+        var idBeta = initialFiles.Single(f => f.Path == fileBeta).Id;
+        var idDel = initialFiles.Single(f => f.Path == fileDeleted).Id;
+
+        tagService.AddTagToFiles(tagImportant.Id, [idAlpha, idDel]);
+        tagService.AddTagToFiles(tagProject.Id, [idBeta]);
+
+        // 3. Trigger rolling tag backup
+        var backupResult = rollingBackup.TriggerBackup();
+        Assert.IsTrue(backupResult.Success);
+        Assert.IsNotNull(backupResult.BackupPath);
+
+        // Delete deleted file from disk to verify unmatched files detection
+        File.Delete(fileDeleted);
+
+        // Create a new file on disk not present in backup
+        var fileGamma = Path.Combine(rootDir, "gamma.txt");
+        await File.WriteAllTextAsync(fileGamma, "Content Gamma");
+
+        // 4. Artificially corrupt the database
+        var corruptData = System.Text.Encoding.UTF8.GetBytes("INVALID_CORRUPTED_SQLITE_HEADER_DATA");
+        await File.WriteAllBytesAsync(databasePath, corruptData);
+
+        var healthService = new DatabaseHealthService();
+        var healthBefore = healthService.CheckHealth(databasePath);
+        Assert.AreEqual(DatabaseHealthStatus.Corrupted, healthBefore.Status);
+
+        // 5. Rebuild index from disk roots and restore tags from rolling backup
+        var recoveryService = new DatabaseRecoveryService();
+        var report = await recoveryService.RebuildIndexAndRestoreTagsAsync(
+            databasePath,
+            [rootDir],
+            tagBackupPath: backupResult.BackupPath,
+            tagBackupDirectory: backupDir);
+
+        Assert.IsTrue(report.Succeeded);
+        Assert.AreEqual(1, report.ScannedRoots);
+        Assert.AreEqual(3, report.DiscoveredFiles); // alpha, beta, gamma
+        Assert.AreEqual(3, report.IndexedFiles);
+        Assert.AreEqual(2, report.RestoredTags);
+        Assert.AreEqual(2, report.RestoredRelations);
+        Assert.HasCount(1, report.UnmatchedFiles);
+        StringAssert.Contains(report.UnmatchedFiles[0].Path, "deleted_before_recovery.txt");
+
+        // Verify corrupted file quarantined safely
+        Assert.IsNotNull(report.QuarantineBackupPath);
+        Assert.IsTrue(File.Exists(report.QuarantineBackupPath));
+
+        // Verify new database is healthy v10
+        var healthAfter = healthService.CheckHealth(databasePath);
+        Assert.AreEqual(DatabaseHealthStatus.Healthy, healthAfter.Status);
+        Assert.AreEqual(SqliteDatabase.CurrentVersion, healthAfter.UserVersion);
+
+        // 6. Test tag conflict detection & safe reuse upon restoring backup with conflicting casing
+        var englishTag = tagService.CreateTag("Priority");
+        var queryAfter = new FileQueryService(databasePath);
+        var filesAfter = await queryAfter.QueryAsync(new());
+        var idAlphaAfter = filesAfter.Single(f => f.Path == fileAlpha).Id;
+        tagService.AddTagToFiles(englishTag.Id, [idAlphaAfter]);
+
+        var updatedBackupResult = rollingBackup.TriggerBackup();
+        Assert.IsTrue(updatedBackupResult.Success);
+        var updatedJson = await File.ReadAllTextAsync(updatedBackupResult.BackupPath!);
+
+        // Introduce casing conflict: "Priority" -> "PRIORITY"
+        var conflictingJson = Regex.Replace(updatedJson, @"""name""\s*:\s*""Priority""", "\"name\": \"PRIORITY\"");
+        var conflictingBackupPath = Path.Combine(backupDir, "conflicting_backup.json");
+        await File.WriteAllTextAsync(conflictingBackupPath, conflictingJson);
+
+        var userTagBackupService = new UserTagBackupService(databasePath);
+        var importConflictResult = userTagBackupService.Import(conflictingJson);
+
+        Assert.AreEqual(3, importConflictResult.ReusedTags);
+        Assert.HasCount(1, importConflictResult.Conflicts);
+        Assert.AreEqual("PRIORITY", importConflictResult.Conflicts[0].ImportedName);
+        Assert.AreEqual("Priority", importConflictResult.Conflicts[0].ExistingName);
+
+        // Verify existing tag was safely reused without duplicating or corrupting relations
+        var restoredAlphaTags = tagService.ListTagsForFile(idAlphaAfter);
+        Assert.IsTrue(restoredAlphaTags.Any(t => t.Name == "Priority"));
+        Assert.IsFalse(restoredAlphaTags.Any(t => t.Name == "PRIORITY"));
+    }
+
+    [TestMethod]
     public async Task GraphPreview_ThreeHundredFilesSnapshotAndJsonSerialization_UnderOneSecond_AndEnforcesLimit()
     {
         using var temp = TempDirectory.Create();
