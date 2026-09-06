@@ -117,6 +117,7 @@ public sealed class RootDegradationStateTests
         Directory.Move(rootPath, tempHidden);
 
         coordinator.RequestRecovery(root, new IOException("Media disconnected"));
+        await recoveryTcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await WaitForRootStatusAsync(scanner, ManagedRootStatus.Offline);
 
         Assert.AreEqual(ManagedRootStatus.Offline, scanner.ListRoots().Single().Status);
@@ -133,6 +134,7 @@ public sealed class RootDegradationStateTests
         var recoveredResult = await recoveryTcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.IsNotNull(recoveredResult);
+        await WaitForRootStatusAsync(scanner, ManagedRootStatus.Online);
         Assert.AreEqual(ManagedRootStatus.Online, scanner.ListRoots().Single().Status);
 
         var updatedFiles = await queryService.QueryAsync(new());
