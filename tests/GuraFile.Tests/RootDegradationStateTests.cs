@@ -117,7 +117,7 @@ public sealed class RootDegradationStateTests
         Directory.Move(rootPath, tempHidden);
 
         coordinator.RequestRecovery(root, new IOException("Media disconnected"));
-        await Task.Delay(200);
+        await WaitForRootStatusAsync(scanner, ManagedRootStatus.Offline);
 
         Assert.AreEqual(ManagedRootStatus.Offline, scanner.ListRoots().Single().Status);
 
@@ -155,6 +155,22 @@ public sealed class RootDegradationStateTests
 
         Assert.IsTrue(entries.Any(e => e.GetProperty("event").GetString() == "RootRecovering"));
         Assert.IsTrue(entries.Any(e => e.GetProperty("event").GetString() == "RootRecovered" || e.GetProperty("event").GetString() == "RootOnline"));
+    }
+
+    private static async Task WaitForRootStatusAsync(ManagedRootScanner scanner, ManagedRootStatus status)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (scanner.ListRoots().Single().Status == status)
+            {
+                return;
+            }
+
+            await Task.Delay(25);
+        }
+
+        Assert.AreEqual(status, scanner.ListRoots().Single().Status, $"Managed root did not become {status} within five seconds.");
     }
 
     private sealed class TempDirectory : IDisposable
