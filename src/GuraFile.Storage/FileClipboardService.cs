@@ -25,6 +25,10 @@ public interface IFileClipboardService
 [SupportedOSPlatform("windows")]
 public sealed class FileClipboardService : IFileClipboardService
 {
+    public const int DefaultRetries = 4;
+    public const int DefaultDelayMs = 15;
+    public const int MaxClearAttempts = 3;
+
     private const uint CF_HDROP = 15;
     private const uint GMEM_MOVEABLE = 0x0002;
     private const uint GMEM_ZEROINIT = 0x0040;
@@ -163,7 +167,7 @@ public sealed class FileClipboardService : IFileClipboardService
             return;
         }
 
-        const int maxAttempts = 5;
+        const int maxAttempts = 3;
         for (int attempt = 0; attempt < maxAttempts; attempt++)
         {
             var dropFilesHandle = CreateDropFilesHandle(normalizedPaths);
@@ -171,7 +175,7 @@ public sealed class FileClipboardService : IFileClipboardService
 
             OleSetClipboard(IntPtr.Zero);
 
-            if (!TryOpenClipboard(retries: 25, delayMs: 25))
+            if (!TryOpenClipboard(retries: DefaultRetries, delayMs: DefaultDelayMs))
             {
                 GlobalFree(dropFilesHandle);
                 GlobalFree(dropEffectHandle);
@@ -180,7 +184,7 @@ public sealed class FileClipboardService : IFileClipboardService
                     throw new InvalidOperationException("无法打开 Windows 剪贴板。");
                 }
 
-                Thread.Sleep(50);
+                Thread.Sleep(DefaultDelayMs);
                 continue;
             }
 
@@ -230,9 +234,9 @@ public sealed class FileClipboardService : IFileClipboardService
     {
         OleSetClipboard(IntPtr.Zero);
 
-        for (int attempt = 0; attempt < 10; attempt++)
+        for (int attempt = 0; attempt < MaxClearAttempts; attempt++)
         {
-            if (TryOpenClipboard(retries: 30, delayMs: 25))
+            if (TryOpenClipboard(retries: DefaultRetries, delayMs: DefaultDelayMs))
             {
                 try
                 {
@@ -247,7 +251,10 @@ public sealed class FileClipboardService : IFileClipboardService
                 }
             }
 
-            Thread.Sleep(50);
+            if (attempt < MaxClearAttempts - 1)
+            {
+                Thread.Sleep(DefaultDelayMs);
+            }
         }
     }
 
@@ -338,7 +345,7 @@ public sealed class FileClipboardService : IFileClipboardService
         return hGlobal;
     }
 
-    private static bool TryOpenClipboard(int retries = 25, int delayMs = 25)
+    private static bool TryOpenClipboard(int retries = DefaultRetries, int delayMs = DefaultDelayMs)
     {
         for (int i = 0; i < retries; i++)
         {
@@ -349,8 +356,7 @@ public sealed class FileClipboardService : IFileClipboardService
 
             if (i < retries - 1)
             {
-                var delay = Math.Min(60, delayMs + (i * 2));
-                Thread.Sleep(delay);
+                Thread.Sleep(delayMs);
             }
         }
 

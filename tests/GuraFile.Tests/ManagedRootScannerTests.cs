@@ -623,4 +623,28 @@ public sealed class ManagedRootScannerTests
             }
         }
     }
+
+    [TestMethod]
+    public void ManagedRoot_DisplayName_GetterDoesNotPerformSynchronousIoWhenCapabilityIsNull()
+    {
+        var originalDefault = StorageCapabilityService.Default;
+        try
+        {
+            StorageCapabilityService.Default = new StorageCapabilityService(
+                getDriveSnapshot: _ => throw new InvalidOperationException("Synchronous I/O in DisplayName is forbidden!"),
+                getAttributes: _ => throw new InvalidOperationException("Synchronous I/O in DisplayName is forbidden!"));
+
+            var localRoot = new ManagedRoot(1, @"C:\Local\Path", ManagedRootStatus.Online, Capability: null);
+            var displayName = localRoot.DisplayName;
+            Assert.AreEqual(@"C:\Local\Path  [在线]", displayName);
+
+            var uncRoot = new ManagedRoot(2, @"\\server\share", ManagedRootStatus.Online, Capability: null);
+            var uncDisplayName = uncRoot.DisplayName;
+            Assert.AreEqual(@"\\server\share  [在线 · 身份跟踪有限]", uncDisplayName);
+        }
+        finally
+        {
+            StorageCapabilityService.Default = originalDefault;
+        }
+    }
 }

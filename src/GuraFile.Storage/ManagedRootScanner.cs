@@ -31,10 +31,18 @@ public sealed record ManagedRoot(
                 return $"{Path}  [正在恢复]{ErrorSuffix}";
             }
 
-            var cap = Capability ?? StorageCapabilityService.Default.Probe(Path);
-            var statusTag = cap.SupportsStableFileId
-                ? $"[在线 · {cap.FileSystemName}]"
-                : "[在线 · 身份跟踪有限]";
+            string statusTag;
+            if (Capability is not null)
+            {
+                statusTag = Capability.SupportsStableFileId
+                    ? $"[在线 · {Capability.FileSystemName}]"
+                    : "[在线 · 身份跟踪有限]";
+            }
+            else
+            {
+                var isUnc = Path.StartsWith(@"\\", StringComparison.Ordinal) || Path.StartsWith("//", StringComparison.Ordinal);
+                statusTag = isUnc ? "[在线 · 身份跟踪有限]" : "[在线]";
+            }
 
             return $"{Path}  {statusTag}{ErrorSuffix}";
         }
@@ -156,16 +164,18 @@ public sealed class ManagedRootScanner
                 using var reader = select.ExecuteReader();
                 while (reader.Read())
                 {
-                    var existing = new ManagedRoot(reader.GetInt64(0), reader.GetString(1));
-                    if (string.Equals(existing.Path, fullPath, StringComparison.OrdinalIgnoreCase))
+                    var existingId = reader.GetInt64(0);
+                    var existingPath = reader.GetString(1);
+                    if (string.Equals(existingPath, fullPath, StringComparison.OrdinalIgnoreCase))
                     {
                         transaction.Commit();
-                        return existing;
+                        var existingCap = StorageCapabilityService.Default.Probe(existingPath);
+                        return new ManagedRoot(existingId, existingPath, Capability: existingCap);
                     }
 
-                    if (IsAncestor(existing.Path, fullPath) || IsAncestor(fullPath, existing.Path))
+                    if (IsAncestor(existingPath, fullPath) || IsAncestor(fullPath, existingPath))
                     {
-                        throw new InvalidOperationException($"Managed root '{fullPath}' overlaps existing root '{existing.Path}'.");
+                        throw new InvalidOperationException($"Managed root '{fullPath}' overlaps existing root '{existingPath}'.");
                     }
                 }
             }
@@ -175,7 +185,8 @@ public sealed class ManagedRootScanner
             insert.CommandText = "INSERT INTO roots (path, normalized_path) VALUES ($path, $normalizedPath) RETURNING id;";
             insert.Parameters.AddWithValue("$path", fullPath);
             insert.Parameters.AddWithValue("$normalizedPath", fullPath);
-            var root = new ManagedRoot((long)insert.ExecuteScalar()!, fullPath);
+            var capability = StorageCapabilityService.Default.Probe(fullPath);
+            var root = new ManagedRoot((long)insert.ExecuteScalar()!, fullPath, Capability: capability);
             transaction.Commit();
             return root;
         }
@@ -984,13 +995,16 @@ public sealed class ManagedRootScanner
         return ReadManagedRoot(reader);
     }
 
-    private static ManagedRoot ReadManagedRoot(SqliteDataReader reader) =>
-        new(
-            reader.GetInt64(0),
-            reader.GetString(1),
-            ParseStatus(reader.GetString(2)),
-            reader.IsDBNull(3) ? null : reader.GetString(3),
-            reader.IsDBNull(4) ? null : DateTimeOffset.Parse(reader.GetString(4)));
+    private static ManagedRoot ReadManagedRoot(SqliteDataReader reader)
+    {
+        var id = reader.GetInt64(0);
+        var path = reader.GetString(1);
+        var status = ParseStatus(reader.GetString(2));
+        var lastError = reader.IsDBNull(3) ? null : reader.GetString(3);
+        DateTimeOffset? lastChecked = reader.IsDBNull(4) ? null : DateTimeOffset.Parse(reader.GetString(4));
+        var capability = status == ManagedRootStatus.Online ? StorageCapabilityService.Default.Probe(path) : null;
+        return new ManagedRoot(id, path, status, lastError, lastChecked, capability);
+    }
 
     private static ManagedRootStatus ParseStatus(string status) => status switch
     {

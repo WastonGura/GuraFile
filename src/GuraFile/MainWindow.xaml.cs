@@ -2060,6 +2060,10 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        var logSanitizationNote = _userSettings.DiagnosticExportAnonymizePaths
+            ? "• 本地诊断日志（logs/*.log）：已自动执行用户名与路径脱敏；\n\n"
+            : "• 本地诊断日志（logs/*.log）：当前设置保留原始路径（未开启脱敏）；\n\n";
+
         var dialog = new ContentDialog
         {
             Title = "导出诊断日志",
@@ -2070,7 +2074,7 @@ public sealed partial class MainWindow : Window
                        "【包含项说明】（严格白名单）：\n" +
                        "• 运行环境信息（environment.json）：操作系统、.NET 版本、运行架构等；\n" +
                        "• 配置摘要信息（config_summary.json）：脱敏的管理根目录、数据库架构版本、备份元数据；\n" +
-                       "• 本地诊断日志（logs/*.log）：已自动对所有绝对路径执行用户名脱敏；\n\n" +
+                       logSanitizationNote +
                        "【安全保证】：\n" +
                        "诊断包严格不包含索引数据库（index.db）、标签备份数据、您的个人文件内容或任何私钥凭据。"
             },
@@ -2279,17 +2283,23 @@ public sealed partial class MainWindow : Window
                     MinLogLevel = newLogLevel
                 };
 
-                _userSettingsService.Save(newSettings);
-                _userSettings = newSettings;
-
-                ApplyAppTheme(_userSettings.AppTheme);
-                DiagnosticLogger.Default.MinLogLevel = _userSettings.ToDiagnosticLogLevel();
-                if (_rollingBackup != null)
+                if (_userSettingsService.Save(newSettings))
                 {
-                    _rollingBackup.RetentionLimit = _userSettings.RollingBackupRetainCount;
-                }
+                    _userSettings = newSettings;
 
-                TagStatusText.Text = "应用设置已保存。";
+                    ApplyAppTheme(_userSettings.AppTheme);
+                    DiagnosticLogger.Default.MinLogLevel = _userSettings.ToDiagnosticLogLevel();
+                    if (_rollingBackup != null)
+                    {
+                        _rollingBackup.RetentionLimit = _userSettings.RollingBackupRetainCount;
+                    }
+
+                    TagStatusText.Text = "应用设置已保存。";
+                }
+                else
+                {
+                    TagStatusText.Text = "应用设置保存失败，请检查写入权限。";
+                }
             }
             else if (dialogResult == ContentDialogResult.Secondary)
             {

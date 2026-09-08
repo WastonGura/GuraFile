@@ -102,6 +102,16 @@ public class StorageCapabilityService
                 UserSummary: "未知介质 - 身份跟踪受限");
         }
 
+        if (IsUncPath(path))
+        {
+            return new StorageCapability(
+                StorageMediumKind.Network,
+                "SMB",
+                SupportsStableFileId: false,
+                IsReparsePoint: false,
+                UserSummary: "网络共享 (SMB) - 身份跟踪受限（路径降级）");
+        }
+
         var isReparsePoint = false;
         try
         {
@@ -111,20 +121,6 @@ public class StorageCapabilityService
         catch
         {
             // Path might not exist yet or be inaccessible; default to not reparse point
-        }
-
-        if (IsUncPath(path))
-        {
-            var summary = isReparsePoint
-                ? "网络共享 (SMB) [重解析点] - 身份跟踪受限（路径降级）"
-                : "网络共享 (SMB) - 身份跟踪受限（路径降级）";
-
-            return new StorageCapability(
-                StorageMediumKind.Network,
-                "SMB",
-                SupportsStableFileId: false,
-                isReparsePoint,
-                summary);
         }
 
         StorageDriveSnapshot? snapshot = null;
