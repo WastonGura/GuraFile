@@ -197,6 +197,14 @@ public sealed class FileOperationCrashRecoveryTests
                     (file1, destDir, "file1.txt", target1),
                     (file2, destDir, "file2.txt", target2)
                 ]);
+
+            committer.UpdateIntentShellCompleted(
+                connection,
+                intentId,
+                [
+                    (file1, target1, "completed", null),
+                    (file2, target2, "failed", "Shell interrupted")
+                ]);
         }
 
         // Act: Run crash recovery
@@ -480,6 +488,176 @@ public sealed class FileOperationCrashRecoveryTests
             Assert.AreEqual(2L, cmd3.ExecuteScalar());
         }
     }
+
+    [TestMethod]
+    public async Task Copy_CrashRecovery_PendingOrSkipped_PreventsOverwritingExistingTargetTags()
+    {
+        using var env = TestEnvironment.Create();
+        var sourceFile = env.CreateFile("source.txt", "source content");
+        var destDir = env.CreateDirectory("Dest");
+        var targetFile = Path.Combine(destDir, "source.txt");
+        File.WriteAllText(targetFile, "target original content");
+
+        var root = env.Scanner.AddRoot(env.RootPath);
+        await env.Scanner.ScanAsync(root.Id);
+
+        var queryService = new FileQueryService(env.DatabasePath);
+        var initialFiles = await queryService.QueryAsync(new());
+        var sourceDb = initialFiles.Single(f => f.Path == sourceFile);
+        var targetDb = initialFiles.Single(f => f.Path == targetFile);
+
+        var tagService = new TagService(env.DatabasePath);
+        var tagA = tagService.CreateTag("TagA");
+        var tagB = tagService.CreateTag("TagB");
+        tagService.AddTagToFiles(tagA.Id, [sourceDb.Id]);
+        tagService.AddTagToFiles(tagB.Id, [targetDb.Id]);
+
+        // Case 1: Crash while intent is pending (Shell never called)
+        var committer = new FileOperationIndexCommitter(env.Scanner);
+        long pendingIntentId;
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            pendingIntentId = committer.InsertIntent(
+                connection,
+                correlationId: "test-copy-pending-collision",
+                operationType: "copy",
+                collisionPolicy: "skip",
+                items: [(sourceFile, destDir, "source.txt", targetFile)]);
+        }
+
+        var recoveryService = new FileOperationCrashRecoveryService(env.DatabasePath, env.Scanner, committer);
+        var report1 = await recoveryService.RecoverAsync();
+
+        // Target's TagB must be preserved intact and NOT replaced by TagA!
+        var targetTags1 = tagService.ListTagsForFile(targetDb.Id);
+        Assert.IsTrue(targetTags1.Any(t => t.Name == "TagB"), "Target's existing TagB should be preserved.");
+        Assert.IsFalse(targetTags1.Any(t => t.Name == "TagA"), "Target should not inherit source's TagA on pending crash.");
+        Assert.AreEqual("target original content", File.ReadAllText(targetFile));
+
+        // Case 2: Intent reached Shell, but collision policy was skip and item was recorded skipped
+        long skippedIntentId;
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            skippedIntentId = committer.InsertIntent(
+                connection,
+                correlationId: "test-copy-skipped-collision",
+                operationType: "copy",
+                collisionPolicy: "skip",
+                items: [(sourceFile, destDir, "source.txt", targetFile)]);
+
+            committer.UpdateIntentShellCompleted(
+                connection,
+                skippedIntentId,
+                [(sourceFile, targetFile, "skipped", "File already exists")]);
+        }
+
+        var report2 = await recoveryService.RecoverAsync();
+
+        var targetTags2 = tagService.ListTagsForFile(targetDb.Id);
+        Assert.IsTrue(targetTags2.Any(t => t.Name == "TagB"), "Target's existing TagB should still be preserved after skipped recovery.");
+        Assert.IsFalse(targetTags2.Any(t => t.Name == "TagA"), "Target should not inherit TagA when item was skipped.");
+    }
+
+    [TestMethod]
+    public async Task Move_ReconciledByScannerBeforeRecovery_PreventsErasingTargetTags()
+    {
+        using var env = TestEnvironment.Create();
+        var sourceFile = env.CreateFile("source_move.txt", "content to move");
+        var destDir = env.CreateDirectory("Dest");
+        var targetFile = Path.Combine(destDir, "moved.txt");
+
+        var root = env.Scanner.AddRoot(env.RootPath);
+        await env.Scanner.ScanAsync(root.Id);
+
+        var queryService = new FileQueryService(env.DatabasePath);
+        var initialFiles = await queryService.QueryAsync(new());
+        var sourceDb = initialFiles.Single(f => f.Path == sourceFile);
+
+        var tagService = new TagService(env.DatabasePath);
+        var tagA = tagService.CreateTag("TagA");
+        tagService.AddTagToFiles(tagA.Id, [sourceDb.Id]);
+
+        // Shell move succeeded: physically move file
+        File.Move(sourceFile, targetFile);
+
+        var committer = new FileOperationIndexCommitter(env.Scanner);
+        long intentId;
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            intentId = committer.InsertIntent(
+                connection,
+                correlationId: "test-move-scanner-first",
+                operationType: "move",
+                collisionPolicy: "auto_rename",
+                items: [(sourceFile, destDir, "moved.txt", targetFile)]);
+
+            committer.UpdateIntentShellCompleted(
+                connection,
+                intentId,
+                [(sourceFile, targetFile, "completed", null)]);
+        }
+
+        // Simulate scanner running BEFORE crash recovery service runs
+        await env.Scanner.ScanAsync(root.Id);
+
+        // Verify that scanner updated path to targetFile and kept TagA in DB
+        var postScanFiles = await queryService.QueryAsync(new());
+        var scannedTarget = postScanFiles.Single(f => f.Path == targetFile);
+        var postScanTags = tagService.ListTagsForFile(scannedTarget.Id);
+        Assert.IsTrue(postScanTags.Any(t => t.Name == "TagA"));
+
+        // Now run crash recovery
+        var recoveryService = new FileOperationCrashRecoveryService(env.DatabasePath, env.Scanner, committer);
+        var report = await recoveryService.RecoverAsync();
+
+        Assert.AreEqual(1, report.RecoveredIntentsCount);
+
+        // Assert: Target file in DB still has TagA and was NOT erased!
+        var finalFiles = await queryService.QueryAsync(new());
+        var finalTarget = finalFiles.Single(f => f.Path == targetFile);
+        var finalTags = tagService.ListTagsForFile(finalTarget.Id);
+        Assert.IsTrue(finalTags.Any(t => t.Name == "TagA"), "Target's TagA must be preserved and not erased by recovery.");
+    }
+
+    [TestMethod]
+    public async Task IndeterminateIntents_PersistAcrossRecoveryRuns_CorrectlyReported()
+    {
+        using var env = TestEnvironment.Create();
+        var committer = new FileOperationIndexCommitter(env.Scanner);
+
+        long intentId;
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            intentId = committer.InsertIntent(
+                connection,
+                correlationId: "test-indeterminate-persist",
+                operationType: "move",
+                collisionPolicy: "auto_rename",
+                items: [("C:\\nonexistent\\file1.txt", "C:\\nonexistent\\dest", "file1.txt", "C:\\nonexistent\\dest\\file1.txt")]);
+
+            // Set intent as indeterminate (as would happen when recovery flags ambiguity or user hasn't resolved)
+            committer.UpdateIntentIndeterminate(
+                connection,
+                intentId,
+                [("C:\\nonexistent\\file1.txt", "indeterminate", "Ambiguous: source and target missing")]);
+        }
+
+        // Run recovery service (e.g. on application startup)
+        var recoveryService = new FileOperationCrashRecoveryService(env.DatabasePath, env.Scanner, committer);
+        var report = await recoveryService.RecoverAsync();
+
+        // Assert: Indeterminate intent is loaded and reported
+        Assert.AreEqual(1, report.IndeterminateIntentsCount);
+        Assert.IsTrue(report.HasIndeterminateOperations);
+        Assert.HasCount(1, report.IndeterminateDetails);
+
+        // Assert: Status in database remains indeterminate and was NOT deleted or purged
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            Assert.AreEqual("indeterminate", committer.GetIntentStatus(connection, intentId));
+        }
+    }
+
 
     private sealed class TestEnvironment : IDisposable
     {

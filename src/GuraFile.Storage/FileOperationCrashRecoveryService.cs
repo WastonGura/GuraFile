@@ -60,6 +60,27 @@ public sealed class FileOperationCrashRecoveryService
                     break;
                 }
 
+                if (string.Equals(intent.Status, "indeterminate", StringComparison.OrdinalIgnoreCase))
+                {
+                    indeterminateCount++;
+                    if (intent.Items.Count > 0)
+                    {
+                        foreach (var item in intent.Items)
+                        {
+                            var target = item.ActualTargetPath ?? item.ExpectedTargetPath;
+                            var desc = !string.IsNullOrWhiteSpace(item.Error)
+                                ? item.Error
+                                : $"{item.SourcePath} -> {target}";
+                            indeterminateDetails.Add($"[{intent.OperationType}/indeterminate] {desc}");
+                        }
+                    }
+                    else
+                    {
+                        indeterminateDetails.Add($"[{intent.OperationType}/indeterminate] (intent {intent.Id})");
+                    }
+                    continue;
+                }
+
                 bool intentHasIndeterminate = false;
                 var itemUpdates = new List<(string SourcePath, string CommitStatus, string? Error)>();
 
@@ -80,11 +101,30 @@ public sealed class FileOperationCrashRecoveryService
                                 continue;
                             }
 
+                            if (string.Equals(item.ShellStatus, "skipped", StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(item.ShellStatus, "failed", StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(item.ShellStatus, "canceled", StringComparison.OrdinalIgnoreCase))
+                            {
+                                itemUpdates.Add((source, "failed", item.Error ?? "操作已跳过或未执行。"));
+                                continue;
+                            }
+
                             var sourceExists = File.Exists(source) || Directory.Exists(source);
                             var targetExists = File.Exists(target) || Directory.Exists(target);
 
                             if (targetExists && !sourceExists)
                             {
+                                var normalizedTarget = SafeFileOperationExecutor.Normalize(target);
+                                var targetDiskId = FileIdentityReader.Read(normalizedTarget);
+
+                                // 幂等性检查：若目标在数据库中已存在且具有相同的稳定身份，说明扫描器已先于恢复完成路径对账并保留了标签
+                                if (targetDiskId.IsStable && IsTargetAlreadyIndexedWithIdentity(connection, normalizedTarget, targetDiskId))
+                                {
+                                    itemUpdates.Add((source, "committed", null));
+                                    reconciledItemsCount++;
+                                    continue;
+                                }
+
                                 // Shell move succeeded before crash, reconcile index without writing to disk
                                 var snapshot = _committer.QuerySourceSnapshot(connection, source);
                                 var commitResult = _committer.CommitSingleItem(connection, roots, source, target, isMove: true, snapshot);
@@ -114,6 +154,14 @@ public sealed class FileOperationCrashRecoveryService
                                     string.Equals(srcId.VolumeId, dstId.VolumeId, StringComparison.OrdinalIgnoreCase) &&
                                     string.Equals(srcId.FileId, dstId.FileId, StringComparison.OrdinalIgnoreCase))
                                 {
+                                    var normalizedTarget = SafeFileOperationExecutor.Normalize(target);
+                                    if (IsTargetAlreadyIndexedWithIdentity(connection, normalizedTarget, dstId))
+                                    {
+                                        itemUpdates.Add((source, "committed", null));
+                                        reconciledItemsCount++;
+                                        continue;
+                                    }
+
                                     var snapshot = _committer.QuerySourceSnapshot(connection, source);
                                     var commitResult = _committer.CommitSingleItem(connection, roots, source, target, isMove: true, snapshot);
                                     if (commitResult.Succeeded)
@@ -153,6 +201,30 @@ public sealed class FileOperationCrashRecoveryService
                             if (string.IsNullOrWhiteSpace(target))
                             {
                                 itemUpdates.Add((source, "failed", "缺少目标路径信息。"));
+                                continue;
+                            }
+
+                            // 若 intent.Status 为 pending，Shell 物理写操作未调用，绝不能仅凭目标文件在磁盘存在就认定复制成功
+                            if (string.Equals(intent.Status, "pending", StringComparison.OrdinalIgnoreCase))
+                            {
+                                itemUpdates.Add((source, "failed", "操作在执行前中断，已安全放弃，未修改目标文件。"));
+                                continue;
+                            }
+
+                            // 若 item 状态在崩溃前已记录为 skipped、failed 或 canceled，绝不继承源标签
+                            if (string.Equals(item.ShellStatus, "skipped", StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(item.ShellStatus, "failed", StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(item.ShellStatus, "canceled", StringComparison.OrdinalIgnoreCase))
+                            {
+                                itemUpdates.Add((source, "failed", item.Error ?? "文件已跳过或未执行。"));
+                                continue;
+                            }
+
+                            // 只有在 intent.Status == "shell_completed" 且 item 未被跳过/失败的前提下，才继续执行索引对账
+                            if (!string.Equals(intent.Status, "shell_completed", StringComparison.OrdinalIgnoreCase) ||
+                                !string.Equals(item.ShellStatus, "completed", StringComparison.OrdinalIgnoreCase))
+                            {
+                                itemUpdates.Add((source, "failed", "Shell 操作未成功完成，已安全放弃。"));
                                 continue;
                             }
 
@@ -269,7 +341,7 @@ public sealed class FileOperationCrashRecoveryService
                 """
                 SELECT id, correlation_id, operation_type, collision_policy, status, created_utc, completed_utc
                 FROM file_operation_intents
-                WHERE status IN ('pending', 'shell_completed')
+                WHERE status IN ('pending', 'shell_completed', 'indeterminate')
                 ORDER BY id ASC;
                 """;
 
@@ -323,5 +395,27 @@ public sealed class FileOperationCrashRecoveryService
         }
 
         return result;
+    }
+
+    private static bool IsTargetAlreadyIndexedWithIdentity(SqliteConnection connection, string normalizedTarget, FileIdentity targetDiskId)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText =
+            """
+            SELECT volume_id, file_id
+            FROM files
+            WHERE normalized_path = $path COLLATE NOCASE AND is_online = 1
+            LIMIT 1;
+            """;
+        cmd.Parameters.AddWithValue("$path", normalizedTarget);
+        using var reader = cmd.ExecuteReader();
+        if (reader.Read())
+        {
+            var dbVol = reader.GetString(0);
+            var dbFid = reader.GetString(1);
+            return string.Equals(dbVol, targetDiskId.VolumeId, StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(dbFid, targetDiskId.FileId, StringComparison.OrdinalIgnoreCase);
+        }
+        return false;
     }
 }
