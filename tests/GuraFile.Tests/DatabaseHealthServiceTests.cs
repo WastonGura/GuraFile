@@ -150,7 +150,7 @@ public sealed class DatabaseHealthServiceTests
     }
 
     [TestMethod]
-    [DataRow(11)]
+    [DataRow(12)]
     [DataRow(99)]
     public void UnsupportedFutureSchemaIsDiagnosedWithoutModifyingJournalMode(int futureVersion)
     {

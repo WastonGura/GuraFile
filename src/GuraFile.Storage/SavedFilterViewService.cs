@@ -107,7 +107,7 @@ public sealed class SavedFilterViewService
         {
             using var tagInsertCmd = connection.CreateCommand();
             tagInsertCmd.Transaction = transaction;
-            tagInsertCmd.CommandText = "INSERT INTO saved_filter_view_tags (view_id, tag_id) VALUES ($viewId, $tagId);";
+            tagInsertCmd.CommandText = "INSERT INTO saved_filter_view_tags (view_id, tag_id, is_invalid) VALUES ($viewId, $tagId, 0);";
             var pViewId = tagInsertCmd.Parameters.Add("$viewId", SqliteType.Integer);
             var pTagId = tagInsertCmd.Parameters.Add("$tagId", SqliteType.Integer);
             pViewId.Value = viewId;
@@ -152,21 +152,26 @@ public sealed class SavedFilterViewService
             }
         }
 
-        var viewTags = new Dictionary<long, List<long>>();
+        var viewTags = new Dictionary<long, (List<long> Tags, List<long> Missing)>();
         using (var vtCmd = connection.CreateCommand())
         {
-            vtCmd.CommandText = "SELECT view_id, tag_id FROM saved_filter_view_tags ORDER BY view_id, tag_id;";
+            vtCmd.CommandText = "SELECT view_id, tag_id, is_invalid FROM saved_filter_view_tags ORDER BY view_id, tag_id;";
             using var vtReader = vtCmd.ExecuteReader();
             while (vtReader.Read())
             {
                 var viewId = vtReader.GetInt64(0);
                 var tagId = vtReader.GetInt64(1);
-                if (!viewTags.TryGetValue(viewId, out var list))
+                var isInvalid = vtReader.GetInt64(2) != 0;
+                if (!viewTags.TryGetValue(viewId, out var entry))
                 {
-                    list = [];
-                    viewTags[viewId] = list;
+                    entry = (new List<long>(), new List<long>());
+                    viewTags[viewId] = entry;
                 }
-                list.Add(tagId);
+                entry.Tags.Add(tagId);
+                if (isInvalid || !existingTagIds.Contains(tagId))
+                {
+                    entry.Missing.Add(tagId);
+                }
             }
         }
 
@@ -193,9 +198,8 @@ public sealed class SavedFilterViewService
                 var createdUtc = ParseUtc(reader.GetString(8));
                 var updatedUtc = ParseUtc(reader.GetString(9));
 
-                var tagIds = viewTags.TryGetValue(id, out var tags) ? (IReadOnlyList<long>)tags : Array.Empty<long>();
-                var missing = tagIds.Where(tid => !existingTagIds.Contains(tid)).ToArray();
-                var hasInvalidTags = missing.Length > 0;
+                var (tagIds, missing) = viewTags.TryGetValue(id, out var pair) ? (pair.Tags, pair.Missing) : ([], []);
+                var hasInvalidTags = missing.Count > 0;
 
                 views.Add(new SavedFilterView(
                     id,
@@ -233,14 +237,21 @@ public sealed class SavedFilterViewService
         }
 
         var tagIds = new List<long>();
+        var missingTagIds = new List<long>();
         using (var vtCmd = connection.CreateCommand())
         {
-            vtCmd.CommandText = "SELECT tag_id FROM saved_filter_view_tags WHERE view_id = $viewId ORDER BY tag_id;";
+            vtCmd.CommandText = "SELECT tag_id, is_invalid FROM saved_filter_view_tags WHERE view_id = $viewId ORDER BY tag_id;";
             vtCmd.Parameters.AddWithValue("$viewId", id);
             using var vtReader = vtCmd.ExecuteReader();
             while (vtReader.Read())
             {
-                tagIds.Add(vtReader.GetInt64(0));
+                var tagId = vtReader.GetInt64(0);
+                var isInvalid = vtReader.GetInt64(1) != 0;
+                tagIds.Add(tagId);
+                if (isInvalid || !existingTagIds.Contains(tagId))
+                {
+                    missingTagIds.Add(tagId);
+                }
             }
         }
 
@@ -268,8 +279,7 @@ public sealed class SavedFilterViewService
         var createdUtc = ParseUtc(reader.GetString(8));
         var updatedUtc = ParseUtc(reader.GetString(9));
 
-        var missing = tagIds.Where(tid => !existingTagIds.Contains(tid)).ToArray();
-        var hasInvalidTags = missing.Length > 0;
+        var hasInvalidTags = missingTagIds.Count > 0;
 
         return new SavedFilterView(
             id,
@@ -284,7 +294,7 @@ public sealed class SavedFilterViewService
             createdUtc,
             updatedUtc,
             hasInvalidTags,
-            hasInvalidTags ? missing : null);
+            hasInvalidTags ? missingTagIds : null);
     }
 
     public SavedFilterView RenameView(long id, string newName)
@@ -384,7 +394,7 @@ public sealed class SavedFilterViewService
         {
             using var insertTagsCmd = connection.CreateCommand();
             insertTagsCmd.Transaction = transaction;
-            insertTagsCmd.CommandText = "INSERT INTO saved_filter_view_tags (view_id, tag_id) VALUES ($viewId, $tagId);";
+            insertTagsCmd.CommandText = "INSERT INTO saved_filter_view_tags (view_id, tag_id, is_invalid) VALUES ($viewId, $tagId, 0);";
             var pViewId = insertTagsCmd.Parameters.Add("$viewId", SqliteType.Integer);
             var pTagId = insertTagsCmd.Parameters.Add("$tagId", SqliteType.Integer);
             pViewId.Value = id;

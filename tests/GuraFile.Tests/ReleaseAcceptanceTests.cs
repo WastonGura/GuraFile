@@ -526,16 +526,15 @@ public sealed class ReleaseAcceptanceTests
     }
 
     [TestMethod]
-    public async Task DatabaseMigration_FromV1ToV10_PreservesUserTagsAndFullSchemaCapabilitiesAsync()
+    public async Task DatabaseMigration_FromV1ToCurrentVersion_PreservesUserTagsAndFullSchemaCapabilitiesAsync()
     {
         using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(1);
         Assert.AreEqual(1L, DatabaseMigrationFixtures.GetUserVersion(fixture.Path));
 
-        // 1. Migrate database from v1 directly to v10 via SqliteDatabase.Open
+        // 1. Migrate database from v1 directly to current version via SqliteDatabase.Open
         using (var connection = SqliteDatabase.Open(fixture.Path))
         {
-            Assert.AreEqual(10L, DatabaseMigrationFixtures.Scalar<long>(connection, "PRAGMA user_version;"));
-            Assert.AreEqual(SqliteDatabase.CurrentVersion, DatabaseMigrationFixtures.Scalar<long>(connection, "PRAGMA user_version;"));
+            Assert.AreEqual((long)SqliteDatabase.CurrentVersion, DatabaseMigrationFixtures.Scalar<long>(connection, "PRAGMA user_version;"));
             Assert.AreEqual("wal", DatabaseMigrationFixtures.Scalar<string>(connection, "PRAGMA journal_mode;"));
             Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(connection, "PRAGMA foreign_keys;"));
 
