@@ -40,8 +40,36 @@ public static class FtsQueryBuilder
         return builder.ToString();
     }
 
-    private static List<string> ExtractTokens(string input)
+    /// <summary>
+    /// Escapes characters with special meaning in SQLite LIKE pattern (%, _, \).
+    /// Used in conjunction with ESCAPE '\'.
+    /// </summary>
+    public static string EscapeLikePattern(string raw)
     {
+        if (string.IsNullOrEmpty(raw))
+        {
+            return string.Empty;
+        }
+
+        var sb = new StringBuilder(raw.Length + 4);
+        foreach (var ch in raw)
+        {
+            if (ch is '\\' or '%' or '_')
+            {
+                sb.Append('\\');
+            }
+            sb.Append(ch);
+        }
+        return sb.ToString();
+    }
+
+    public static IReadOnlyList<string> ExtractTokens(string? input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return [];
+        }
+
         var tokens = new List<string>();
         var current = new StringBuilder();
 
