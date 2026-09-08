@@ -952,42 +952,47 @@ public sealed class FileOperationIndexCommitter
 
         if (isCrossVolumeOrCopy)
         {
-            using (var clearUserTags = connection.CreateCommand())
+            // 防抹除保护：当源快照为空（无用户标签且源文件未在数据库中找到记录）时，严禁清空目标节点已有的用户标签
+            var isSourceSnapshotEmpty = snapshot.DbFileId == null && snapshot.UserTags.Count == 0;
+            if (!isSourceSnapshotEmpty)
             {
-                clearUserTags.Transaction = transaction;
-                clearUserTags.CommandText = "DELETE FROM file_tags WHERE file_id = $fileId AND source = 'user';";
-                clearUserTags.Parameters.AddWithValue("$fileId", persistedFileId);
-                clearUserTags.ExecuteNonQuery();
-            }
-
-            if (snapshot.UserTags.Count > 0)
-            {
-                foreach (var userTagName in snapshot.UserTags)
+                using (var clearUserTags = connection.CreateCommand())
                 {
-                    var (displayName, normalizedTagName) = TagService.NormalizeName(userTagName);
-                    long tagId;
-                    using (var tagCmd = connection.CreateCommand())
-                    {
-                        tagCmd.Transaction = transaction;
-                        tagCmd.CommandText =
-                            """
-                            INSERT INTO tags (name, normalized_name, source)
-                            VALUES ($name, $normalizedName, 'user')
-                            ON CONFLICT(normalized_name, source) DO UPDATE SET name = excluded.name
-                            RETURNING id;
-                            """;
-                        tagCmd.Parameters.AddWithValue("$name", displayName);
-                        tagCmd.Parameters.AddWithValue("$normalizedName", normalizedTagName);
-                        tagId = (long)tagCmd.ExecuteScalar()!;
-                    }
+                    clearUserTags.Transaction = transaction;
+                    clearUserTags.CommandText = "DELETE FROM file_tags WHERE file_id = $fileId AND source = 'user';";
+                    clearUserTags.Parameters.AddWithValue("$fileId", persistedFileId);
+                    clearUserTags.ExecuteNonQuery();
+                }
 
-                    using var relationCmd = connection.CreateCommand();
-                    relationCmd.Transaction = transaction;
-                    relationCmd.CommandText =
-                        "INSERT INTO file_tags (file_id, tag_id, source) VALUES ($fileId, $tagId, 'user') ON CONFLICT DO NOTHING;";
-                    relationCmd.Parameters.AddWithValue("$fileId", persistedFileId);
-                    relationCmd.Parameters.AddWithValue("$tagId", tagId);
-                    relationCmd.ExecuteNonQuery();
+                if (snapshot.UserTags.Count > 0)
+                {
+                    foreach (var userTagName in snapshot.UserTags)
+                    {
+                        var (displayName, normalizedTagName) = TagService.NormalizeName(userTagName);
+                        long tagId;
+                        using (var tagCmd = connection.CreateCommand())
+                        {
+                            tagCmd.Transaction = transaction;
+                            tagCmd.CommandText =
+                                """
+                                INSERT INTO tags (name, normalized_name, source)
+                                VALUES ($name, $normalizedName, 'user')
+                                ON CONFLICT(normalized_name, source) DO UPDATE SET name = excluded.name
+                                RETURNING id;
+                                """;
+                            tagCmd.Parameters.AddWithValue("$name", displayName);
+                            tagCmd.Parameters.AddWithValue("$normalizedName", normalizedTagName);
+                            tagId = (long)tagCmd.ExecuteScalar()!;
+                        }
+
+                        using var relationCmd = connection.CreateCommand();
+                        relationCmd.Transaction = transaction;
+                        relationCmd.CommandText =
+                            "INSERT INTO file_tags (file_id, tag_id, source) VALUES ($fileId, $tagId, 'user') ON CONFLICT DO NOTHING;";
+                        relationCmd.Parameters.AddWithValue("$fileId", persistedFileId);
+                        relationCmd.Parameters.AddWithValue("$tagId", tagId);
+                        relationCmd.ExecuteNonQuery();
+                    }
                 }
             }
         }
@@ -1248,6 +1253,31 @@ public sealed class FileOperationIndexCommitter
                 FROM files f
                 WHERE f.normalized_path = $normalizedPath COLLATE NOCASE AND f.is_online = 1
                 ORDER BY f.id DESC
+                LIMIT 1;
+                """;
+            command.Parameters.AddWithValue("$normalizedPath", normalizedSource);
+            using var reader = command.ExecuteReader();
+            if (reader.Read())
+            {
+                dbFileId = reader.GetInt64(0);
+                var vol = reader.GetString(1);
+                var fid = reader.GetString(2);
+                var kind = reader.GetString(3);
+                var diag = reader.IsDBNull(4) ? null : reader.GetString(4);
+                dbIdentity = new FileIdentity(vol, fid, kind == "stable", diag);
+            }
+        }
+
+        // Fallback query by normalized path (including offline files)
+        if (dbFileId is null)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                """
+                SELECT f.id, f.volume_id, f.file_id, f.identity_kind, f.identity_diagnostic
+                FROM files f
+                WHERE f.normalized_path = $normalizedPath COLLATE NOCASE
+                ORDER BY f.is_online DESC, f.id DESC
                 LIMIT 1;
                 """;
             command.Parameters.AddWithValue("$normalizedPath", normalizedSource);
