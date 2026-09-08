@@ -65,7 +65,7 @@ public class DiagnosticLogger
         RegexOptions.Compiled);
 
     private static readonly Regex PasswordSecretRegex = new(
-        @"(?i)\b(password|secret|token|apikey)\s*[:=]\s*([^\s,;]+)",
+        @"(?i)(""?\b(?:password|secret|token|apikey|api_key|access_token)""?\s*[:=]\s*)(""[^""\r\n]*""|[^\s,;}{\])]+)",
         RegexOptions.Compiled);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -499,7 +499,16 @@ public class DiagnosticLogger
         result = SecretTokenRegex.Replace(result, "${1}***");
 
         // Sanitize passwords and secrets
-        result = PasswordSecretRegex.Replace(result, "$1=***");
+        result = PasswordSecretRegex.Replace(result, match =>
+        {
+            var prefix = match.Groups[1].Value;
+            var val = match.Groups[2].Value;
+            if (val.StartsWith('"') && val.EndsWith('"'))
+            {
+                return $"{prefix}\"***\"";
+            }
+            return $"{prefix}***";
+        });
 
         return result;
     }

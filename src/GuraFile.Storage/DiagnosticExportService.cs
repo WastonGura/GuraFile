@@ -160,7 +160,7 @@ public sealed class DiagnosticExportService
         writer.Write(content);
     }
 
-    private string ReadAndSanitizeLogFile(string logFilePath)
+    internal string ReadAndSanitizeLogFile(string logFilePath)
     {
         try
         {
@@ -179,7 +179,8 @@ public sealed class DiagnosticExportService
         }
         catch (Exception ex)
         {
-            return $"[Log read error: {ex.Message}]";
+            var message = _anonymizePaths ? DiagnosticLogger.SanitizeText(ex.Message) : ex.Message;
+            return $"[Log read error: {message}]";
         }
     }
 

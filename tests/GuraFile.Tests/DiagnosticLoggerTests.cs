@@ -246,4 +246,30 @@ public sealed class DiagnosticLoggerTests
         Assert.IsFalse(File.Exists(oldFile1));
         Assert.IsFalse(File.Exists(oldFile2));
     }
+
+    [TestMethod]
+    public void DiagnosticLogger_SanitizeText_JsonPropertiesRemainValidJson()
+    {
+        var json = "{\"token\": \"secret_token_123\", \"password\": \"my_password_xyz\", \"apiKey\": \"key_999\", \"other\": \"normal\"}";
+        var sanitized = DiagnosticLogger.SanitizeText(json);
+
+        Assert.DoesNotContain("secret_token_123", sanitized);
+        Assert.DoesNotContain("my_password_xyz", sanitized);
+        Assert.DoesNotContain("key_999", sanitized);
+
+        using var doc = JsonDocument.Parse(sanitized);
+        var root = doc.RootElement;
+        Assert.AreEqual("***", root.GetProperty("token").GetString());
+        Assert.AreEqual("***", root.GetProperty("password").GetString());
+        Assert.AreEqual("***", root.GetProperty("apiKey").GetString());
+        Assert.AreEqual("normal", root.GetProperty("other").GetString());
+    }
+
+    [TestMethod]
+    public void DiagnosticLogger_SanitizeText_DoesNotEatTrailingBraceOrQuotes()
+    {
+        var line = "Event with password: \"super_secret\"}";
+        var sanitized = DiagnosticLogger.SanitizeText(line);
+        Assert.AreEqual("Event with password: \"***\"}", sanitized);
+    }
 }

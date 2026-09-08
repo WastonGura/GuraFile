@@ -24,6 +24,21 @@ public sealed class StorageCapabilityServiceTests
     }
 
     [TestMethod]
+    public void Probe_UncPath_DoesNotInvokeGetAttributes()
+    {
+        var getAttributesCalled = false;
+        var service = new StorageCapabilityService(
+            getDriveSnapshot: _ => null,
+            getAttributes: _ => { getAttributesCalled = true; return FileAttributes.Directory; });
+
+        var capability = service.Probe(@"\\offline-server\share\subfolder");
+
+        Assert.IsFalse(getAttributesCalled, "StorageCapabilityService.Probe must not call getAttributes for UNC paths to avoid network blocking");
+        Assert.AreEqual(StorageMediumKind.Network, capability.MediumKind);
+        Assert.AreEqual("SMB", capability.FileSystemName);
+    }
+
+    [TestMethod]
     public void Probe_MappedNetworkDrive_IdentifiesAsNetworkAndPathDegraded()
     {
         var service = new StorageCapabilityService(

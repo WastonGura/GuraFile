@@ -82,6 +82,15 @@ public sealed class FileClipboardServiceTests
         }
     }
 
+    [TestMethod]
+    public void FileClipboardService_RetryParametersAreBounded()
+    {
+        Assert.IsLessThanOrEqualTo(5, FileClipboardService.DefaultRetries);
+        Assert.IsLessThanOrEqualTo(20, FileClipboardService.DefaultDelayMs);
+        Assert.IsLessThanOrEqualTo(150, FileClipboardService.DefaultRetries * FileClipboardService.DefaultDelayMs);
+        Assert.IsLessThanOrEqualTo(3, FileClipboardService.MaxClearAttempts);
+    }
+
     [TestCleanup]
     public void Cleanup()
     {

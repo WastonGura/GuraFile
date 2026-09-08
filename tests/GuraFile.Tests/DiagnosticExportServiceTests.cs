@@ -208,4 +208,23 @@ public sealed class DiagnosticExportServiceTests
         var pathInJson = roots[0].GetProperty("path").GetString();
         Assert.AreEqual(rawUserPath, pathInJson);
     }
+
+    [TestMethod]
+    public void ReadAndSanitizeLogFile_WhenFileThrowsException_SanitizesExceptionMessageIfAnonymizeEnabled()
+    {
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var nonexistentUserLog = Path.Combine(userProfile, "NonexistentSecretLogsDir", "gurafile_2026-09-08.log");
+
+        var service = new DiagnosticExportService(
+            databasePath: _dbPath,
+            logsDirectory: _logsDir,
+            backupDirectory: _backupDir,
+            anonymizePaths: true);
+
+        var content = service.ReadAndSanitizeLogFile(nonexistentUserLog);
+
+        Assert.StartsWith("[Log read error:", content);
+        Assert.DoesNotContain(Environment.UserName, content, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("<user>", content);
+    }
 }
