@@ -75,15 +75,34 @@ public sealed class FileQueryService
                 _ => throw new ArgumentOutOfRangeException(nameof(query), query.SortBy, "Unsupported sort column.")
             };
             var direction = query.Descending ? "DESC" : "ASC";
-            var joinFts = false;
+            var joinSearch = false;
+            string? searchSubquery = null;
             if (!string.IsNullOrWhiteSpace(query.Search))
             {
-                var ftsQuery = FtsQueryBuilder.Build(query.Search);
-                if (ftsQuery is not null)
+                var tokens = FtsQueryBuilder.ExtractTokens(query.Search);
+                if (tokens.Count > 0)
                 {
-                    joinFts = true;
-                    filters.Add("fts.files_fts MATCH $ftsQuery");
+                    joinSearch = true;
+                    var ftsQuery = FtsQueryBuilder.Build(query.Search)!;
                     command.Parameters.AddWithValue("$ftsQuery", ftsQuery);
+
+                    var likeConditions = new List<string>(tokens.Count);
+                    for (var i = 0; i < tokens.Count; i++)
+                    {
+                        var paramName = $"$likePattern{i}";
+                        command.Parameters.AddWithValue(paramName, $"%{FtsQueryBuilder.EscapeLikePattern(tokens[i])}%");
+                        likeConditions.Add($"(f_sub.name LIKE {paramName} ESCAPE '\\' OR f_sub.path LIKE {paramName} ESCAPE '\\')");
+                    }
+
+                    var likeClause = string.Join(" AND ", likeConditions);
+                    searchSubquery =
+                        $"""
+                        (
+                            SELECT rowid AS id FROM files_fts WHERE files_fts MATCH $ftsQuery
+                            UNION
+                            SELECT f_sub.id FROM files f_sub WHERE {likeClause}
+                        )
+                        """;
                 }
                 else
                 {
@@ -132,8 +151,8 @@ public sealed class FileQueryService
                 }
             }
 
-            var fromClause = joinFts
-                ? "FROM files f JOIN files_fts fts ON fts.rowid = f.id"
+            var fromClause = joinSearch
+                ? $"FROM files f JOIN {searchSubquery} matched ON matched.id = f.id"
                 : "FROM files f";
             var where = filters.Count == 0 ? "" : $"WHERE {string.Join(" AND ", filters)}";
             command.CommandText =

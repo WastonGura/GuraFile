@@ -189,7 +189,7 @@ public sealed class DiagnosticExportService
         var assembly = Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly();
         var version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
                       ?? assembly.GetName().Version?.ToString()
-                      ?? "0.5.0";
+                      ?? "0.5.1";
 
         var envData = new Dictionary<string, object?>
         {

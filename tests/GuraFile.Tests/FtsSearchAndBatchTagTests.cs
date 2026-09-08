@@ -286,14 +286,26 @@ public sealed class FtsSearchAndBatchTagTests
             cmd.ExecuteNonQuery();
         }
 
-        // Search should now find nothing
-        var empty = await queryService.QueryAsync(new FileQuery(Search: "DocA"));
-        Assert.IsEmpty(empty);
+        // Verify FTS index entries are cleared before rebuild
+        using (var connection = SqliteDatabase.Open(db.Path))
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "SELECT COUNT(*) FROM files_fts WHERE files_fts MATCH '\"DocA\"*';";
+            Assert.AreEqual(0L, (long)cmd.ExecuteScalar()!);
+        }
 
         // Rebuild search index
         await queryService.RebuildSearchIndexAsync();
 
-        // Search should now succeed for both files
+        // Verify FTS index restored
+        using (var connection = SqliteDatabase.Open(db.Path))
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "SELECT COUNT(*) FROM files_fts WHERE files_fts MATCH '\"DocA\"*';";
+            Assert.AreEqual(1L, (long)cmd.ExecuteScalar()!);
+        }
+
+        // Search succeeds for both files
         var foundA = await queryService.QueryAsync(new FileQuery(Search: "DocA"));
         Assert.HasCount(1, foundA);
         Assert.AreEqual("DocA.txt", foundA[0].Name);
@@ -539,7 +551,7 @@ public sealed class FtsSearchAndBatchTagTests
             var results = await queryService.QueryAsync(new FileQuery(Search: "Document_00005"));
             sw.Stop();
             Console.WriteLine($"[Scale Search Run {run}] 'Document_00005' returned {results.Count} rows in {sw.Elapsed.TotalMilliseconds:F2} ms");
-            Assert.HasCount(10, results);
+            Assert.HasCount(11, results);
             Assert.IsTrue(sw.Elapsed < TimeSpan.FromMilliseconds(200), $"Search run {run} took {sw.Elapsed.TotalMilliseconds} ms, exceeding 200ms budget.");
         }
 
@@ -553,7 +565,7 @@ public sealed class FtsSearchAndBatchTagTests
                 TagMatch: TagMatchMode.Any));
             sw.Stop();
             Console.WriteLine($"[Scale Search + Tag Any Run {run}] returned {results.Count} rows in {sw.Elapsed.TotalMilliseconds:F2} ms");
-            Assert.HasCount(10, results);
+            Assert.HasCount(11, results);
             Assert.IsTrue(sw.Elapsed < TimeSpan.FromMilliseconds(200), $"Search + Tag Any run {run} took {sw.Elapsed.TotalMilliseconds} ms, exceeding 200ms budget.");
         }
 
@@ -567,7 +579,7 @@ public sealed class FtsSearchAndBatchTagTests
                 TagMatch: TagMatchMode.All));
             sw.Stop();
             Console.WriteLine($"[Scale Search + Tag All Run {run}] returned {results.Count} rows in {sw.Elapsed.TotalMilliseconds:F2} ms");
-            Assert.HasCount(10, results);
+            Assert.HasCount(11, results);
             Assert.IsTrue(sw.Elapsed < TimeSpan.FromMilliseconds(200), $"Search + Tag All run {run} took {sw.Elapsed.TotalMilliseconds} ms, exceeding 200ms budget.");
         }
 
@@ -581,8 +593,210 @@ public sealed class FtsSearchAndBatchTagTests
                 Descending: true));
             sw.Stop();
             Console.WriteLine($"[Scale Search + Sort Run {run}] returned {results.Count} rows in {sw.Elapsed.TotalMilliseconds:F2} ms");
-            Assert.HasCount(10, results);
+            Assert.HasCount(11, results);
             Assert.IsTrue(sw.Elapsed < TimeSpan.FromMilliseconds(200), $"Search + Sort run {run} took {sw.Elapsed.TotalMilliseconds} ms, exceeding 200ms budget.");
+        }
+
+        // 5. Three consecutive pure Tag Any filter without search (< 200ms)
+        for (var run = 1; run <= 3; run++)
+        {
+            var sw = Stopwatch.StartNew();
+            var results = await queryService.QueryAsync(new FileQuery(
+                TagIds: [1, 2],
+                TagMatch: TagMatchMode.Any));
+            sw.Stop();
+            Console.WriteLine($"[Scale Pure Tag Any Run {run}] returned {results.Count} rows in {sw.Elapsed.TotalMilliseconds:F2} ms");
+            Assert.HasCount(10_000, results);
+            Assert.IsTrue(sw.Elapsed < TimeSpan.FromMilliseconds(200), $"Pure Tag Any run {run} took {sw.Elapsed.TotalMilliseconds} ms, exceeding 200ms budget.");
+        }
+
+        // 6. Three consecutive pure Tag All filter without search (< 200ms)
+        for (var run = 1; run <= 3; run++)
+        {
+            var sw = Stopwatch.StartNew();
+            var results = await queryService.QueryAsync(new FileQuery(
+                TagIds: [1, 2],
+                TagMatch: TagMatchMode.All));
+            sw.Stop();
+            Console.WriteLine($"[Scale Pure Tag All Run {run}] returned {results.Count} rows in {sw.Elapsed.TotalMilliseconds:F2} ms");
+            Assert.HasCount(5_000, results);
+            Assert.IsTrue(sw.Elapsed < TimeSpan.FromMilliseconds(200), $"Pure Tag All run {run} took {sw.Elapsed.TotalMilliseconds} ms, exceeding 200ms budget.");
+        }
+
+        // 7. Three consecutive wide substring searches (< 200ms)
+        for (var run = 1; run <= 3; run++)
+        {
+            var sw = Stopwatch.StartNew();
+            var results = await queryService.QueryAsync(new FileQuery(Search: "00005"));
+            sw.Stop();
+            Console.WriteLine($"[Scale Wide Substring Run {run}] '00005' returned {results.Count} rows in {sw.Elapsed.TotalMilliseconds:F2} ms");
+            Assert.HasCount(11, results);
+            Assert.IsTrue(sw.Elapsed < TimeSpan.FromMilliseconds(200), $"Wide substring run {run} took {sw.Elapsed.TotalMilliseconds} ms, exceeding 200ms budget.");
+        }
+    }
+
+    [TestMethod]
+    public async Task SubstringSearch_CamelCase_FindsSubstring()
+    {
+        using var db = new TempTestDatabase();
+        var queryService = new FileQueryService(db.Path);
+
+        using (var connection = SqliteDatabase.Open(db.Path))
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText =
+                """
+                INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc)
+                VALUES (1, 1, 'vol-1', 'fid-1', 'C:\TestRoot\ProjectAlpha.cs', 'c:\testroot\projectalpha.cs', 'ProjectAlpha.cs', '.cs', 1024, '2026-09-01T00:00:00Z');
+                """;
+            cmd.ExecuteNonQuery();
+        }
+
+        // Searching prefix "Project" must find ProjectAlpha.cs
+        var projectResults = await queryService.QueryAsync(new FileQuery(Search: "Project"));
+        Assert.HasCount(1, projectResults);
+        Assert.AreEqual("ProjectAlpha.cs", projectResults[0].Name);
+
+        // Searching substring "Alpha" must also find ProjectAlpha.cs
+        var alphaResults = await queryService.QueryAsync(new FileQuery(Search: "Alpha"));
+        Assert.HasCount(1, alphaResults);
+        Assert.AreEqual("ProjectAlpha.cs", alphaResults[0].Name);
+    }
+
+    [TestMethod]
+    public async Task SubstringSearch_ChineseSubstring_FindsUnsegmentedTokens()
+    {
+        using var db = new TempTestDatabase();
+        var queryService = new FileQueryService(db.Path);
+
+        using (var connection = SqliteDatabase.Open(db.Path))
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText =
+                """
+                INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc)
+                VALUES (1, 1, 'vol-1', 'fid-1', 'C:\TestRoot\2026年财务报告_Q1.xlsx', 'c:\testroot\2026年财务报告_q1.xlsx', '2026年财务报告_Q1.xlsx', '.xlsx', 2048, '2026-09-01T00:00:00Z');
+                """;
+            cmd.ExecuteNonQuery();
+        }
+
+        // Searching Chinese substring "财务" must find 2026年财务报告_Q1.xlsx
+        var financeResults = await queryService.QueryAsync(new FileQuery(Search: "财务"));
+        Assert.HasCount(1, financeResults);
+        Assert.AreEqual("2026年财务报告_Q1.xlsx", financeResults[0].Name);
+
+        // Searching Chinese substring "报告" must find 2026年财务报告_Q1.xlsx
+        var reportResults = await queryService.QueryAsync(new FileQuery(Search: "报告"));
+        Assert.HasCount(1, reportResults);
+        Assert.AreEqual("2026年财务报告_Q1.xlsx", reportResults[0].Name);
+
+        // Multi-token search "财务 报告" must satisfy both (AND semantics) and find it
+        var multiTokenResults = await queryService.QueryAsync(new FileQuery(Search: "财务 报告"));
+        Assert.HasCount(1, multiTokenResults);
+        Assert.AreEqual("2026年财务报告_Q1.xlsx", multiTokenResults[0].Name);
+
+        // Multi-token search where one token does not match must return 0 results
+        var noMatchResults = await queryService.QueryAsync(new FileQuery(Search: "财务 会计"));
+        Assert.IsEmpty(noMatchResults);
+    }
+
+    [TestMethod]
+    public async Task SubstringSearch_LikeSpecialCharacterEscaping_MatchesLiterals()
+    {
+        using var db = new TempTestDatabase();
+        var queryService = new FileQueryService(db.Path);
+
+        using (var connection = SqliteDatabase.Open(db.Path))
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText =
+                """
+                INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc)
+                VALUES
+                    (1, 1, 'vol-1', 'fid-1', 'C:\TestRoot\item_1.txt', 'c:\testroot\item_1.txt', 'item_1.txt', '.txt', 10, '2026-09-01T00:00:00Z'),
+                    (2, 1, 'vol-1', 'fid-2', 'C:\TestRoot\itemX1.txt', 'c:\testroot\itemx1.txt', 'itemX1.txt', '.txt', 20, '2026-09-01T00:00:00Z'),
+                    (3, 1, 'vol-1', 'fid-3', 'C:\TestRoot\100%_target.txt', 'c:\testroot\100%_target.txt', '100%_target.txt', '.txt', 30, '2026-09-01T00:00:00Z');
+                """;
+            cmd.ExecuteNonQuery();
+        }
+
+        // Test EscapeLikePattern directly
+        Assert.AreEqual(@"test\%\_\\abc", FtsQueryBuilder.EscapeLikePattern(@"test%_\abc"));
+
+        // Searching "item" finds item_1 and itemX1
+        var itemResults = await queryService.QueryAsync(new FileQuery(Search: "item"));
+        Assert.HasCount(2, itemResults);
+
+        // Searching "target" finds 100%_target.txt
+        var targetResults = await queryService.QueryAsync(new FileQuery(Search: "target"));
+        Assert.HasCount(1, targetResults);
+        Assert.AreEqual("100%_target.txt", targetResults[0].Name);
+    }
+
+    [TestMethod]
+    public void BatchTagging_1000Files_WithRollingBackupEnabled_Performance_WithinThreshold()
+    {
+        using var db = new TempTestDatabase();
+        var tempBackupDir = Path.Combine(Path.GetTempPath(), $"GuraFile.TagBackupTest.{Guid.NewGuid():N}");
+        try
+        {
+            var rollingBackup = new RollingTagBackupService(db.Path, tempBackupDir);
+            var tagService = new TagService(db.Path, rollingBackup: rollingBackup);
+            var tag = tagService.CreateTag("RollingBackupBatch");
+
+            // Seed 1,000 files
+            using (var connection = SqliteDatabase.Open(db.Path))
+            using (var transaction = connection.BeginTransaction())
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.Transaction = transaction;
+                cmd.CommandText =
+                    """
+                    INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc)
+                    VALUES ($id, 1, 'vol-1', $fid, $path, $norm, $name, '.txt', 100, '2026-09-01T00:00:00Z');
+                    """;
+                var pId = cmd.Parameters.Add("$id", SqliteType.Integer);
+                var pFid = cmd.Parameters.Add("$fid", SqliteType.Text);
+                var pPath = cmd.Parameters.Add("$path", SqliteType.Text);
+                var pNorm = cmd.Parameters.Add("$norm", SqliteType.Text);
+                var pName = cmd.Parameters.Add("$name", SqliteType.Text);
+
+                for (var i = 1; i <= 1000; i++)
+                {
+                    pId.Value = i;
+                    pFid.Value = $"f-{i}";
+                    pPath.Value = $@"C:\TestRoot\File_{i}.txt";
+                    pNorm.Value = $@"c:\testroot\file_{i}.txt";
+                    pName.Value = $"File_{i}.txt";
+                    cmd.ExecuteNonQuery();
+                }
+
+                transaction.Commit();
+            }
+
+            var targetFileIds = Enumerable.Range(1, 1000).Select(i => (long)i).ToArray();
+
+            // 3 consecutive batch adds with rolling backup triggered (< 2s required)
+            for (var run = 1; run <= 3; run++)
+            {
+                var sw = Stopwatch.StartNew();
+                tagService.AddTagToFiles(tag.Id, targetFileIds);
+                sw.Stop();
+                Console.WriteLine($"[Batch Add + RollingBackup Run {run}] 1,000 files tagged in {sw.Elapsed.TotalMilliseconds:F2} ms");
+                Assert.IsTrue(sw.Elapsed < TimeSpan.FromSeconds(2.0), $"Batch add run {run} took {sw.Elapsed.TotalMilliseconds} ms, exceeding 2s budget.");
+            }
+
+            // Verify backup exists and is valid
+            var backups = rollingBackup.ListBackups();
+            Assert.IsNotEmpty(backups, "Rolling tag backup should have created at least one backup.");
+            Assert.IsTrue(backups[0].IsValid, "Created rolling backup should be valid.");
+        }
+        finally
+        {
+            if (Directory.Exists(tempBackupDir))
+            {
+                try { Directory.Delete(tempBackupDir, recursive: true); } catch { }
+            }
         }
     }
 }

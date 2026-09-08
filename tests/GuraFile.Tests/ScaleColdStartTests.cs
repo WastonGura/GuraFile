@@ -319,4 +319,142 @@ public sealed class ScaleColdStartTests
             Assert.AreEqual(2, offlineCount, "The two old descendant files must be marked offline.");
         }
     }
+
+    [TestMethod]
+    public void RealProcessColdStart_ThreeConsecutiveLaunches_UnderThreeSeconds()
+    {
+        var exePath = GetGuraFileExecutablePath();
+        if (!File.Exists(exePath))
+        {
+            Assert.Inconclusive($"GuraFile executable not found at {exePath}. Build Release first.");
+            return;
+        }
+
+        for (var run = 1; run <= 3; run++)
+        {
+            var sw = Stopwatch.StartNew();
+            using var process = Process.Start(new ProcessStartInfo(exePath)
+            {
+                UseShellExecute = false
+            });
+
+            Assert.IsNotNull(process, $"Process failed to start on run {run}");
+            try
+            {
+                var deadline = DateTime.UtcNow.AddSeconds(15);
+                var isReady = false;
+
+                while (DateTime.UtcNow < deadline)
+                {
+                    Thread.Sleep(50);
+                    process.Refresh();
+
+                    if (process.HasExited)
+                    {
+                        Assert.Fail($"GuraFile exited prematurely on run {run} with exit code {process.ExitCode}");
+                    }
+
+                    var handle = process.MainWindowHandle;
+                    var title = process.MainWindowTitle;
+                    var visible = handle != IntPtr.Zero && WindowFinder.IsWindowVisible(handle);
+
+                    if (!(handle != IntPtr.Zero && title == "GuraFile" && visible))
+                    {
+                        var titledHandle = WindowFinder.FindWindowByTitle(process.Id, "GuraFile");
+                        if (titledHandle != IntPtr.Zero)
+                        {
+                            handle = titledHandle;
+                            title = "GuraFile";
+                            visible = WindowFinder.IsWindowVisible(handle);
+                        }
+                    }
+
+                    if (handle != IntPtr.Zero && title == "GuraFile" && process.Responding && visible)
+                    {
+                        sw.Stop();
+                        isReady = true;
+                        break;
+                    }
+                }
+
+                Assert.IsTrue(isReady, $"Launch timed out waiting for GuraFile window on run {run}.");
+                Console.WriteLine($"[Cold Start Run {run}] GuraFile main window visible and interactive in {sw.Elapsed.TotalMilliseconds:F1} ms");
+                Assert.IsTrue(
+                    sw.Elapsed < TimeSpan.FromSeconds(3.0),
+                    $"Cold start run {run} took {sw.Elapsed.TotalMilliseconds:F1} ms, exceeding 3.0s budget.");
+            }
+            finally
+            {
+                try
+                {
+                    process.Refresh();
+                    if (!process.HasExited)
+                    {
+                        if (process.CloseMainWindow())
+                        {
+                            if (!process.WaitForExit(3000))
+                            {
+                                process.Kill(true);
+                                process.WaitForExit();
+                            }
+                        }
+                        else
+                        {
+                            process.Kill(true);
+                            process.WaitForExit();
+                        }
+                    }
+                }
+                catch
+                {
+                }
+            }
+        }
+    }
+
+    private static string GetGuraFileExecutablePath()
+    {
+        var repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        return Path.Combine(repoRoot, "src", "GuraFile", "bin", "Release", "net10.0-windows10.0.26100.0", "win-x64", "GuraFile.exe");
+    }
+
+    private static class WindowFinder
+    {
+        public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        public static extern int GetWindowTextW(IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+        public static extern bool IsWindowVisible(IntPtr windowHandle);
+
+        public static IntPtr FindWindowByTitle(int processId, string expectedTitle)
+        {
+            var found = IntPtr.Zero;
+            EnumWindows((hWnd, lParam) =>
+            {
+                uint pid = 0;
+                GetWindowThreadProcessId(hWnd, out pid);
+                if (pid == (uint)processId)
+                {
+                    var sb = new System.Text.StringBuilder(256);
+                    GetWindowTextW(hWnd, sb, 256);
+                    if (string.Equals(sb.ToString(), expectedTitle, StringComparison.Ordinal))
+                    {
+                        found = hWnd;
+                        return false;
+                    }
+                }
+                return true;
+            }, IntPtr.Zero);
+            return found;
+        }
+    }
 }
