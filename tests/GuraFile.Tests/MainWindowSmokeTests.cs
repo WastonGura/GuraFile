@@ -337,4 +337,23 @@ public sealed class MainWindowSmokeTests
         StringAssert.Contains(source, "DeleteViewButton_Click");
         StringAssert.Contains(source, "ApplySavedFilterViewAsync");
     }
+
+    [TestMethod]
+    public void MainWindow_MaintainsActiveFileQueryAndProtectsAgainstFilterDiffusion()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "GuraFile", "MainWindow.xaml.cs"));
+        Assert.IsTrue(File.Exists(path), $"Missing MainWindow code-behind: {path}");
+
+        var source = File.ReadAllText(path);
+
+        // 1. Immutable active query specification must be maintained as a field
+        StringAssert.Contains(source, "private FileQuery _activeFileQuery");
+
+        // 2. RefreshFilesAsync must execute using _activeFileQuery rather than constructing from lossy UI
+        StringAssert.Contains(source, "_fileQuery.QueryAsync(_activeFileQuery");
+
+        // 3. Applying a saved filter view updates _activeFileQuery using ToFileQuery(view)
+        StringAssert.Contains(source, "_activeFileQuery = _savedFilterViews.ToFileQuery(view)");
+    }
 }

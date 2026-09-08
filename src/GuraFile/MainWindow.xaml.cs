@@ -27,6 +27,12 @@ public sealed partial class MainWindow : Window
     private FileListOperationService _fileOperations = null!;
     private GraphSnapshotService _graphSnapshotService = null!;
     private SavedFilterViewService _savedFilterViews = null!;
+    private FileQuery _activeFileQuery = new(
+        Search: null,
+        SortBy: FileSortColumn.Name,
+        Descending: false,
+        TagIds: null,
+        TagMatch: TagMatchMode.Any);
     private bool _isApplyingSavedView;
     private readonly DatabaseHealthService _healthService = new();
     private readonly DatabaseRecoveryService _recoveryService = new();
@@ -119,6 +125,7 @@ public sealed partial class MainWindow : Window
                 _graphSnapshotService = new(_databasePath);
                 var committer = new FileOperationIndexCommitter(_scanner);
                 _fileOperations = new FileListOperationService(committer, _scanner, _clipboard);
+                _activeFileQuery = BuildQueryFromUi();
                 _initialized = true;
 
                 RefreshRoots();
@@ -583,6 +590,7 @@ public sealed partial class MainWindow : Window
     {
         if (_initialized && !_isApplyingSavedView)
         {
+            _activeFileQuery = BuildQueryFromUi();
             await RefreshFilesAsync(debounce: true);
         }
     }
@@ -606,6 +614,10 @@ public sealed partial class MainWindow : Window
         }
 
         UpdateSortLabels();
+        if (!_isApplyingSavedView)
+        {
+            _activeFileQuery = BuildQueryFromUi();
+        }
         await RefreshFilesAsync();
     }
 
@@ -1487,6 +1499,7 @@ public sealed partial class MainWindow : Window
 
         if (TagFilterToggle.IsOn)
         {
+            _activeFileQuery = BuildQueryFromUi();
             await RefreshFilesAsync();
         }
     }
@@ -1500,6 +1513,7 @@ public sealed partial class MainWindow : Window
 
         if (TagFilterToggle.IsOn)
         {
+            _activeFileQuery = BuildQueryFromUi();
             await RefreshFilesAsync();
         }
     }
@@ -1508,6 +1522,7 @@ public sealed partial class MainWindow : Window
     {
         if (_initialized && !_isApplyingSavedView)
         {
+            _activeFileQuery = BuildQueryFromUi();
             await RefreshFilesAsync();
         }
     }
@@ -1516,6 +1531,7 @@ public sealed partial class MainWindow : Window
     {
         if (_initialized && TagFilterToggle.IsOn && !_isApplyingSavedView)
         {
+            _activeFileQuery = BuildQueryFromUi();
             await RefreshFilesAsync();
         }
     }
@@ -1528,6 +1544,7 @@ public sealed partial class MainWindow : Window
             await RefreshTagsAsync(tag.Id);
             if (TagFilterToggle.IsOn)
             {
+                _activeFileQuery = BuildQueryFromUi();
                 await RefreshFilesAsync();
             }
             TagStatusText.Text = $"已创建标签“{tag.Name}”。";
@@ -1552,6 +1569,7 @@ public sealed partial class MainWindow : Window
             await RefreshTagsAsync(renamed.Id);
             if (TagFilterToggle.IsOn)
             {
+                _activeFileQuery = BuildQueryFromUi();
                 await RefreshFilesAsync();
             }
             TagStatusText.Text = $"已重命名为“{renamed.Name}”。";
@@ -1586,11 +1604,32 @@ public sealed partial class MainWindow : Window
 
         try
         {
+            var selectedViewId = (SavedFilterViewsList.SelectedItem as SavedFilterView)?.Id;
             await Task.Run(() => _tags.DeleteTag(tag.Id));
             TagNameBox.Text = "";
             await RefreshTagsAsync();
-            await RefreshSavedFilterViewsAsync();
-            await RefreshFilesAsync();
+            await RefreshSavedFilterViewsAsync(selectedViewId);
+
+            if (selectedViewId.HasValue)
+            {
+                var refreshedView = (SavedFilterViewsList.ItemsSource as IReadOnlyList<SavedFilterView>)
+                    ?.FirstOrDefault(v => v.Id == selectedViewId.Value);
+                if (refreshedView is not null)
+                {
+                    await ApplySavedFilterViewAsync(refreshedView);
+                }
+                else
+                {
+                    _activeFileQuery = BuildQueryFromUi();
+                    await RefreshFilesAsync();
+                }
+            }
+            else
+            {
+                _activeFileQuery = BuildQueryFromUi();
+                await RefreshFilesAsync();
+            }
+
             TagStatusText.Text = $"已删除标签“{tag.Name}”；真实文件未更改。";
         }
         catch (Exception exception)
@@ -2427,6 +2466,19 @@ public sealed partial class MainWindow : Window
             .Concat(AutomaticTagsList.SelectedItems.OfType<AutomaticTag>().Select(tag => tag.Id))
             .ToArray();
 
+    private FileQuery BuildQueryFromUi()
+    {
+        var tagIds = TagFilterToggle.IsOn
+            ? SelectedFilterTagIds()
+            : null;
+        return new FileQuery(
+            Search: SearchBox.Text,
+            SortBy: _sortColumn,
+            Descending: _sortDescending,
+            TagIds: tagIds,
+            TagMatch: TagMatchBox.SelectedIndex == 1 ? TagMatchMode.All : TagMatchMode.Any);
+    }
+
     private async Task RefreshFilesAsync(bool debounce = false)
     {
         var generation = _graphInteractionCoordinator.BeginQuery();
@@ -2450,17 +2502,7 @@ public sealed partial class MainWindow : Window
             FilesLoadingRing.IsActive = true;
             FilesLoadingRing.Visibility = Visibility.Visible;
             FilesStateText.Text = "正在加载文件…";
-            var tagIds = TagFilterToggle.IsOn
-                ? SelectedFilterTagIds()
-                : null;
-            var files = await _fileQuery.QueryAsync(
-                new(
-                    Search: SearchBox.Text,
-                    SortBy: _sortColumn,
-                    Descending: _sortDescending,
-                    TagIds: tagIds,
-                    TagMatch: TagMatchBox.SelectedIndex == 1 ? TagMatchMode.All : TagMatchMode.Any),
-                cancellation.Token);
+            var files = await _fileQuery.QueryAsync(_activeFileQuery, cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
 
             if (!_graphInteractionCoordinator.CommitQuery(generation, files) || !ReferenceEquals(_fileQueryCancellation, cancellation))
@@ -2470,7 +2512,10 @@ public sealed partial class MainWindow : Window
 
             _currentFiles = files;
             FilesList.ItemsSource = files;
-            FilesStateText.Text = files.Count == 0 ? "没有匹配的文件" : $"{files.Count:N0} 个文件";
+            var currentSelectedView = SavedFilterViewsList.SelectedItem as SavedFilterView;
+            FilesStateText.Text = files.Count == 0
+                ? (currentSelectedView?.HasInvalidTags == true ? "已保存视图条件失效（0 个文件）" : "没有匹配的文件")
+                : $"{files.Count:N0} 个文件";
             if (ViewModeBox.SelectedIndex == 1)
             {
                 await RefreshGraphAsync();
@@ -2534,14 +2579,16 @@ public sealed partial class MainWindow : Window
             TagFilterToggle.IsOn = view.IsTagFilterEnabled;
             TagMatchBox.SelectedIndex = view.TagMatchMode == TagMatchMode.All ? 1 : 0;
 
-            var viewTagIds = view.TagIds.ToHashSet();
+            var validTagIds = view.MissingTagIds is { Count: > 0 }
+                ? view.TagIds.Except(view.MissingTagIds).ToHashSet()
+                : view.TagIds.ToHashSet();
             var userTags = TagsList.ItemsSource as IReadOnlyList<UserTag> ?? [];
             var autoTags = AutomaticTagsList.ItemsSource as IReadOnlyList<AutomaticTag> ?? [];
 
             TagsList.SelectedItems.Clear();
             foreach (var ut in userTags)
             {
-                if (viewTagIds.Contains(ut.Id))
+                if (validTagIds.Contains(ut.Id))
                 {
                     TagsList.SelectedItems.Add(ut);
                 }
@@ -2550,7 +2597,7 @@ public sealed partial class MainWindow : Window
             AutomaticTagsList.SelectedItems.Clear();
             foreach (var at in autoTags)
             {
-                if (viewTagIds.Contains(at.Id))
+                if (validTagIds.Contains(at.Id))
                 {
                     AutomaticTagsList.SelectedItems.Add(at);
                 }
@@ -2592,8 +2639,8 @@ public sealed partial class MainWindow : Window
             FilesLoadingRing.Visibility = Visibility.Visible;
             FilesStateText.Text = "正在加载文件…";
 
-            var query = _savedFilterViews.ToFileQuery(view);
-            var files = await _fileQuery.QueryAsync(query, cancellation.Token);
+            _activeFileQuery = _savedFilterViews.ToFileQuery(view);
+            var files = await _fileQuery.QueryAsync(_activeFileQuery, cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
 
             if (!_graphInteractionCoordinator.CommitQuery(generation, files) || !ReferenceEquals(_fileQueryCancellation, cancellation))
@@ -2733,6 +2780,8 @@ public sealed partial class MainWindow : Window
         {
             await Task.Run(() => _savedFilterViews.DeleteView(selected.Id));
             await RefreshSavedFilterViewsAsync();
+            _activeFileQuery = BuildQueryFromUi();
+            await RefreshFilesAsync();
             ViewStatusText.Text = $"视图“{selected.Name}”已删除。";
             ViewNameBox.Text = "";
         }

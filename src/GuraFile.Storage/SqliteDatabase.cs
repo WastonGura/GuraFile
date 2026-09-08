@@ -4,7 +4,7 @@ namespace GuraFile.Storage;
 
 public static class SqliteDatabase
 {
-    public const int CurrentVersion = 10;
+    public const int CurrentVersion = 11;
 
     private static readonly string[] Migrations =
     [
@@ -248,6 +248,15 @@ public static class SqliteDatabase
             tag_id INTEGER NOT NULL,
             PRIMARY KEY (view_id, tag_id)
         );
+        """,
+        """
+        ALTER TABLE saved_filter_view_tags ADD COLUMN is_invalid INTEGER NOT NULL DEFAULT 0;
+
+        CREATE TRIGGER tags_ad_saved_views AFTER DELETE ON tags BEGIN
+            UPDATE saved_filter_view_tags SET is_invalid = 1 WHERE tag_id = old.id;
+        END;
+
+        UPDATE saved_filter_view_tags SET is_invalid = 1 WHERE tag_id NOT IN (SELECT id FROM tags);
         """
     ];
 

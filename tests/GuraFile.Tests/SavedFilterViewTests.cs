@@ -364,4 +364,81 @@ public sealed class SavedFilterViewTests
         Assert.HasCount(1, coordinator.CurrentFiles);
         Assert.AreEqual(3L, coordinator.CurrentFiles[0].Id);
     }
+
+    [TestMethod]
+    public void TagLifecycle_TagDeleted_AndReusedId_ViewRemainsInvalid()
+    {
+        // Setup root and files
+        using (var conn = SqliteDatabase.Open(_databasePath))
+        using (var tx = conn.BeginTransaction())
+        {
+            DatabaseMigrationFixtures.Execute(conn, "INSERT INTO roots (id, path, normalized_path) VALUES (1, 'C:\\Work', 'c:\\work');", tx);
+            DatabaseMigrationFixtures.Execute(conn, "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc) " +
+                "VALUES (1, 1, 'vol', 'f1', 'C:\\Work\\A.txt', 'c:\\work\\a.txt', 'A.txt', '.txt', 10, '2026-09-01T00:00:00Z');", tx);
+            DatabaseMigrationFixtures.Execute(conn, "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc) " +
+                "VALUES (2, 1, 'vol', 'f2', 'C:\\Work\\B.txt', 'c:\\work\\b.txt', 'B.txt', '.txt', 20, '2026-09-01T00:00:00Z');", tx);
+            tx.Commit();
+        }
+
+        var tagService = new TagService(_databasePath);
+        var t1 = tagService.CreateTag("标签A");
+        var t2 = tagService.CreateTag("标签B");
+
+        tagService.AddTagToFiles(t2.Id, [2]);
+
+        var viewService = new SavedFilterViewService(_databasePath);
+        var view = viewService.CreateView("标签B视图", null, FileSortColumn.Name, false, TagMatchMode.Any, true, [t2.Id]);
+
+        // Delete TagB
+        var deletedId = t2.Id;
+        tagService.DeleteTag(deletedId);
+
+        // View should be invalid now
+        var invalidView = viewService.GetViewById(view.Id);
+        Assert.IsNotNull(invalidView);
+        Assert.IsTrue(invalidView.HasInvalidTags);
+        CollectionAssert.Contains(invalidView.MissingTagIds?.ToArray(), deletedId);
+
+        // Now, simulate SQLite rowid reuse: insert a new tag with the same id as deletedId
+        using (var conn = SqliteDatabase.Open(_databasePath))
+        {
+            DatabaseMigrationFixtures.Execute(conn,
+                "INSERT INTO tags (id, name, normalized_name, source) VALUES ($id, '新标签C', '新标签c', 'user');",
+                null,
+                ("$id", deletedId));
+        }
+
+        // Even though an active tag now exists with the exact same ID,
+        // the saved view MUST remain invalid because of is_invalid = 1 tracking!
+        var stillInvalidView = viewService.GetViewById(view.Id);
+        Assert.IsNotNull(stillInvalidView);
+        Assert.IsTrue(stillInvalidView.HasInvalidTags, "View must remain invalid even if the tag id was reused by a new tag.");
+        Assert.IsNotNull(stillInvalidView.MissingTagIds);
+        CollectionAssert.Contains(stillInvalidView.MissingTagIds.ToArray(), deletedId);
+
+        var viewsList = viewService.ListViews();
+        var listedView = viewsList.Single(v => v.Id == view.Id);
+        Assert.IsTrue(listedView.HasInvalidTags, "ListViews must report view as invalid even if tag id was reused.");
+
+        // Query execution must continue to yield 0 results (0=1 protection)
+        var queryService = new FileQueryService(_databasePath);
+        var query = viewService.ToFileQuery(stillInvalidView);
+        var results = queryService.QueryAsync(query).GetAwaiter().GetResult();
+        Assert.IsEmpty(results, "ToFileQuery must yield 0 results when view contains invalid tags, even if ID was reused.");
+
+        // User can repair the view by calling UpdateViewFilter with current valid tags
+        var repaired = viewService.UpdateViewFilter(
+            view.Id,
+            searchText: null,
+            sortColumn: FileSortColumn.Name,
+            sortDescending: false,
+            tagMatchMode: TagMatchMode.Any,
+            isTagFilterEnabled: true,
+            tagIds: [t1.Id]);
+
+        Assert.IsFalse(repaired.HasInvalidTags);
+        var repairedQuery = viewService.ToFileQuery(repaired);
+        var repairedResults = queryService.QueryAsync(repairedQuery).GetAwaiter().GetResult();
+        Assert.IsNotNull(repairedResults);
+    }
 }

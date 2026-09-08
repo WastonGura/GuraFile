@@ -17,6 +17,7 @@ public sealed class DatabaseMigrationMatrixTests
     [DataRow(8)]
     [DataRow(9)]
     [DataRow(10)]
+    [DataRow(11)]
     public void HistoricalFixtures_InitializeAtExpectedSchemaVersion(int version)
     {
         using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(version);
@@ -34,6 +35,7 @@ public sealed class DatabaseMigrationMatrixTests
     [DataRow(8)]
     [DataRow(9)]
     [DataRow(10)]
+    [DataRow(11)]
     public void Matrix_AnyHistoricalVersion_UpgradesToCurrentVersionCleanly(int version)
     {
         using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(version);
@@ -55,6 +57,16 @@ public sealed class DatabaseMigrationMatrixTests
             var triggerCount = DatabaseMigrationFixtures.Scalar<long>(connection,
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ('files_ai', 'files_ad', 'files_au');");
             Assert.AreEqual(3L, triggerCount);
+
+            // Verify trigger on tags exists for saved view invalidation
+            var savedViewTriggerCount = DatabaseMigrationFixtures.Scalar<long>(connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'tags_ad_saved_views';");
+            Assert.AreEqual(1L, savedViewTriggerCount);
+
+            // Verify is_invalid column exists on saved_filter_view_tags
+            var isInvalidColumn = DatabaseMigrationFixtures.Scalar<long>(connection,
+                "SELECT COUNT(*) FROM pragma_table_info('saved_filter_view_tags') WHERE name = 'is_invalid';");
+            Assert.AreEqual(1L, isInvalidColumn);
 
             // Verify index on scan_sessions exists
             var indexCount = DatabaseMigrationFixtures.Scalar<long>(connection,
@@ -489,9 +501,51 @@ public sealed class DatabaseMigrationMatrixTests
     }
 
     [TestMethod]
-    public void Migrate_Version10_To_Current_IsIdempotent()
+    public void Migrate_Version10_To_Current_PreservesDataAndInitializesInvalidFlags()
     {
         using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(10);
+
+        // Populate a saved view with valid tag and an orphaned tag in v10
+        long viewId;
+        using (var raw = DatabaseMigrationFixtures.OpenRaw(fixture.Path))
+        {
+            DatabaseMigrationFixtures.Execute(raw,
+                """
+                INSERT INTO saved_filter_views (
+                    id, name, normalized_name, search_text, sort_column, sort_descending,
+                    tag_match_mode, is_tag_filter_enabled, sort_order, created_utc, updated_utc
+                ) VALUES (
+                    100, '测试视图', '测试视图', 'query', 'Name', 0, 'Any', 1, 0,
+                    '2026-09-08T00:00:00Z', '2026-09-08T00:00:00Z'
+                );
+                """);
+            viewId = 100;
+            // Tag 1 is existing (from fixture), Tag 999 is orphaned (does not exist in tags)
+            DatabaseMigrationFixtures.Execute(raw, $"INSERT INTO saved_filter_view_tags (view_id, tag_id) VALUES ({viewId}, 1);");
+            DatabaseMigrationFixtures.Execute(raw, $"INSERT INTO saved_filter_view_tags (view_id, tag_id) VALUES ({viewId}, 999);");
+        }
+
+        using (var connection = SqliteDatabase.Open(fixture.Path))
+        {
+            Assert.AreEqual(SqliteDatabase.CurrentVersion, DatabaseMigrationFixtures.Scalar<long>(connection, "PRAGMA user_version;"));
+            DatabaseMigrationFixtures.AssertForeignKeys(connection);
+            DatabaseMigrationFixtures.AssertNoTemporaryTables(connection);
+
+            // Verify is_invalid values: tag 1 is valid (0), tag 999 is invalid (1)
+            var tag1Invalid = DatabaseMigrationFixtures.Scalar<long>(connection,
+                $"SELECT is_invalid FROM saved_filter_view_tags WHERE view_id = {viewId} AND tag_id = 1;");
+            Assert.AreEqual(0L, tag1Invalid);
+
+            var tag999Invalid = DatabaseMigrationFixtures.Scalar<long>(connection,
+                $"SELECT is_invalid FROM saved_filter_view_tags WHERE view_id = {viewId} AND tag_id = 999;");
+            Assert.AreEqual(1L, tag999Invalid);
+        }
+    }
+
+    [TestMethod]
+    public void Migrate_Version11_To_Current_IsIdempotent()
+    {
+        using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(11);
 
         using (var connection = SqliteDatabase.Open(fixture.Path))
         {
@@ -503,13 +557,17 @@ public sealed class DatabaseMigrationMatrixTests
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'saved_filter_views';"));
             Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(connection,
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'saved_filter_view_tags';"));
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'tags_ad_saved_views';"));
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(connection,
+                "SELECT COUNT(*) FROM pragma_table_info('saved_filter_view_tags') WHERE name = 'is_invalid';"));
             Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(connection, "SELECT COUNT(*) FROM files;"));
             Assert.AreEqual(3L, DatabaseMigrationFixtures.Scalar<long>(connection, "SELECT COUNT(*) FROM files_fts;"));
         }
     }
 
     [TestMethod]
-    public void Chained_Stepwise_Migration_From_Version1_To_Version10()
+    public void Chained_Stepwise_Migration_From_Version1_To_Version11()
     {
         using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(1);
 
@@ -617,6 +675,22 @@ public sealed class DatabaseMigrationMatrixTests
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'saved_filter_view_tags';"));
             DatabaseMigrationFixtures.AssertForeignKeys(v10Conn);
             DatabaseMigrationFixtures.AssertNoTemporaryTables(v10Conn);
+        }
+
+        // Step 10 -> 11
+        using (var v11Conn = SqliteDatabase.Open(fixture.Path, 11))
+        {
+            Assert.AreEqual(11L, DatabaseMigrationFixtures.Scalar<long>(v11Conn, "PRAGMA user_version;"));
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(v11Conn,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'saved_filter_views';"));
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(v11Conn,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'saved_filter_view_tags';"));
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(v11Conn,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'tags_ad_saved_views';"));
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(v11Conn,
+                "SELECT COUNT(*) FROM pragma_table_info('saved_filter_view_tags') WHERE name = 'is_invalid';"));
+            DatabaseMigrationFixtures.AssertForeignKeys(v11Conn);
+            DatabaseMigrationFixtures.AssertNoTemporaryTables(v11Conn);
         }
     }
 
@@ -900,14 +974,43 @@ public sealed class DatabaseMigrationMatrixTests
     }
 
     [TestMethod]
-    public void FutureSchema_V11_Rejected_WithoutModifyingJournalMode()
+    public void MigrationStep_V10_To_V11_RollsBack_OnFailure()
     {
-        var dbPath = Path.Combine(Path.GetTempPath(), $"GuraFile.FutureV11.{Guid.NewGuid():N}.db");
+        using var fixture = DatabaseMigrationFixtures.CreateTempDatabase(10);
+
+        // Pre-create trigger tags_ad_saved_views in v10 so migration 10 -> 11 fails on CREATE TRIGGER
+        using (var raw = DatabaseMigrationFixtures.OpenRaw(fixture.Path))
+        {
+            DatabaseMigrationFixtures.Execute(raw,
+                "CREATE TRIGGER tags_ad_saved_views AFTER DELETE ON tags BEGIN SELECT 1; END;");
+        }
+
+        Assert.ThrowsExactly<SqliteException>(() =>
+        {
+            using var _ = SqliteDatabase.Open(fixture.Path, 11);
+        });
+
+        using (var raw = DatabaseMigrationFixtures.OpenRaw(fixture.Path))
+        {
+            Assert.AreEqual(10L, DatabaseMigrationFixtures.Scalar<long>(raw, "PRAGMA user_version;"));
+            Assert.AreEqual(0L, DatabaseMigrationFixtures.Scalar<long>(raw,
+                "SELECT COUNT(*) FROM pragma_table_info('saved_filter_view_tags') WHERE name = 'is_invalid';"));
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(raw,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'saved_filter_views';"));
+            Assert.AreEqual(1L, DatabaseMigrationFixtures.Scalar<long>(raw,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'saved_filter_view_tags';"));
+        }
+    }
+
+    [TestMethod]
+    public void FutureSchema_V12_Rejected_WithoutModifyingJournalMode()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"GuraFile.FutureV12.{Guid.NewGuid():N}.db");
         try
         {
             using (var raw = DatabaseMigrationFixtures.OpenRaw(dbPath))
             {
-                DatabaseMigrationFixtures.Execute(raw, "PRAGMA user_version = 11;");
+                DatabaseMigrationFixtures.Execute(raw, "PRAGMA user_version = 12;");
                 DatabaseMigrationFixtures.Execute(raw, "PRAGMA journal_mode = DELETE;");
             }
 
@@ -916,7 +1019,7 @@ public sealed class DatabaseMigrationMatrixTests
                 using var _ = SqliteDatabase.Open(dbPath);
             });
 
-            StringAssert.Contains(ex.Message, "v11 is newer than supported v10");
+            StringAssert.Contains(ex.Message, "v12 is newer than supported v11");
 
             // Verify journal_mode was untouched before exception
             using (var raw = DatabaseMigrationFixtures.OpenRaw(dbPath))
@@ -953,7 +1056,7 @@ public sealed class DatabaseMigrationMatrixTests
                 using var _ = SqliteDatabase.Open(dbPath);
             });
 
-            StringAssert.Contains(ex.Message, "v99 is newer than supported v10");
+            StringAssert.Contains(ex.Message, "v99 is newer than supported v11");
 
             using (var raw = DatabaseMigrationFixtures.OpenRaw(dbPath))
             {
@@ -991,7 +1094,7 @@ public sealed class DatabaseMigrationMatrixTests
             // Target version out of range (> CurrentVersion) throws ArgumentOutOfRangeException
             Assert.ThrowsExactly<ArgumentOutOfRangeException>(() =>
             {
-                using var _ = SqliteDatabase.Open(dbPath, 11);
+                using var _ = SqliteDatabase.Open(dbPath, 12);
             });
 
             // Target version out of range (< 0) throws ArgumentOutOfRangeException
