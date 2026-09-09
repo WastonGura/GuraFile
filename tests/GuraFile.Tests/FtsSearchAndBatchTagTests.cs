@@ -633,6 +633,17 @@ public sealed class FtsSearchAndBatchTagTests
             Assert.HasCount(11, results);
             Assert.IsTrue(sw.Elapsed < TimeSpan.FromMilliseconds(200), $"Wide substring run {run} took {sw.Elapsed.TotalMilliseconds} ms, exceeding 200ms budget.");
         }
+
+        // 8. Three consecutive large match set searches with Limit: 1000 (< 200ms, typically ~30ms)
+        for (var run = 1; run <= 3; run++)
+        {
+            var sw = Stopwatch.StartNew();
+            var results = await queryService.QueryAsync(new FileQuery(Search: "Document", Limit: 1000));
+            sw.Stop();
+            Console.WriteLine($"[Scale Large Match Limit 1000 Run {run}] 'Document' returned {results.Count} rows in {sw.Elapsed.TotalMilliseconds:F2} ms");
+            Assert.HasCount(1000, results);
+            Assert.IsTrue(sw.Elapsed < TimeSpan.FromMilliseconds(200), $"Large match set run {run} took {sw.Elapsed.TotalMilliseconds} ms, exceeding 200ms budget.");
+        }
     }
 
     [TestMethod]

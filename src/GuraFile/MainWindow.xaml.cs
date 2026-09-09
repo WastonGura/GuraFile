@@ -27,12 +27,15 @@ public sealed partial class MainWindow : Window
     private FileListOperationService _fileOperations = null!;
     private GraphSnapshotService _graphSnapshotService = null!;
     private SavedFilterViewService _savedFilterViews = null!;
+    public const int DefaultUiFileListLimit = 1000;
+    private bool _initialFileQueryCompleted;
     private FileQuery _activeFileQuery = new(
         Search: null,
         SortBy: FileSortColumn.Name,
         Descending: false,
         TagIds: null,
-        TagMatch: TagMatchMode.Any);
+        TagMatch: TagMatchMode.Any,
+        Limit: DefaultUiFileListLimit);
     private bool _isApplyingSavedView;
     private readonly DatabaseHealthService _healthService = new();
     private readonly DatabaseRecoveryService _recoveryService = new();
@@ -2494,7 +2497,8 @@ public sealed partial class MainWindow : Window
             SortBy: _sortColumn,
             Descending: _sortDescending,
             TagIds: tagIds,
-            TagMatch: TagMatchBox.SelectedIndex == 1 ? TagMatchMode.All : TagMatchMode.Any);
+            TagMatch: TagMatchBox.SelectedIndex == 1 ? TagMatchMode.All : TagMatchMode.Any,
+            Limit: DefaultUiFileListLimit);
     }
 
     private async Task RefreshFilesAsync(bool debounce = false)
@@ -2531,9 +2535,26 @@ public sealed partial class MainWindow : Window
             _currentFiles = files;
             FilesList.ItemsSource = files;
             var currentSelectedView = SavedFilterViewsList.SelectedItem as SavedFilterView;
-            FilesStateText.Text = files.Count == 0
-                ? (currentSelectedView?.HasInvalidTags == true ? "已保存视图条件失效（0 个文件）" : "没有匹配的文件")
-                : $"{files.Count:N0} 个文件";
+            if (files.Count == 0)
+            {
+                FilesStateText.Text = currentSelectedView?.HasInvalidTags == true
+                    ? "已保存视图条件失效（0 个文件）"
+                    : "没有匹配的文件";
+            }
+            else if (_activeFileQuery.Limit is not null && files.Count >= _activeFileQuery.Limit.Value)
+            {
+                FilesStateText.Text = $"已显示前 {files.Count:N0} 个文件";
+            }
+            else
+            {
+                FilesStateText.Text = $"{files.Count:N0} 个文件";
+            }
+
+            if (!_initialFileQueryCompleted)
+            {
+                _initialFileQueryCompleted = true;
+                DiagnosticLogger.Default.Info($"[Lifecycle] Initial file query completed: {files.Count} files loaded.");
+            }
             if (ViewModeBox.SelectedIndex == 1)
             {
                 await RefreshGraphAsync();
@@ -2657,7 +2678,7 @@ public sealed partial class MainWindow : Window
             FilesLoadingRing.Visibility = Visibility.Visible;
             FilesStateText.Text = "正在加载文件…";
 
-            _activeFileQuery = _savedFilterViews.ToFileQuery(view);
+            _activeFileQuery = _savedFilterViews.ToFileQuery(view) with { Limit = DefaultUiFileListLimit };
             var files = await _fileQuery.QueryAsync(_activeFileQuery, cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
 
@@ -2668,9 +2689,20 @@ public sealed partial class MainWindow : Window
 
             _currentFiles = files;
             FilesList.ItemsSource = files;
-            FilesStateText.Text = files.Count == 0
-                ? (view.HasInvalidTags ? "已保存视图条件失效（0 个文件）" : "没有匹配的文件")
-                : $"{files.Count:N0} 个文件";
+            if (files.Count == 0)
+            {
+                FilesStateText.Text = view.HasInvalidTags
+                    ? "已保存视图条件失效（0 个文件）"
+                    : "没有匹配的文件";
+            }
+            else if (_activeFileQuery.Limit is not null && files.Count >= _activeFileQuery.Limit.Value)
+            {
+                FilesStateText.Text = $"已显示前 {files.Count:N0} 个文件";
+            }
+            else
+            {
+                FilesStateText.Text = $"{files.Count:N0} 个文件";
+            }
 
             if (ViewModeBox.SelectedIndex == 1)
             {

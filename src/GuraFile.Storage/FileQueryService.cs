@@ -23,7 +23,9 @@ public sealed record FileQuery(
     FileSortColumn SortBy = FileSortColumn.Name,
     bool Descending = false,
     IReadOnlyList<long>? TagIds = null,
-    TagMatchMode TagMatch = TagMatchMode.Any);
+    TagMatchMode TagMatch = TagMatchMode.Any,
+    int? Limit = null,
+    int? Offset = null);
 
 public sealed record IndexedFile(
     long Id,
@@ -151,6 +153,31 @@ public sealed class FileQueryService
                 }
             }
 
+            if (query.Limit is not null)
+            {
+                if (query.Limit < 0)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(query), "Limit must be non-negative.");
+                }
+
+                var offset = query.Offset ?? 0;
+                if (offset < 0)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(query), "Offset must be non-negative.");
+                }
+
+                command.Parameters.AddWithValue("$limit", query.Limit.Value);
+                command.Parameters.AddWithValue("$offset", offset);
+            }
+            else if (query.Offset is not null)
+            {
+                if (query.Offset < 0)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(query), "Offset must be non-negative.");
+                }
+            }
+
+            var limitClause = query.Limit is not null ? "\nLIMIT $limit OFFSET $offset" : "";
             var fromClause = joinSearch
                 ? $"FROM files f JOIN {searchSubquery} matched ON matched.id = f.id"
                 : "FROM files f";
@@ -160,7 +187,7 @@ public sealed class FileQueryService
                 SELECT f.id, f.name, f.path, f.extension, f.size, f.modified_utc, f.is_online, f.identity_diagnostic, f.identity_kind
                 {fromClause}
                 {where}
-                ORDER BY {sortColumn} {direction}, f.id {direction};
+                ORDER BY {sortColumn} {direction}, f.id {direction}{limitClause};
                 """;
 
             using var registration = cancellationToken.Register(command.Cancel);

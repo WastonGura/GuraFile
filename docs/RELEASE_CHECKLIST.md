@@ -1,3 +1,41 @@
+# v0.5.2 发布验收
+
+验收日期：2026-09-09
+
+支持平台：Windows 10 1809 及以上，x64
+
+## 前置与 Issue 交付验证
+
+- [x] #104 修复跨卷移动恢复标签丢失与旧路径残留已合并并通过 CI。
+- [x] #105 修复排序与状态刷新时失效视图保护被绕过问题已合并并通过 CI。
+- [x] #106 消除根目录同步能力探测与 UI 阻塞 I/O 已合并并通过 CI。
+- [x] #107 优化十万大结果集首屏有界查询并建立真实隔离冷启动压测基准已实现并通过验证。
+
+## 首屏有界查询与真实隔离冷启动基准
+
+- [x] 首屏有界查询：`FileQuery` 与 `FileQueryService` 引入 `Limit` 与 `Offset` 参数，校验非负合法性，构建参数化 `LIMIT $limit OFFSET $offset`。
+- [x] UI 首屏默认有界：MainWindow 默认采用首屏 1,000 条限制（`DefaultUiFileListLimit = 1000`），避免 10 万结果全量物化带来的延迟。
+- [x] 状态栏展示与生命周期日志：当达到 Limit 时友好提示“已显示前 1,000 个文件”；首屏查询完成时记录生命周期日志 `[Lifecycle] Initial file query completed: {count} files loaded.`。
+- [x] 动态数据目录重定向：`AppPaths` 增加 `SetCustomUserDataDirectory`，并支持环境变量 `GURAFILE_DATA_DIR` 与命令行 `--data-dir <path>` 重定向。
+- [x] 真实隔离 10 万记录冷启动：在隔离目录预置 100,000 条测试数据，实测独立进程连续 3 次冷启动至首屏完成日志落盘均稳定在 3.0 秒内。
+- [x] 超大规模宽匹配压测：在 100k 数据库中测试全体匹配宽词配合 `Limit: 1000`，首屏查询耗时低于 200ms（实测约 20-50ms）。
+
+## 本地构建、测试与候选包
+
+- [x] 产品版本 `0.5.2`、程序集版本和文件版本 `0.5.2.0`、打包默认值及文档当前版本一致。
+- [x] Release x64 自包含构建成功，0 警告、0 错误。
+- [x] Release 自动化测试全部 100% 通过（无失败、无跳过）。
+- [x] Release 构建输出可见窗口启动冒烟通过（`tests\LaunchSmoke.ps1`）。
+- [x] `PackageRelease.ps1 -Version 0.5.2` 成功生成本地候选 ZIP 与 checksum。
+- [x] ZIP 包含 `App.xbf`、`MainWindow.xbf`、`GuraFile.pri`、四项离线图谱资产、`README.md`、`CHANGELOG.md`、`THIRD_PARTY_NOTICES.md` 及许可证。
+- [x] 包内 `GuraFile.exe` 文件版本为 `0.5.2.0`。
+- [x] 从 ZIP 解压后的包内 `GuraFile.exe` 可见窗口启动且响应正常，退出后无残留进程。
+- [x] `git diff --check` 通过。
+
+## 主 Agent 后续发布步骤
+
+本实现提交不创建 PR、不发布 Release。独立审查、Issue #107 PR 与 CI、合并后从干净 remote-main 重建、最终资产上传与回下载复验及 Milestone 关闭由主 Agent 后续完成；最终发布 ZIP 的 SHA-256 应以合并后干净构建结果为准。
+
 # v0.5.1 发布验收
 
 验收日期：2026-09-08

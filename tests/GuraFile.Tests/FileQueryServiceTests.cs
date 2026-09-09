@@ -126,6 +126,58 @@ public sealed class FileQueryServiceTests
     }
 
     [TestMethod]
+    public async Task QueryWithLimit_ReturnsBoundedFiles()
+    {
+        using var database = TestDatabase.Create();
+        database.SeedFiles(10_000);
+
+        var result = await new FileQueryService(database.Path).QueryAsync(new(Limit: 1000));
+
+        Assert.HasCount(1000, result);
+    }
+
+    [TestMethod]
+    public async Task QueryWithLimitAndOffset_ReturnsPagedFiles()
+    {
+        using var database = TestDatabase.Create();
+        database.SeedFiles(10);
+
+        var result = await new FileQueryService(database.Path).QueryAsync(new(Limit: 3, Offset: 2));
+
+        Assert.HasCount(3, result);
+        Assert.AreEqual("00002.dat", result[0].Name);
+        Assert.AreEqual("00003.dat", result[1].Name);
+        Assert.AreEqual("00004.dat", result[2].Name);
+    }
+
+    [TestMethod]
+    public async Task QueryWithNegativeLimitOrOffset_ThrowsArgumentOutOfRangeException()
+    {
+        using var database = TestDatabase.Create();
+        var service = new FileQueryService(database.Path);
+
+        await Assert.ThrowsExactlyAsync<ArgumentOutOfRangeException>(() =>
+            service.QueryAsync(new(Limit: -1)));
+
+        await Assert.ThrowsExactlyAsync<ArgumentOutOfRangeException>(() =>
+            service.QueryAsync(new(Limit: 10, Offset: -1)));
+
+        await Assert.ThrowsExactlyAsync<ArgumentOutOfRangeException>(() =>
+            service.QueryAsync(new(Offset: -1)));
+    }
+
+    [TestMethod]
+    public async Task QueryWithLimitZero_ReturnsEmpty()
+    {
+        using var database = TestDatabase.Create();
+        database.SeedFiles(10);
+
+        var result = await new FileQueryService(database.Path).QueryAsync(new(Limit: 0));
+
+        Assert.IsEmpty(result);
+    }
+
+    [TestMethod]
     public async Task TenThousandRowsAreReturnedAndTimed()
     {
         using var database = TestDatabase.Create();
