@@ -647,4 +647,102 @@ public sealed class ManagedRootScannerTests
             StorageCapabilityService.Default = originalDefault;
         }
     }
+
+    [TestMethod]
+    public void ListRoots_DoesNotPerformSynchronousCapabilityProbingOrBlockCallingThread()
+    {
+        using var temp = TempDirectory.Create();
+        var databasePath = Path.Combine(temp.Path, "test.db");
+        var rootPath = temp.CreateDirectory("ManagedRoot");
+
+        var originalDefault = StorageCapabilityService.Default;
+        try
+        {
+            var attributesCalled = false;
+            StorageCapabilityService.Default = new StorageCapabilityService(
+                getDriveSnapshot: _ => new StorageDriveSnapshot("C:\\", DriveType.Fixed, "NTFS", IsReady: true),
+                getAttributes: _ =>
+                {
+                    attributesCalled = true;
+                    Thread.Sleep(300);
+                    return FileAttributes.Directory;
+                });
+
+            var scanner = new ManagedRootScanner(databasePath);
+            using (var conn = SqliteDatabase.Open(databasePath))
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "INSERT INTO roots (path, normalized_path, status) VALUES ($path, $path, 'online');";
+                cmd.Parameters.AddWithValue("$path", rootPath);
+                cmd.ExecuteNonQuery();
+            }
+
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            var roots = scanner.ListRoots();
+            stopwatch.Stop();
+
+            Assert.IsFalse(attributesCalled, "ListRoots must not synchronously call getAttributes or probe capabilities on calling thread.");
+            Assert.IsLessThan(50, stopwatch.ElapsedMilliseconds, $"ListRoots took {stopwatch.ElapsedMilliseconds}ms, which exceeds the 50ms threshold.");
+            Assert.HasCount(1, roots);
+            Assert.AreEqual(rootPath, roots[0].Path);
+        }
+        finally
+        {
+            StorageCapabilityService.Default = originalDefault;
+        }
+    }
+
+    [TestMethod]
+    public async Task RefreshCapabilitiesAsync_PopulatesCacheAndSubsequentListRootsReturnsProbedCapability()
+    {
+        using var temp = TempDirectory.Create();
+        var databasePath = Path.Combine(temp.Path, "test.db");
+        var rootPath = temp.CreateDirectory("ManagedRoot");
+
+        var originalDefault = StorageCapabilityService.Default;
+        try
+        {
+            var probeCount = 0;
+            StorageCapabilityService.Default = new StorageCapabilityService(
+                getDriveSnapshot: _ =>
+                {
+                    Interlocked.Increment(ref probeCount);
+                    return new StorageDriveSnapshot("C:\\", DriveType.Fixed, "NTFS", IsReady: true);
+                },
+                getAttributes: _ => FileAttributes.Directory);
+
+            var scanner = new ManagedRootScanner(databasePath);
+            using (var conn = SqliteDatabase.Open(databasePath))
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "INSERT INTO roots (path, normalized_path, status) VALUES ($path, $path, 'online');";
+                cmd.Parameters.AddWithValue("$path", rootPath);
+                cmd.ExecuteNonQuery();
+            }
+
+            // Initially before background refresh, cache is empty, capability is null
+            var initialRoots = scanner.ListRoots();
+            Assert.HasCount(1, initialRoots);
+            Assert.IsNull(initialRoots[0].Capability);
+            Assert.AreEqual(0, probeCount);
+
+            // Execute asynchronous refresh in background
+            await scanner.RefreshCapabilitiesAsync();
+
+            Assert.AreEqual(1, probeCount);
+            var updatedRoots = scanner.ListRoots();
+            var capability = updatedRoots[0].Capability;
+            Assert.IsNotNull(capability);
+            Assert.AreEqual(StorageMediumKind.Fixed, capability.MediumKind);
+            Assert.AreEqual("NTFS", capability.FileSystemName);
+            Assert.IsTrue(capability.SupportsStableFileId);
+            StringAssert.Contains(updatedRoots[0].DisplayName, "[在线 · NTFS]");
+        }
+        finally
+        {
+            StorageCapabilityService.Default = originalDefault;
+        }
+    }
 }
+
+

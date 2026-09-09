@@ -158,4 +158,49 @@ public sealed class StorageCapabilityServiceTests
         Assert.IsTrue(capability.SupportsStableFileId);
         StringAssert.Contains(capability.UserSummary, "重解析点");
     }
+
+    [TestMethod]
+    public void Probe_MappedNetworkDrive_DoesNotInvokeGetAttributes()
+    {
+        var getAttributesCalled = false;
+        var service = new StorageCapabilityService(
+            getDriveSnapshot: _ => new StorageDriveSnapshot("Z:\\", DriveType.Network, "SMB", IsReady: true),
+            getAttributes: _ =>
+            {
+                getAttributesCalled = true;
+                return FileAttributes.Directory;
+            });
+
+        var capability = service.Probe(@"Z:\SharedDocs");
+
+        Assert.IsFalse(getAttributesCalled, "StorageCapabilityService.Probe must not call getAttributes for mapped network drives to avoid network blocking");
+        Assert.AreEqual(StorageMediumKind.Network, capability.MediumKind);
+        Assert.AreEqual("SMB", capability.FileSystemName);
+        Assert.IsFalse(capability.SupportsStableFileId);
+        Assert.IsFalse(capability.IsReparsePoint);
+        StringAssert.Contains(capability.UserSummary, "网络共享 (SMB)");
+        StringAssert.Contains(capability.UserSummary, "身份跟踪受限（路径降级）");
+    }
+
+    [TestMethod]
+    public void Probe_DriveNotReady_DoesNotInvokeGetAttributes()
+    {
+        var getAttributesCalled = false;
+        var service = new StorageCapabilityService(
+            getDriveSnapshot: _ => new StorageDriveSnapshot("Z:\\", DriveType.Network, null, IsReady: false),
+            getAttributes: _ =>
+            {
+                getAttributesCalled = true;
+                throw new IOException("Device not ready");
+            });
+
+        var capability = service.Probe(@"Z:\");
+
+        Assert.IsFalse(getAttributesCalled, "StorageCapabilityService.Probe must not call getAttributes when drive is not ready");
+        Assert.AreEqual(StorageMediumKind.Network, capability.MediumKind);
+        Assert.IsFalse(capability.SupportsStableFileId);
+        Assert.IsFalse(capability.IsReparsePoint);
+        StringAssert.Contains(capability.UserSummary, "介质未就绪或已断开");
+    }
 }
+

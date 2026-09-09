@@ -117,7 +117,11 @@ public sealed partial class MainWindow : Window
                     _scanner,
                     result => DispatcherQueue.TryEnqueue(() => _ = ShowRealtimeResultAsync(result)),
                     exception => DispatcherQueue.TryEnqueue(() => ShowRealtimeError(exception)),
-                    onRootChanged: () => DispatcherQueue.TryEnqueue(RefreshRoots));
+                    onRootChanged: () => DispatcherQueue.TryEnqueue(() =>
+                    {
+                        RefreshRoots();
+                        _ = RefreshRootsCapabilitiesAsync();
+                    }));
                 _fileQuery = new(_databasePath);
                 _tags = new(_databasePath, _rollingBackup);
                 _tagBackup = new(_databasePath);
@@ -129,6 +133,7 @@ public sealed partial class MainWindow : Window
                 _initialized = true;
 
                 RefreshRoots();
+                _ = RefreshRootsCapabilitiesAsync();
                 foreach (var root in _scanner.ListRoots())
                 {
                     if (!_fileChanges.CheckAndStartCrashRecovery(root))
@@ -2839,6 +2844,17 @@ public sealed partial class MainWindow : Window
         var roots = _scanner.ListRoots();
         RootsList.ItemsSource = roots;
         RootsList.SelectedItem = roots.FirstOrDefault(root => root.Id == selectedId) ?? roots.FirstOrDefault();
+    }
+
+    private async Task RefreshRootsCapabilitiesAsync()
+    {
+        if (_scanner is null)
+        {
+            return;
+        }
+
+        await _scanner.RefreshCapabilitiesAsync();
+        DispatcherQueue.TryEnqueue(RefreshRoots);
     }
 
     private void ShowProgress(ScanProgress progress) =>
