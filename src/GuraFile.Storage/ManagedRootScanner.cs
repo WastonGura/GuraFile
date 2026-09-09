@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Data.Sqlite;
 
 namespace GuraFile.Storage;
@@ -78,6 +79,7 @@ public sealed record ScanSessionRecord(
 public sealed class ManagedRootScanner
 {
     private readonly SemaphoreSlim _writeGate = new(1, 1);
+    private readonly ConcurrentDictionary<long, StorageCapability> _capabilityCache = new();
     private readonly Func<string, FileIdentity> _readIdentity;
     private readonly Func<string, string[]> _getFileSystemEntries;
     private readonly Func<string, FileAttributes> _getAttributes;
@@ -169,7 +171,18 @@ public sealed class ManagedRootScanner
                     if (string.Equals(existingPath, fullPath, StringComparison.OrdinalIgnoreCase))
                     {
                         transaction.Commit();
-                        var existingCap = StorageCapabilityService.Default.Probe(existingPath);
+                        if (!_capabilityCache.TryGetValue(existingId, out var existingCap))
+                        {
+                            try
+                            {
+                                existingCap = StorageCapabilityService.Default.Probe(existingPath);
+                                _capabilityCache[existingId] = existingCap;
+                            }
+                            catch
+                            {
+                                existingCap = StorageCapabilityService.GetFastDefault(existingPath);
+                            }
+                        }
                         return new ManagedRoot(existingId, existingPath, Capability: existingCap);
                     }
 
@@ -185,8 +198,18 @@ public sealed class ManagedRootScanner
             insert.CommandText = "INSERT INTO roots (path, normalized_path) VALUES ($path, $normalizedPath) RETURNING id;";
             insert.Parameters.AddWithValue("$path", fullPath);
             insert.Parameters.AddWithValue("$normalizedPath", fullPath);
-            var capability = StorageCapabilityService.Default.Probe(fullPath);
-            var root = new ManagedRoot((long)insert.ExecuteScalar()!, fullPath, Capability: capability);
+            var rootId = (long)insert.ExecuteScalar()!;
+            StorageCapability? capability = null;
+            try
+            {
+                capability = StorageCapabilityService.Default.Probe(fullPath);
+                _capabilityCache[rootId] = capability;
+            }
+            catch
+            {
+                capability = StorageCapabilityService.GetFastDefault(fullPath);
+            }
+            var root = new ManagedRoot(rootId, fullPath, Capability: capability);
             transaction.Commit();
             return root;
         }
@@ -212,6 +235,58 @@ public sealed class ManagedRootScanner
         return roots;
     }
 
+    public async Task RefreshCapabilitiesAsync(long? rootId = null, CancellationToken cancellationToken = default)
+    {
+        await Task.Run(() =>
+        {
+            List<(long Id, string Path)> rootsToProbe;
+            using (var connection = SqliteDatabase.Open(DatabasePath))
+            using (var command = connection.CreateCommand())
+            {
+                if (rootId.HasValue)
+                {
+                    command.CommandText = "SELECT id, path FROM roots WHERE id = $id AND status = 'online';";
+                    command.Parameters.AddWithValue("$id", rootId.Value);
+                }
+                else
+                {
+                    command.CommandText = "SELECT id, path FROM roots WHERE status = 'online';";
+                }
+
+                using var reader = command.ExecuteReader();
+                rootsToProbe = new List<(long, string)>();
+                while (reader.Read())
+                {
+                    rootsToProbe.Add((reader.GetInt64(0), reader.GetString(1)));
+                }
+            }
+
+            foreach (var (id, path) in rootsToProbe)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
+
+                try
+                {
+                    var capability = StorageCapabilityService.Default.Probe(path);
+                    _capabilityCache[id] = capability;
+                }
+                catch
+                {
+                    // Probing failure in background task is ignored
+                }
+            }
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public StorageCapability? GetCachedCapability(long rootId) =>
+        _capabilityCache.TryGetValue(rootId, out var capability) ? capability : null;
+
+    public void SetCachedCapability(long rootId, StorageCapability capability) =>
+        _capabilityCache[rootId] = capability;
+
     public bool RemoveRoot(long rootId)
     {
         _writeGate.Wait();
@@ -225,6 +300,10 @@ public sealed class ManagedRootScanner
             command.Parameters.AddWithValue("$rootId", rootId);
             var removed = command.ExecuteNonQuery() == 1;
             transaction.Commit();
+            if (removed)
+            {
+                _capabilityCache.TryRemove(rootId, out _);
+            }
             return removed;
         }
         finally
@@ -410,6 +489,15 @@ public sealed class ManagedRootScanner
 
         using var connection = SqliteDatabase.Open(DatabasePath);
         var root = ReadRoot(connection, rootId);
+        try
+        {
+            var capability = StorageCapabilityService.Default.Probe(root.Path);
+            _capabilityCache[rootId] = capability;
+        }
+        catch
+        {
+            // Probing in background scan should not fail the scan
+        }
         var failures = new List<ScanFailure>();
         var pending = new List<FileRecord>(batchSize);
         var directories = new Stack<string>();
@@ -980,7 +1068,7 @@ public sealed class ManagedRootScanner
             new(discovered, committed, added, updated, missing, fallback, canceled, failures.ToArray(), skippedReparsePoints);
     }
 
-    private static ManagedRoot ReadRoot(SqliteConnection connection, long rootId)
+    private ManagedRoot ReadRoot(SqliteConnection connection, long rootId)
     {
         using var command = connection.CreateCommand();
         command.CommandText =
@@ -995,14 +1083,21 @@ public sealed class ManagedRootScanner
         return ReadManagedRoot(reader);
     }
 
-    private static ManagedRoot ReadManagedRoot(SqliteDataReader reader)
+    private ManagedRoot ReadManagedRoot(SqliteDataReader reader)
     {
         var id = reader.GetInt64(0);
         var path = reader.GetString(1);
         var status = ParseStatus(reader.GetString(2));
         var lastError = reader.IsDBNull(3) ? null : reader.GetString(3);
         DateTimeOffset? lastChecked = reader.IsDBNull(4) ? null : DateTimeOffset.Parse(reader.GetString(4));
-        var capability = status == ManagedRootStatus.Online ? StorageCapabilityService.Default.Probe(path) : null;
+        StorageCapability? capability = null;
+        if (status == ManagedRootStatus.Online)
+        {
+            if (!_capabilityCache.TryGetValue(id, out capability))
+            {
+                capability = StorageCapabilityService.GetFastDefault(path);
+            }
+        }
         return new ManagedRoot(id, path, status, lastError, lastChecked, capability);
     }
 

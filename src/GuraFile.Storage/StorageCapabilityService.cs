@@ -90,6 +90,26 @@ public class StorageCapabilityService
         _getAttributes = getAttributes ?? File.GetAttributes;
     }
 
+    public static StorageCapability? GetFastDefault(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+
+        if (IsUncPath(path))
+        {
+            return new StorageCapability(
+                StorageMediumKind.Network,
+                "SMB",
+                SupportsStableFileId: false,
+                IsReparsePoint: false,
+                UserSummary: "网络共享 (SMB) - 身份跟踪受限（路径降级）");
+        }
+
+        return null;
+    }
+
     public StorageCapability Probe(string path)
     {
         if (string.IsNullOrWhiteSpace(path))
@@ -112,17 +132,6 @@ public class StorageCapabilityService
                 UserSummary: "网络共享 (SMB) - 身份跟踪受限（路径降级）");
         }
 
-        var isReparsePoint = false;
-        try
-        {
-            var attributes = _getAttributes(path);
-            isReparsePoint = (attributes & FileAttributes.ReparsePoint) != 0;
-        }
-        catch
-        {
-            // Path might not exist yet or be inaccessible; default to not reparse point
-        }
-
         StorageDriveSnapshot? snapshot = null;
         try
         {
@@ -135,16 +144,12 @@ public class StorageCapabilityService
 
         if (snapshot is null)
         {
-            var summary = isReparsePoint
-                ? "未知介质 [重解析点] - 身份跟踪受限"
-                : "未知介质 - 身份跟踪受限";
-
             return new StorageCapability(
                 StorageMediumKind.Unknown,
                 "Unknown",
                 SupportsStableFileId: false,
-                isReparsePoint,
-                summary);
+                IsReparsePoint: false,
+                UserSummary: "未知介质 - 身份跟踪受限");
         }
 
         if (!snapshot.IsReady)
@@ -157,27 +162,39 @@ public class StorageCapabilityService
                 medium,
                 fs,
                 SupportsStableFileId: false,
-                isReparsePoint,
-                summary);
+                IsReparsePoint: false,
+                UserSummary: summary);
+        }
+
+        if (snapshot.DriveType == DriveType.Network)
+        {
+            var fs = string.IsNullOrWhiteSpace(snapshot.DriveFormat) ? "SMB" : snapshot.DriveFormat;
+            var summary = $"网络共享 ({fs}) - 身份跟踪受限（路径降级）";
+
+            return new StorageCapability(
+                StorageMediumKind.Network,
+                fs,
+                SupportsStableFileId: false,
+                IsReparsePoint: false,
+                UserSummary: summary);
+        }
+
+        var isReparsePoint = false;
+        if (snapshot.DriveType is DriveType.Fixed or DriveType.Removable)
+        {
+            try
+            {
+                var attributes = _getAttributes(path);
+                isReparsePoint = (attributes & FileAttributes.ReparsePoint) != 0;
+            }
+            catch
+            {
+                // Path might not exist yet or be inaccessible; default to not reparse point
+            }
         }
 
         switch (snapshot.DriveType)
         {
-            case DriveType.Network:
-            {
-                var fs = string.IsNullOrWhiteSpace(snapshot.DriveFormat) ? "SMB" : snapshot.DriveFormat;
-                var summary = isReparsePoint
-                    ? $"网络共享 ({fs}) [重解析点] - 身份跟踪受限（路径降级）"
-                    : $"网络共享 ({fs}) - 身份跟踪受限（路径降级）";
-
-                return new StorageCapability(
-                    StorageMediumKind.Network,
-                    fs,
-                    SupportsStableFileId: false,
-                    isReparsePoint,
-                    summary);
-            }
-
             case DriveType.Removable:
             {
                 var fs = string.IsNullOrWhiteSpace(snapshot.DriveFormat) ? "Unknown" : snapshot.DriveFormat;
