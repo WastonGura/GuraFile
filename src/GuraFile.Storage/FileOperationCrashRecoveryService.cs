@@ -10,17 +10,29 @@ public sealed class FileOperationCrashRecoveryService
     private readonly ManagedRootScanner _scanner;
     private readonly FileOperationIndexCommitter _committer;
     private readonly DiagnosticLogger _diagnosticLogger;
+    private readonly Func<string, FileIdentity> _readIdentity;
 
     public FileOperationCrashRecoveryService(
         string databasePath,
         ManagedRootScanner scanner,
         FileOperationIndexCommitter committer,
         DiagnosticLogger? diagnosticLogger = null)
+        : this(databasePath, scanner, committer, diagnosticLogger, null)
+    {
+    }
+
+    internal FileOperationCrashRecoveryService(
+        string databasePath,
+        ManagedRootScanner scanner,
+        FileOperationIndexCommitter committer,
+        DiagnosticLogger? diagnosticLogger,
+        Func<string, FileIdentity>? readIdentity)
     {
         _databasePath = databasePath ?? throw new ArgumentNullException(nameof(databasePath));
         _scanner = scanner ?? throw new ArgumentNullException(nameof(scanner));
         _committer = committer ?? throw new ArgumentNullException(nameof(committer));
         _diagnosticLogger = diagnosticLogger ?? DiagnosticLogger.Default;
+        _readIdentity = readIdentity ?? FileIdentityReader.Read;
     }
 
     public async Task<FileOperationRecoveryReport> RecoverAsync(CancellationToken cancellationToken = default)
@@ -115,10 +127,39 @@ public sealed class FileOperationCrashRecoveryService
                             if (targetExists && !sourceExists)
                             {
                                 var normalizedTarget = SafeFileOperationExecutor.Normalize(target);
-                                var targetDiskId = FileIdentityReader.Read(normalizedTarget);
+                                var targetDiskId = _readIdentity(normalizedTarget);
+                                var snapshot = _committer.QuerySourceSnapshot(connection, source);
 
-                                // 幂等性检查：若目标在数据库中已存在且具有相同的稳定身份，说明扫描器已先于恢复完成路径对账并保留了标签
+                                var sourceOriginalIdentity = snapshot.DiskIdentity.IsStable
+                                    ? snapshot.DiskIdentity
+                                    : (snapshot.DbIdentity?.IsStable == true ? snapshot.DbIdentity : null);
+
+                                bool canShortCircuit = false;
                                 if (targetDiskId.IsStable && IsTargetAlreadyIndexedWithIdentity(connection, normalizedTarget, targetDiskId))
+                                {
+                                    var targetFileId = GetIndexedFileId(connection, normalizedTarget, targetDiskId);
+                                    var targetUserTags = targetFileId.HasValue
+                                        ? LoadUserTagsForFile(connection, targetFileId.Value)
+                                        : Array.Empty<string>();
+                                    var targetHasAllSourceTags = snapshot.UserTags.All(tag => targetUserTags.Contains(tag, StringComparer.OrdinalIgnoreCase));
+
+                                    if (sourceOriginalIdentity != null && sourceOriginalIdentity.IsStable)
+                                    {
+                                        var isSameStableIdentity = string.Equals(targetDiskId.VolumeId, sourceOriginalIdentity.VolumeId, StringComparison.OrdinalIgnoreCase) &&
+                                                                   string.Equals(targetDiskId.FileId, sourceOriginalIdentity.FileId, StringComparison.OrdinalIgnoreCase);
+                                        if (isSameStableIdentity && targetHasAllSourceTags)
+                                        {
+                                            canShortCircuit = true;
+                                        }
+                                    }
+                                    else if (sourceOriginalIdentity == null && snapshot.UserTags.Count == 0)
+                                    {
+                                        // 同卷移动后扫描器已将节点路径更新至目标，源路径在数据库中已无记录
+                                        canShortCircuit = true;
+                                    }
+                                }
+
+                                if (canShortCircuit)
                                 {
                                     itemUpdates.Add((source, "committed", null));
                                     reconciledItemsCount++;
@@ -126,7 +167,6 @@ public sealed class FileOperationCrashRecoveryService
                                 }
 
                                 // Shell move succeeded before crash, reconcile index without writing to disk
-                                var snapshot = _committer.QuerySourceSnapshot(connection, source);
                                 var commitResult = _committer.CommitSingleItem(connection, roots, source, target, isMove: true, snapshot);
                                 if (commitResult.Succeeded)
                                 {
@@ -147,8 +187,8 @@ public sealed class FileOperationCrashRecoveryService
                             else if (sourceExists && targetExists)
                             {
                                 // Both source and target exist on disk: check identities
-                                var srcId = FileIdentityReader.Read(source);
-                                var dstId = FileIdentityReader.Read(target);
+                                var srcId = _readIdentity(source);
+                                var dstId = _readIdentity(target);
 
                                 if (srcId.IsStable && dstId.IsStable &&
                                     string.Equals(srcId.VolumeId, dstId.VolumeId, StringComparison.OrdinalIgnoreCase) &&
@@ -204,10 +244,23 @@ public sealed class FileOperationCrashRecoveryService
                                 continue;
                             }
 
-                            // 若 intent.Status 为 pending，Shell 物理写操作未调用，绝不能仅凭目标文件在磁盘存在就认定复制成功
+                            var targetExists = File.Exists(target) || Directory.Exists(target);
+
+                            // 若 intent.Status 为 pending：
+                            // 物理写盘后崩溃可能导致状态停留在 pending 但目标已落盘，绝不能静默判为未修改
                             if (string.Equals(intent.Status, "pending", StringComparison.OrdinalIgnoreCase))
                             {
-                                itemUpdates.Add((source, "failed", "操作在执行前中断，已安全放弃，未修改目标文件。"));
+                                if (targetExists)
+                                {
+                                    intentHasIndeterminate = true;
+                                    var err = "执行状态未决：操作记录为 pending 但目标文件已存在，未执行覆盖，请核实目标文件及标签";
+                                    itemUpdates.Add((source, "indeterminate", err));
+                                    indeterminateDetails.Add($"[{intent.OperationType}/pending_target_exists] {source} -> {target}");
+                                }
+                                else
+                                {
+                                    itemUpdates.Add((source, "failed", "操作在执行前中断，已安全放弃，未修改目标文件。"));
+                                }
                                 continue;
                             }
 
@@ -228,7 +281,6 @@ public sealed class FileOperationCrashRecoveryService
                                 continue;
                             }
 
-                            var targetExists = File.Exists(target) || Directory.Exists(target);
                             if (targetExists)
                             {
                                 // Copied before crash; reconcile index
@@ -397,12 +449,12 @@ public sealed class FileOperationCrashRecoveryService
         return result;
     }
 
-    private static bool IsTargetAlreadyIndexedWithIdentity(SqliteConnection connection, string normalizedTarget, FileIdentity targetDiskId)
+    private static long? GetIndexedFileId(SqliteConnection connection, string normalizedTarget, FileIdentity targetDiskId)
     {
         using var cmd = connection.CreateCommand();
         cmd.CommandText =
             """
-            SELECT volume_id, file_id
+            SELECT id, volume_id, file_id
             FROM files
             WHERE normalized_path = $path COLLATE NOCASE AND is_online = 1
             LIMIT 1;
@@ -411,11 +463,41 @@ public sealed class FileOperationCrashRecoveryService
         using var reader = cmd.ExecuteReader();
         if (reader.Read())
         {
-            var dbVol = reader.GetString(0);
-            var dbFid = reader.GetString(1);
-            return string.Equals(dbVol, targetDiskId.VolumeId, StringComparison.OrdinalIgnoreCase) &&
-                   string.Equals(dbFid, targetDiskId.FileId, StringComparison.OrdinalIgnoreCase);
+            var dbId = reader.GetInt64(0);
+            var dbVol = reader.GetString(1);
+            var dbFid = reader.GetString(2);
+            if (string.Equals(dbVol, targetDiskId.VolumeId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(dbFid, targetDiskId.FileId, StringComparison.OrdinalIgnoreCase))
+            {
+                return dbId;
+            }
         }
-        return false;
+        return null;
+    }
+
+    private static bool IsTargetAlreadyIndexedWithIdentity(SqliteConnection connection, string normalizedTarget, FileIdentity targetDiskId)
+    {
+        return GetIndexedFileId(connection, normalizedTarget, targetDiskId).HasValue;
+    }
+
+    private static IReadOnlyList<string> LoadUserTagsForFile(SqliteConnection connection, long fileId)
+    {
+        var tags = new List<string>();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText =
+            """
+            SELECT t.name
+            FROM tags t
+            INNER JOIN file_tags ft ON t.id = ft.tag_id
+            WHERE ft.file_id = $fileId AND ft.source = 'user'
+            ORDER BY t.name COLLATE NOCASE;
+            """;
+        cmd.Parameters.AddWithValue("$fileId", fileId);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            tags.Add(reader.GetString(0));
+        }
+        return tags;
     }
 }
