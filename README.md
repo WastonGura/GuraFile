@@ -2,17 +2,18 @@
 
 GuraFile 是一个 Windows 优先的标签式文件管理器。它保留真实文件系统作为唯一文件来源，在本地建立索引，让你用标签而不是文件夹层级整理和查找文件。
 
-## v0.5.1 搜索语义优化与性能加固补丁
+## v0.5.2 首屏有界查询与隔离冷启动基准补丁
 
-本版为 v0.5.1 维护补丁版本，在 v0.5.0 日用稳定性 Beta 基础上，优化搜索子串匹配语义并完善冷启动与端到端严谨压测：
+本版为 v0.5.2 维护补丁版本，在 v0.5.1 基础上优化十万大结果集首屏有界查询，支持数据目录动态重定向，并建立真实隔离冷启动压测基准：
 
-- **兼顾全文前缀与子串搜索（#99）**：构建 FTS5 与精确子串匹配复合查询策略，完美支持驼峰命名中间子串（如 `ProjectAlpha.cs` 检索 `Alpha`）与未分词中文子串（如 `2026年财务报告_Q1.xlsx` 检索 `财务` 或 `报告`），多词元 AND 语义；
-- **防崩溃与安全状态加固（#96, #97, #98）**：修复崩溃恢复时潜在标签丢失及未决写意图判定问题，防范已删标签 ID 复用，完善脱敏与 UI 无阻塞 I/O；
-- **真实环境进程冷启动与压测基准**：实测连续 3 次独立应用进程冷启动交互均在 500 ms 左右（< 3.0 s 预算）；启用滚动备份下千文件批量打标耗时收敛至 32 ms 左右（< 2.0 s 预算）；十万条索引数据复合搜索全场景保持低于 200 ms。
+- **首屏有界查询支持（#107）**：在 `FileQuery` / `FileQueryService` 引入 `Limit` 与 `Offset` 参数，UI 默认采用首屏 1,000 条有界加载，彻底消除十万结果全量物化带来的 350-550ms 延迟；
+- **动态数据目录与多源路径重定向（#107）**：支持 `--data-dir` 命令行参数、`GURAFILE_DATA_DIR` 环境变量与 `SetCustomUserDataDirectory` 动态重定向所有数据路径（数据库、设置、备份、日志）；
+- **真实隔离 10 万记录独立进程冷启动基准（#107）**：在 `ScaleColdStartTests` 建立端到端独立进程真实冷启动基准，预置 100,000 条测试数据，通过生命周期日志严格验证连续 3 次首屏加载均在 3.0 秒以内；
+- **稳定性与一致性加固（#104, #105, #106）**：消除根目录同步能力探测消除 UI 阻塞 I/O，修复保存视图排序时失效保护绕过，修复跨卷移动恢复时的标签丢失问题。
 
 ## 安装与运行
 
-1. 从 GitHub Releases 下载 `GuraFile-v0.5.1-win-x64.zip` 和对应的 `.sha256` 文件。
+1. 从 GitHub Releases 下载 `GuraFile-v0.5.2-win-x64.zip` 和对应的 `.sha256` 文件。
 2. 校验压缩包 SHA-256 后解压到可写目录。
 3. 运行 `GuraFile.exe`。应用为未签名预览包，Windows 可能显示 SmartScreen 提示。
 
@@ -87,7 +88,7 @@ dotnet test .\tests\GuraFile.Tests\GuraFile.Tests.csproj --configuration Release
 生成可发布包：
 
 ```powershell
-.\scripts\PackageRelease.ps1 -Version 0.5.1
+.\scripts\PackageRelease.ps1 -Version 0.5.2
 ```
 
 项目按 GitHub Issue、独立 worktree、测试先行、独立审查、PR 和受保护 `main` 分支交付。第三方组件及许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。

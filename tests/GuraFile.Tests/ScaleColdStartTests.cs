@@ -71,6 +71,14 @@ public sealed class ScaleColdStartTests
             transaction.Commit();
         }
 
+        public void Checkpoint()
+        {
+            using var connection = SqliteDatabase.Open(Path);
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            command.ExecuteNonQuery();
+        }
+
         public void Dispose()
         {
             foreach (var file in new[] { Path, $"{Path}-shm", $"{Path}-wal" })
@@ -103,22 +111,22 @@ public sealed class ScaleColdStartTests
         GC.WaitForPendingFinalizers();
         var memoryBefore = GC.GetTotalMemory(true);
 
-        // Cold query: open database and execute first query (default sort by Name)
+        // Cold query: open database and execute first bounded query (default sort by Name, Limit: 1000)
         var queryTimer = Stopwatch.StartNew();
         var queryService = new FileQueryService(db.Path);
-        var files = await queryService.QueryAsync(new FileQuery());
+        var files = await queryService.QueryAsync(new FileQuery(Limit: 1000));
         queryTimer.Stop();
 
         var memoryAfter = GC.GetTotalMemory(false);
         var memoryDeltaMb = (memoryAfter - memoryBefore) / (1024.0 * 1024.0);
 
-        Console.WriteLine($"[Baseline] 100,000 files cold query: {queryTimer.Elapsed.TotalMilliseconds:F1} ms, Memory delta: {memoryDeltaMb:F2} MB");
+        Console.WriteLine($"[Baseline] 100,000 files bounded cold query: {queryTimer.Elapsed.TotalMilliseconds:F1} ms, Memory delta: {memoryDeltaMb:F2} MB");
 
-        Assert.HasCount(100_000, files);
+        Assert.HasCount(1000, files);
         // Pure database query must complete well within the cold start budget (< 2000 ms) so full UI is < 3000 ms
         Assert.IsTrue(
             queryTimer.Elapsed < TimeSpan.FromSeconds(2.0),
-            $"100k query took {queryTimer.Elapsed.TotalMilliseconds:F1} ms, exceeding the 2.0s database query budget.");
+            $"100k bounded query took {queryTimer.Elapsed.TotalMilliseconds:F1} ms, exceeding the 2.0s database query budget.");
 
         // Verify correct ordering by name (case-insensitive)
         Assert.AreEqual("File_000000.txt", files[0].Name);
@@ -330,23 +338,54 @@ public sealed class ScaleColdStartTests
             return;
         }
 
+        using var templateDb = new TempScaleDatabase();
+        var seedTimer = Stopwatch.StartNew();
+        templateDb.SeedFiles(100_000);
+        templateDb.Checkpoint();
+        seedTimer.Stop();
+        Console.WriteLine($"[Template DB] 100,000 files seeded and checkpointed in {seedTimer.Elapsed.TotalMilliseconds:F1} ms");
+
         for (var run = 1; run <= 3; run++)
         {
-            var sw = Stopwatch.StartNew();
-            using var process = Process.Start(new ProcessStartInfo(exePath)
+            var tempDir = Path.Combine(Path.GetTempPath(), $"GuraFile.ScaleColdStart.Run{run}.{Guid.NewGuid():N}");
+            Directory.CreateDirectory(tempDir);
+            var logsDir = Path.Combine(tempDir, "logs");
+            var targetDb = Path.Combine(tempDir, "index.db");
+            File.Copy(templateDb.Path, targetDb, true);
+            if (File.Exists($"{templateDb.Path}-wal"))
+            {
+                File.Copy($"{templateDb.Path}-wal", $"{targetDb}-wal", true);
+            }
+            if (File.Exists($"{templateDb.Path}-shm"))
+            {
+                File.Copy($"{templateDb.Path}-shm", $"{targetDb}-shm", true);
+            }
+
+            var psi = new ProcessStartInfo(exePath)
             {
                 UseShellExecute = false
-            });
+            };
+            psi.ArgumentList.Add("--data-dir");
+            psi.ArgumentList.Add(tempDir);
+            psi.EnvironmentVariables["GURAFILE_DATA_DIR"] = tempDir;
 
+            var sw = Stopwatch.StartNew();
+            using var process = Process.Start(psi);
             Assert.IsNotNull(process, $"Process failed to start on run {run}");
+
+            long windowReadyMs = 0;
+            long queryReadyMs = 0;
+            long peakWorkingSet = 0;
+
             try
             {
                 var deadline = DateTime.UtcNow.AddSeconds(15);
-                var isReady = false;
+                var windowReady = false;
+                var queryReady = false;
 
                 while (DateTime.UtcNow < deadline)
                 {
-                    Thread.Sleep(50);
+                    Thread.Sleep(30);
                     process.Refresh();
 
                     if (process.HasExited)
@@ -354,34 +393,63 @@ public sealed class ScaleColdStartTests
                         Assert.Fail($"GuraFile exited prematurely on run {run} with exit code {process.ExitCode}");
                     }
 
-                    var handle = process.MainWindowHandle;
-                    var title = process.MainWindowTitle;
-                    var visible = handle != IntPtr.Zero && WindowFinder.IsWindowVisible(handle);
-
-                    if (!(handle != IntPtr.Zero && title == "GuraFile" && visible))
+                    try
                     {
-                        var titledHandle = WindowFinder.FindWindowByTitle(process.Id, "GuraFile");
-                        if (titledHandle != IntPtr.Zero)
+                        peakWorkingSet = Math.Max(peakWorkingSet, process.PeakWorkingSet64);
+                    }
+                    catch
+                    {
+                    }
+
+                    if (!windowReady)
+                    {
+                        var handle = process.MainWindowHandle;
+                        var title = process.MainWindowTitle;
+                        var visible = handle != IntPtr.Zero && WindowFinder.IsWindowVisible(handle);
+
+                        if (!(handle != IntPtr.Zero && title == "GuraFile" && visible))
                         {
-                            handle = titledHandle;
-                            title = "GuraFile";
-                            visible = WindowFinder.IsWindowVisible(handle);
+                            var titledHandle = WindowFinder.FindWindowByTitle(process.Id, "GuraFile");
+                            if (titledHandle != IntPtr.Zero)
+                            {
+                                handle = titledHandle;
+                                title = "GuraFile";
+                                visible = WindowFinder.IsWindowVisible(handle);
+                            }
+                        }
+
+                        if (handle != IntPtr.Zero && title == "GuraFile" && process.Responding && visible)
+                        {
+                            windowReady = true;
+                            windowReadyMs = sw.ElapsedMilliseconds;
                         }
                     }
 
-                    if (handle != IntPtr.Zero && title == "GuraFile" && process.Responding && visible)
+                    if (!queryReady)
+                    {
+                        if (HasInitialQueryCompletedLog(logsDir))
+                        {
+                            queryReady = true;
+                            queryReadyMs = sw.ElapsedMilliseconds;
+                        }
+                    }
+
+                    if (windowReady && queryReady)
                     {
                         sw.Stop();
-                        isReady = true;
                         break;
                     }
                 }
 
-                Assert.IsTrue(isReady, $"Launch timed out waiting for GuraFile window on run {run}.");
-                Console.WriteLine($"[Cold Start Run {run}] GuraFile main window visible and interactive in {sw.Elapsed.TotalMilliseconds:F1} ms");
+                Assert.IsTrue(windowReady, $"Launch timed out waiting for GuraFile window on run {run}.");
+                Assert.IsTrue(queryReady, $"Launch timed out waiting for initial file query completion log on run {run}.");
+
+                var peakWorkingSetMb = peakWorkingSet / (1024.0 * 1024.0);
+                Console.WriteLine($"[Cold Start Run {run}] Window ready: {windowReadyMs} ms, Initial query completed: {queryReadyMs} ms, Total: {sw.Elapsed.TotalMilliseconds:F1} ms, Peak Memory: {peakWorkingSetMb:F1} MB");
+
                 Assert.IsTrue(
                     sw.Elapsed < TimeSpan.FromSeconds(3.0),
-                    $"Cold start run {run} took {sw.Elapsed.TotalMilliseconds:F1} ms, exceeding 3.0s budget.");
+                    $"Cold start run {run} took {sw.Elapsed.TotalMilliseconds:F1} ms (window: {windowReadyMs} ms, query: {queryReadyMs} ms), exceeding 3.0s budget.");
             }
             finally
             {
@@ -408,6 +476,57 @@ public sealed class ScaleColdStartTests
                 catch
                 {
                 }
+
+                DeleteDirectoryWithRetry(tempDir);
+            }
+        }
+    }
+
+    private static bool HasInitialQueryCompletedLog(string logsDir)
+    {
+        if (!Directory.Exists(logsDir))
+        {
+            return false;
+        }
+
+        var logFiles = Directory.GetFiles(logsDir, "*.log*");
+        foreach (var file in logFiles)
+        {
+            try
+            {
+                using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var reader = new StreamReader(stream, System.Text.Encoding.UTF8);
+                var content = reader.ReadToEnd();
+                if (content.Contains("[Lifecycle] Initial file query completed"))
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        return false;
+    }
+
+    private static void DeleteDirectoryWithRetry(string directory, int maxRetries = 5, int delayMs = 100)
+    {
+        if (!Directory.Exists(directory))
+        {
+            return;
+        }
+
+        for (var i = 0; i < maxRetries; i++)
+        {
+            try
+            {
+                Directory.Delete(directory, recursive: true);
+                return;
+            }
+            catch
+            {
+                Thread.Sleep(delayMs);
             }
         }
     }

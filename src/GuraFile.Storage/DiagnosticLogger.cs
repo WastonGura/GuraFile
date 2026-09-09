@@ -167,6 +167,11 @@ public class DiagnosticLogger
         Log(DiagnosticLogLevel.Info, category, eventName, correlationId, status, message, errorCode, exception: null, properties);
     }
 
+    public void Info(string message)
+    {
+        LogInfo(DiagnosticCategory.App, "Info", message: message);
+    }
+
     public void LogWarning(
         DiagnosticCategory category,
         string eventName,
