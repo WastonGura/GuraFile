@@ -65,7 +65,7 @@ public class DiagnosticLogger
         RegexOptions.Compiled);
 
     private static readonly Regex PasswordSecretRegex = new(
-        @"(?i)(""?\b(?:password|secret|token|apikey|api_key|access_token)""?\s*[:=]\s*)(""[^""\r\n]*""|[^\s,;}{\])]+)",
+        @"(?i)(""?\b(?:password|secret|token|apikey|api_key|access_token)""?\s*[:=]\s*)(""[^""\r\n]*""|[^\s,;}{\])""\r\n]+)",
         RegexOptions.Compiled);
 
     private static readonly JsonSerializerOptions JsonOptions = new()

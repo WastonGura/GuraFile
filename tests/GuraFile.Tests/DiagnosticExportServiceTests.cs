@@ -227,4 +227,57 @@ public sealed class DiagnosticExportServiceTests
         Assert.DoesNotContain(Environment.UserName, content, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("<user>", content);
     }
+
+    [TestMethod]
+    public void Export_WhenLogContainsSecretTokenInMessage_ExportedLogRemainsValidJson()
+    {
+        var testLogsDir = Path.Combine(_tempDir, "token_logs");
+        Directory.CreateDirectory(testLogsDir);
+
+        var logger = new DiagnosticLogger(testLogsDir);
+        logger.LogInfo(
+            DiagnosticCategory.App,
+            "ApiRequest",
+            message: "token=synthetic_value");
+
+        var testZip = Path.Combine(_tempDir, "token_export.zip");
+        var service = new DiagnosticExportService(
+            databasePath: _dbPath,
+            logsDirectory: testLogsDir,
+            backupDirectory: _backupDir,
+            anonymizePaths: true);
+
+        var result = service.Export(testZip);
+        Assert.IsTrue(result.Succeeded, $"Export failed: {result.ErrorMessage}");
+
+        using var archive = ZipFile.OpenRead(testZip);
+        var logEntry = archive.Entries.FirstOrDefault(e => e.FullName.StartsWith("logs/") && e.FullName.EndsWith(".log"));
+        Assert.IsNotNull(logEntry, "Exported zip should contain the log file");
+
+        using var reader = new StreamReader(logEntry.Open());
+        var content = reader.ReadToEnd();
+        Assert.DoesNotContain("synthetic_value", content);
+        Assert.Contains("token=***", content);
+
+        // Every line must parse as valid JSON
+        foreach (var line in content.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            using var doc = JsonDocument.Parse(line);
+            var root = doc.RootElement;
+            Assert.AreEqual("Info", root.GetProperty("level").GetString());
+            var message = root.GetProperty("message").GetString();
+            Assert.IsNotNull(message);
+            Assert.Contains("token=***", message);
+        }
+    }
+
+    [TestMethod]
+    public void GetConfigSummaryNote_ReflectsAnonymizationSetting()
+    {
+        var anonymizedNote = DiagnosticExportService.GetConfigSummaryNote(true);
+        var rawNote = DiagnosticExportService.GetConfigSummaryNote(false);
+
+        Assert.AreEqual("• 配置摘要信息（config_summary.json）：脱敏的管理根目录、数据库架构版本、备份元数据；\n", anonymizedNote);
+        Assert.AreEqual("• 配置摘要信息（config_summary.json）：管理根目录（未开启脱敏）、数据库架构版本、备份元数据；\n", rawNote);
+    }
 }

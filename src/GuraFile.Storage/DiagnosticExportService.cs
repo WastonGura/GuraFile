@@ -53,6 +53,11 @@ public sealed class DiagnosticExportService
 
     public bool AnonymizePaths => _anonymizePaths;
 
+    public static string GetConfigSummaryNote(bool anonymizePaths) =>
+        anonymizePaths
+            ? "• 配置摘要信息（config_summary.json）：脱敏的管理根目录、数据库架构版本、备份元数据；\n"
+            : "• 配置摘要信息（config_summary.json）：管理根目录（未开启脱敏）、数据库架构版本、备份元数据；\n";
+
     public Task<DiagnosticExportResult> ExportAsync(
         string destinationZipPath,
         CancellationToken cancellationToken = default)

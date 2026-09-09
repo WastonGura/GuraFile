@@ -356,4 +356,38 @@ public sealed class MainWindowSmokeTests
         // 3. Applying a saved filter view updates _activeFileQuery using ToFileQuery(view)
         StringAssert.Contains(source, "_activeFileQuery = _savedFilterViews.ToFileQuery(view)");
     }
+
+    [TestMethod]
+    public void MainWindow_SortAndRename_PreservesActiveFileQueryWithoutOverwritingFromUi()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "GuraFile", "MainWindow.xaml.cs"));
+        Assert.IsTrue(File.Exists(path), $"Missing MainWindow code-behind: {path}");
+
+        var source = File.ReadAllText(path);
+
+        // In SortButton_Click, sorting must preserve active query filters (like 0=1) and only update SortBy/Descending
+        StringAssert.Contains(source, "_activeFileQuery = (_activeFileQuery ?? BuildQueryFromUi()) with { SortBy = _sortColumn, Descending = _sortDescending };");
+
+        // RenameTagButton_Click must NOT overwrite _activeFileQuery with BuildQueryFromUi()
+        var renameMethodStart = source.IndexOf("private async void RenameTagButton_Click", StringComparison.Ordinal);
+        Assert.IsGreaterThanOrEqualTo(0, renameMethodStart, "RenameTagButton_Click must exist");
+        var nextMethod = source.IndexOf("private async void DeleteTagButton_Click", renameMethodStart, StringComparison.Ordinal);
+        var renameMethodBody = source[renameMethodStart..nextMethod];
+        Assert.DoesNotContain("_activeFileQuery = BuildQueryFromUi();", renameMethodBody);
+    }
+
+    [TestMethod]
+    public void MainWindow_ExportDiagnosticsDialog_ConfigSummaryDescriptionMatchesAnonymizationSetting()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "GuraFile", "MainWindow.xaml.cs"));
+        Assert.IsTrue(File.Exists(path), $"Missing MainWindow code-behind: {path}");
+
+        var source = File.ReadAllText(path);
+
+        // Must dynamically include anonymized or unanonymized description based on DiagnosticExportAnonymizePaths
+        StringAssert.Contains(source, "脱敏的管理根目录、数据库架构版本、备份元数据；");
+        StringAssert.Contains(source, "管理根目录（未开启脱敏）、数据库架构版本、备份元数据；");
+    }
 }
