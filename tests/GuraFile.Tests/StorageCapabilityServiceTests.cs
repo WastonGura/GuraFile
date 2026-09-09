@@ -203,4 +203,3 @@ public sealed class StorageCapabilityServiceTests
         StringAssert.Contains(capability.UserSummary, "介质未就绪或已断开");
     }
 }
-
