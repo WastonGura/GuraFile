@@ -272,4 +272,18 @@ public sealed class DiagnosticLoggerTests
         var sanitized = DiagnosticLogger.SanitizeText(line);
         Assert.AreEqual("Event with password: \"***\"}", sanitized);
     }
+
+    [TestMethod]
+    public void DiagnosticLogger_SanitizeText_JsonLineWithUnquotedSecretValue_PreservesClosingQuoteAndValidJson()
+    {
+        // When a serialized log entry contains token=synthetic_value within a JSON string property,
+        // SanitizeText must not greedily consume the trailing quote of the JSON string.
+        var jsonLine = "{\"timestamp\":\"2026-09-09T12:00:00Z\",\"message\":\"token=synthetic_value\"}";
+        var sanitized = DiagnosticLogger.SanitizeText(jsonLine);
+
+        Assert.AreEqual("{\"timestamp\":\"2026-09-09T12:00:00Z\",\"message\":\"token=***\"}", sanitized);
+        using var doc = JsonDocument.Parse(sanitized);
+        var root = doc.RootElement;
+        Assert.AreEqual("token=***", root.GetProperty("message").GetString());
+    }
 }

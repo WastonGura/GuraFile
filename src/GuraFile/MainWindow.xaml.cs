@@ -616,7 +616,7 @@ public sealed partial class MainWindow : Window
         UpdateSortLabels();
         if (!_isApplyingSavedView)
         {
-            _activeFileQuery = BuildQueryFromUi();
+            _activeFileQuery = (_activeFileQuery ?? BuildQueryFromUi()) with { SortBy = _sortColumn, Descending = _sortDescending };
         }
         await RefreshFilesAsync();
     }
@@ -1569,7 +1569,6 @@ public sealed partial class MainWindow : Window
             await RefreshTagsAsync(renamed.Id);
             if (TagFilterToggle.IsOn)
             {
-                _activeFileQuery = BuildQueryFromUi();
                 await RefreshFilesAsync();
             }
             TagStatusText.Text = $"已重命名为“{renamed.Name}”。";
@@ -2060,6 +2059,10 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        var configSummaryNote = _userSettings.DiagnosticExportAnonymizePaths
+            ? "• 配置摘要信息（config_summary.json）：脱敏的管理根目录、数据库架构版本、备份元数据；\n"
+            : "• 配置摘要信息（config_summary.json）：管理根目录（未开启脱敏）、数据库架构版本、备份元数据；\n";
+
         var logSanitizationNote = _userSettings.DiagnosticExportAnonymizePaths
             ? "• 本地诊断日志（logs/*.log）：已自动执行用户名与路径脱敏；\n\n"
             : "• 本地诊断日志（logs/*.log）：当前设置保留原始路径（未开启脱敏）；\n\n";
@@ -2073,7 +2076,7 @@ public sealed partial class MainWindow : Window
                 Text = "即将导出系统诊断包（ZIP 压缩文件），用于排查应用故障。\n\n" +
                        "【包含项说明】（严格白名单）：\n" +
                        "• 运行环境信息（environment.json）：操作系统、.NET 版本、运行架构等；\n" +
-                       "• 配置摘要信息（config_summary.json）：脱敏的管理根目录、数据库架构版本、备份元数据；\n" +
+                       configSummaryNote +
                        logSanitizationNote +
                        "【安全保证】：\n" +
                        "诊断包严格不包含索引数据库（index.db）、标签备份数据、您的个人文件内容或任何私钥凭据。"

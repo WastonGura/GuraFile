@@ -441,4 +441,102 @@ public sealed class SavedFilterViewTests
         var repairedResults = queryService.QueryAsync(repairedQuery).GetAwaiter().GetResult();
         Assert.IsNotNull(repairedResults);
     }
+
+    [TestMethod]
+    public void SavedFilterView_InvalidView_SortingPreservesZeroEqualsOneFilter()
+    {
+        // Setup root and files
+        using (var conn = SqliteDatabase.Open(_databasePath))
+        using (var tx = conn.BeginTransaction())
+        {
+            DatabaseMigrationFixtures.Execute(conn, "INSERT INTO roots (id, path, normalized_path) VALUES (1, 'C:\\Work', 'c:\\work');", tx);
+            DatabaseMigrationFixtures.Execute(conn, "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc) " +
+                "VALUES (1, 1, 'vol', 'f1', 'C:\\Work\\A.txt', 'c:\\work\\a.txt', 'A.txt', '.txt', 10, '2026-09-01T00:00:00Z');", tx);
+            DatabaseMigrationFixtures.Execute(conn, "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc) " +
+                "VALUES (2, 1, 'vol', 'f2', 'C:\\Work\\B.txt', 'c:\\work\\b.txt', 'B.txt', '.txt', 20, '2026-09-01T00:00:00Z');", tx);
+            tx.Commit();
+        }
+
+        var tagService = new TagService(_databasePath);
+        var t1 = tagService.CreateTag("标签A");
+        var t2 = tagService.CreateTag("标签B");
+
+        tagService.AddTagToFiles(t1.Id, [1, 2]);
+        tagService.AddTagToFiles(t2.Id, [2]);
+
+        var viewService = new SavedFilterViewService(_databasePath);
+        var view = viewService.CreateView("组合视图", null, FileSortColumn.Name, false, TagMatchMode.All, true, [t1.Id, t2.Id]);
+
+        // Delete tag B, making the view invalid
+        tagService.DeleteTag(t2.Id);
+
+        var invalidView = viewService.GetViewById(view.Id);
+        Assert.IsNotNull(invalidView);
+        Assert.IsTrue(invalidView.HasInvalidTags);
+
+        var queryService = new FileQueryService(_databasePath);
+        var activeQuery = viewService.ToFileQuery(invalidView);
+
+        // Active query must yield 0 results
+        var initialResults = queryService.QueryAsync(activeQuery).GetAwaiter().GetResult();
+        Assert.IsEmpty(initialResults);
+
+        // When user sorts (e.g. changes sort column / direction), preserving active query filters
+        // must NOT reset to UI filter (which only knows about surviving t1 and would return 2 files!).
+        var sortedBySizeQuery = activeQuery with { SortBy = FileSortColumn.Size, Descending = true };
+        var sortedBySizeResults = queryService.QueryAsync(sortedBySizeQuery).GetAwaiter().GetResult();
+        Assert.IsEmpty(sortedBySizeResults, "Sorting an invalid view must strictly preserve 0=1 protection and return 0 files.");
+
+        var sortedByModifiedQuery = activeQuery with { SortBy = FileSortColumn.Modified, Descending = false };
+        var sortedByModifiedResults = queryService.QueryAsync(sortedByModifiedQuery).GetAwaiter().GetResult();
+        Assert.IsEmpty(sortedByModifiedResults, "Sorting an invalid view must strictly preserve 0=1 protection and return 0 files.");
+    }
+
+    [TestMethod]
+    public void SavedFilterView_InvalidView_RenamingSurvivingTag_PreservesZeroEqualsOneFilter()
+    {
+        // Setup root and files
+        using (var conn = SqliteDatabase.Open(_databasePath))
+        using (var tx = conn.BeginTransaction())
+        {
+            DatabaseMigrationFixtures.Execute(conn, "INSERT INTO roots (id, path, normalized_path) VALUES (1, 'C:\\Work', 'c:\\work');", tx);
+            DatabaseMigrationFixtures.Execute(conn, "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc) " +
+                "VALUES (1, 1, 'vol', 'f1', 'C:\\Work\\A.txt', 'c:\\work\\a.txt', 'A.txt', '.txt', 10, '2026-09-01T00:00:00Z');", tx);
+            DatabaseMigrationFixtures.Execute(conn, "INSERT INTO files (id, root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc) " +
+                "VALUES (2, 1, 'vol', 'f2', 'C:\\Work\\B.txt', 'c:\\work\\b.txt', 'B.txt', '.txt', 20, '2026-09-01T00:00:00Z');", tx);
+            tx.Commit();
+        }
+
+        var tagService = new TagService(_databasePath);
+        var t1 = tagService.CreateTag("标签A");
+        var t2 = tagService.CreateTag("标签B");
+
+        tagService.AddTagToFiles(t1.Id, [1, 2]);
+        tagService.AddTagToFiles(t2.Id, [2]);
+
+        var viewService = new SavedFilterViewService(_databasePath);
+        var view = viewService.CreateView("组合视图", null, FileSortColumn.Name, false, TagMatchMode.All, true, [t1.Id, t2.Id]);
+
+        // Delete tag B, making the view invalid
+        tagService.DeleteTag(t2.Id);
+
+        var invalidView = viewService.GetViewById(view.Id);
+        Assert.IsNotNull(invalidView);
+        Assert.IsTrue(invalidView.HasInvalidTags);
+
+        var queryService = new FileQueryService(_databasePath);
+        var activeQuery = viewService.ToFileQuery(invalidView);
+
+        // Initial results must be 0
+        var initialResults = queryService.QueryAsync(activeQuery).GetAwaiter().GetResult();
+        Assert.IsEmpty(initialResults);
+
+        // Rename surviving tag t1
+        tagService.RenameTag(t1.Id, "标签A_重命名");
+
+        // The active query must not be re-derived from surviving UI tags (which would match files with t1).
+        // It must continue to execute as 0=1.
+        var afterRenameResults = queryService.QueryAsync(activeQuery).GetAwaiter().GetResult();
+        Assert.IsEmpty(afterRenameResults, "Renaming surviving tag must not break 0=1 protection of active invalid view.");
+    }
 }
