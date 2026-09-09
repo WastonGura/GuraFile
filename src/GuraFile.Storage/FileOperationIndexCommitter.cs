@@ -1238,15 +1238,45 @@ public sealed class FileOperationIndexCommitter
     internal SourceSnapshot QuerySourceSnapshot(SqliteConnection connection, string normalizedSource)
     {
         var diskIdentity = _readIdentity(normalizedSource);
-        var isDirectory = _directoryExists(normalizedSource);
+        var sourceFileExists = _fileExists(normalizedSource);
+        var sourceDirExists = _directoryExists(normalizedSource);
+        var sourceExists = sourceFileExists || sourceDirExists;
+        var isDirectory = sourceDirExists;
 
         long? dbFileId = null;
         FileIdentity? dbIdentity = null;
         var userTags = new List<string>();
 
-        // Query by normalized online path first
-        using (var command = connection.CreateCommand())
+        // 1. 若源路径在磁盘存在且具有稳定身份，优先查找具有该稳定身份的在线记录
+        if (sourceExists && diskIdentity.IsStable)
         {
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                """
+                SELECT f.id, f.volume_id, f.file_id, f.identity_kind, f.identity_diagnostic
+                FROM files f
+                WHERE f.volume_id = $volumeId AND f.file_id = $fileId AND f.is_online = 1
+                ORDER BY f.id DESC
+                LIMIT 1;
+                """;
+            command.Parameters.AddWithValue("$volumeId", diskIdentity.VolumeId);
+            command.Parameters.AddWithValue("$fileId", diskIdentity.FileId);
+            using var reader = command.ExecuteReader();
+            if (reader.Read())
+            {
+                dbFileId = reader.GetInt64(0);
+                var vol = reader.GetString(1);
+                var fid = reader.GetString(2);
+                var kind = reader.GetString(3);
+                var diag = reader.IsDBNull(4) ? null : reader.GetString(4);
+                dbIdentity = new FileIdentity(vol, fid, kind == "stable", diag);
+            }
+        }
+
+        // 2. 查找匹配路径的在线记录
+        if (dbFileId is null)
+        {
+            using var command = connection.CreateCommand();
             command.CommandText =
                 """
                 SELECT f.id, f.volume_id, f.file_id, f.identity_kind, f.identity_diagnostic
@@ -1268,19 +1298,20 @@ public sealed class FileOperationIndexCommitter
             }
         }
 
-        // Fallback query by normalized path (including offline files)
-        if (dbFileId is null)
+        // 3. 若源文件在磁盘存在且有稳定身份，但在数据库中暂时未在线，查找具有该稳定身份的历史记录
+        if (dbFileId is null && sourceExists && diskIdentity.IsStable)
         {
             using var command = connection.CreateCommand();
             command.CommandText =
                 """
                 SELECT f.id, f.volume_id, f.file_id, f.identity_kind, f.identity_diagnostic
                 FROM files f
-                WHERE f.normalized_path = $normalizedPath COLLATE NOCASE
+                WHERE f.volume_id = $volumeId AND f.file_id = $fileId
                 ORDER BY f.is_online DESC, f.id DESC
                 LIMIT 1;
                 """;
-            command.Parameters.AddWithValue("$normalizedPath", normalizedSource);
+            command.Parameters.AddWithValue("$volumeId", diskIdentity.VolumeId);
+            command.Parameters.AddWithValue("$fileId", diskIdentity.FileId);
             using var reader = command.ExecuteReader();
             if (reader.Read())
             {
@@ -1293,20 +1324,19 @@ public sealed class FileOperationIndexCommitter
             }
         }
 
-        // Fallback query by stable identity
-        if (dbFileId is null && diskIdentity.IsStable)
+        // 4. 只有在源路径物理不存在且完全没有在线记录匹配时，才允许将离线路径作为最后的保底回退
+        if (dbFileId is null && !sourceExists)
         {
             using var command = connection.CreateCommand();
             command.CommandText =
                 """
                 SELECT f.id, f.volume_id, f.file_id, f.identity_kind, f.identity_diagnostic
                 FROM files f
-                WHERE f.volume_id = $volumeId AND f.file_id = $fileId
-                ORDER BY f.id DESC
+                WHERE f.normalized_path = $normalizedPath COLLATE NOCASE
+                ORDER BY f.is_online DESC, f.id DESC
                 LIMIT 1;
                 """;
-            command.Parameters.AddWithValue("$volumeId", diskIdentity.VolumeId);
-            command.Parameters.AddWithValue("$fileId", diskIdentity.FileId);
+            command.Parameters.AddWithValue("$normalizedPath", normalizedSource);
             using var reader = command.ExecuteReader();
             if (reader.Read())
             {

@@ -658,6 +658,281 @@ public sealed class FileOperationCrashRecoveryTests
         }
     }
 
+    [TestMethod]
+    public async Task CrossVolume_TargetScannedFirst_InheritsTagsAndMarksSourceOffline()
+    {
+        using var env = TestEnvironment.Create();
+        var sourceFile = env.CreateFile("source_cross.txt", "content before cross move");
+        var destDir = env.CreateDirectory("DestCross");
+        var targetFile = Path.Combine(destDir, "target_cross.txt");
+
+        var root = env.Scanner.AddRoot(env.RootPath);
+        await env.Scanner.ScanAsync(root.Id);
+
+        var queryService = new FileQueryService(env.DatabasePath);
+        var initialFiles = await queryService.QueryAsync(new());
+        var sourceDb = initialFiles.Single(f => f.Path == sourceFile);
+
+        var tagService = new TagService(env.DatabasePath);
+        var tag = tagService.CreateTag("CrossVolumeTag");
+        tagService.AddTagToFiles(tag.Id, [sourceDb.Id]);
+
+        // Shell move completed: source deleted, target created on disk
+        File.Delete(sourceFile);
+        File.WriteAllText(targetFile, "content before cross move");
+
+        // Use custom readIdentity to simulate different volumes:
+        // source was on VOL1, target is on VOL2
+        FileIdentity ReadIdentity(string path)
+        {
+            var norm = SafeFileOperationExecutor.Normalize(path);
+            var normSrc = SafeFileOperationExecutor.Normalize(sourceFile);
+            var normDst = SafeFileOperationExecutor.Normalize(targetFile);
+            if (string.Equals(norm, normSrc, StringComparison.OrdinalIgnoreCase))
+            {
+                return new FileIdentity("VOL1", "SRC_FILE_ID", true, null);
+            }
+            if (string.Equals(norm, normDst, StringComparison.OrdinalIgnoreCase))
+            {
+                return new FileIdentity("VOL2", "DEST_FILE_ID", true, null);
+            }
+            return FileIdentityReader.Read(path);
+        }
+
+        // Set source file record in DB to VOL1 / SRC_FILE_ID
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "UPDATE files SET volume_id = 'VOL1', file_id = 'SRC_FILE_ID' WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$id", sourceDb.Id);
+            cmd.ExecuteNonQuery();
+        }
+
+        // Record intent as shell_completed
+        var committer = new FileOperationIndexCommitter(
+            env.DatabasePath,
+            env.Scanner,
+            executor: null,
+            readIdentity: ReadIdentity,
+            classify: new FileTypeClassifier().Classify,
+            getAttributes: File.GetAttributes,
+            fileExists: File.Exists,
+            directoryExists: Directory.Exists);
+
+        long intentId;
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            intentId = committer.InsertIntent(
+                connection,
+                correlationId: "test-cross-volume-recovery",
+                operationType: "move",
+                collisionPolicy: "auto_rename",
+                items: [(sourceFile, destDir, "target_cross.txt", targetFile)]);
+
+            committer.UpdateIntentShellCompleted(
+                connection,
+                intentId,
+                [(sourceFile, targetFile, "completed", null)]);
+        }
+
+        // Simulate scanner scanning target first on VOL2:
+        // Target is inserted as a brand new node with (VOL2, DEST_FILE_ID) and no tags
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            using var insertTargetCmd = connection.CreateCommand();
+            insertTargetCmd.CommandText =
+                """
+                INSERT INTO files (root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, is_online, scan_token)
+                VALUES ($rootId, 'VOL2', 'DEST_FILE_ID', $path, $normalizedPath, 'target_cross.txt', '.txt', 25, '2026-09-09T00:00:00Z', 'stable', 1, 'token123');
+                """;
+            insertTargetCmd.Parameters.AddWithValue("$rootId", root.Id);
+            insertTargetCmd.Parameters.AddWithValue("$path", targetFile);
+            insertTargetCmd.Parameters.AddWithValue("$normalizedPath", SafeFileOperationExecutor.Normalize(targetFile));
+            insertTargetCmd.ExecuteNonQuery();
+        }
+
+        // Now run crash recovery
+        var recoveryService = new FileOperationCrashRecoveryService(
+            env.DatabasePath,
+            env.Scanner,
+            committer,
+            diagnosticLogger: null,
+            readIdentity: ReadIdentity);
+
+        var report = await recoveryService.RecoverAsync();
+
+        Assert.AreEqual(1, report.RecoveredIntentsCount);
+        Assert.AreEqual(1, report.ReconciledItemsCount);
+        Assert.AreEqual(0, report.IndeterminateIntentsCount);
+
+        // Verify target inherited CrossVolumeTag
+        var allFiles = await queryService.QueryAsync(new());
+        var targetRecord = allFiles.Single(f => f.Path == targetFile);
+        Assert.IsTrue(targetRecord.IsOnline);
+        var targetTags = tagService.ListTagsForFile(targetRecord.Id);
+        Assert.IsTrue(targetTags.Any(t => t.Name == "CrossVolumeTag"), "Target should inherit source's tag.");
+
+        // Verify source node was marked offline in DB
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            using var checkCmd = connection.CreateCommand();
+            checkCmd.CommandText = "SELECT is_online FROM files WHERE id = $id;";
+            checkCmd.Parameters.AddWithValue("$id", sourceDb.Id);
+            var isOnline = Convert.ToInt32(checkCmd.ExecuteScalar());
+            Assert.AreEqual(0, isOnline, "Source node in DB must be marked offline (is_online = 0).");
+        }
+    }
+
+    [TestMethod]
+    public async Task OfflinePathFallback_DoesNotTakePrecedenceOverCurrentOnlineIdentity()
+    {
+        using var env = TestEnvironment.Create();
+        var pathX = Path.Combine(env.RootPath, "fileX.txt");
+        var pathY = Path.Combine(env.RootPath, "fileY.txt");
+
+        var root = env.Scanner.AddRoot(env.RootPath);
+
+        // In DB:
+        // 1. File A at pathX is offline (is_online = 0), identity (VOL1, FILE_A), has tag STALE-TAG
+        // 2. File B at pathY is online (is_online = 1), identity (VOL1, FILE_B), has tag CURRENT-TAG
+        var tagService = new TagService(env.DatabasePath);
+        var staleTag = tagService.CreateTag("STALE-TAG");
+        var currentTag = tagService.CreateTag("CURRENT-TAG");
+
+        long fileAId;
+        long fileBId;
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText =
+                    """
+                    INSERT INTO files (root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, is_online, scan_token)
+                    VALUES ($rootId, 'VOL1', 'FILE_A', $pathX, $normPathX, 'fileX.txt', '.txt', 100, '2026-09-01T00:00:00Z', 'stable', 0, 'tok1')
+                    RETURNING id;
+                    """;
+                cmd.Parameters.AddWithValue("$rootId", root.Id);
+                cmd.Parameters.AddWithValue("$pathX", pathX);
+                cmd.Parameters.AddWithValue("$normPathX", SafeFileOperationExecutor.Normalize(pathX));
+                fileAId = (long)cmd.ExecuteScalar()!;
+            }
+
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText =
+                    """
+                    INSERT INTO files (root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, is_online, scan_token)
+                    VALUES ($rootId, 'VOL1', 'FILE_B', $pathY, $normPathY, 'fileY.txt', '.txt', 200, '2026-09-02T00:00:00Z', 'stable', 1, 'tok2')
+                    RETURNING id;
+                    """;
+                cmd.Parameters.AddWithValue("$rootId", root.Id);
+                cmd.Parameters.AddWithValue("$pathY", pathY);
+                cmd.Parameters.AddWithValue("$normPathY", SafeFileOperationExecutor.Normalize(pathY));
+                fileBId = (long)cmd.ExecuteScalar()!;
+            }
+        }
+
+        tagService.AddTagToFiles(staleTag.Id, [fileAId]);
+        tagService.AddTagToFiles(currentTag.Id, [fileBId]);
+
+        // On disk:
+        // File B is placed at pathX (replacing old file A).
+        // So pathX exists physically on disk with stable identity (VOL1, FILE_B)!
+        File.WriteAllText(pathX, "content of file B");
+
+        FileIdentity ReadIdentity(string path)
+        {
+            var norm = SafeFileOperationExecutor.Normalize(path);
+            var normX = SafeFileOperationExecutor.Normalize(pathX);
+            if (string.Equals(norm, normX, StringComparison.OrdinalIgnoreCase))
+            {
+                return new FileIdentity("VOL1", "FILE_B", true, null);
+            }
+            return FileIdentityReader.Read(path);
+        }
+
+        var committer = new FileOperationIndexCommitter(
+            env.DatabasePath,
+            env.Scanner,
+            executor: null,
+            readIdentity: ReadIdentity,
+            classify: new FileTypeClassifier().Classify,
+            getAttributes: File.GetAttributes,
+            fileExists: File.Exists,
+            directoryExists: Directory.Exists);
+
+        // Query source snapshot for pathX
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            var snapshot = committer.QuerySourceSnapshot(connection, SafeFileOperationExecutor.Normalize(pathX));
+
+            Assert.IsTrue(snapshot.UserTags.Contains("CURRENT-TAG"), "Source snapshot must inherit CURRENT-TAG from online identity.");
+            Assert.IsFalse(snapshot.UserTags.Contains("STALE-TAG"), "Source snapshot must never inherit STALE-TAG from offline path record.");
+        }
+    }
+
+    [TestMethod]
+    public async Task PendingCopy_WhenTargetExistsOnDisk_RemainsIndeterminateAcrossRestarts()
+    {
+        using var env = TestEnvironment.Create();
+        var sourceFile = env.CreateFile("source_copy.txt", "source content");
+        var destDir = env.CreateDirectory("DestCopy");
+        var targetFile = Path.Combine(destDir, "target_copy.txt");
+        // Target file already exists on disk!
+        File.WriteAllText(targetFile, "existing target content");
+
+        var root = env.Scanner.AddRoot(env.RootPath);
+        await env.Scanner.ScanAsync(root.Id);
+
+        var committer = new FileOperationIndexCommitter(env.Scanner);
+        long intentId;
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            intentId = committer.InsertIntent(
+                connection,
+                correlationId: "test-pending-copy-exists",
+                operationType: "copy",
+                collisionPolicy: "auto_rename",
+                items: [(sourceFile, destDir, "target_copy.txt", targetFile)]);
+            // Intent status is "pending" (Shell call not completed before crash)
+        }
+
+        var recoveryService = new FileOperationCrashRecoveryService(env.DatabasePath, env.Scanner, committer);
+
+        // 1st Recovery Run
+        var report1 = await recoveryService.RecoverAsync();
+        Assert.AreEqual(1, report1.IndeterminateIntentsCount, "First recovery must report 1 indeterminate intent.");
+        Assert.IsTrue(report1.HasIndeterminateOperations);
+        Assert.AreEqual(0, report1.RecoveredIntentsCount);
+
+        // Verify target file on disk was NOT overwritten
+        Assert.AreEqual("existing target content", File.ReadAllText(targetFile));
+
+        // Verify database state: intent is indeterminate and item error is set
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            Assert.AreEqual("indeterminate", committer.GetIntentStatus(connection, intentId));
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT commit_status, error FROM file_operation_intent_items WHERE intent_id = $id;";
+            cmd.Parameters.AddWithValue("$id", intentId);
+            using var reader = cmd.ExecuteReader();
+            Assert.IsTrue(reader.Read());
+            Assert.AreEqual("indeterminate", reader.GetString(0));
+            var error = reader.GetString(1);
+            StringAssert.Contains(error, "执行状态未决：操作记录为 pending 但目标文件已存在，未执行覆盖，请核实目标文件及标签");
+        }
+
+        // 2nd Recovery Run (simulating restart)
+        var report2 = await recoveryService.RecoverAsync();
+        Assert.AreEqual(1, report2.IndeterminateIntentsCount, "Second recovery must still report 1 indeterminate intent across restarts.");
+        Assert.IsTrue(report2.HasIndeterminateOperations);
+
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            Assert.AreEqual("indeterminate", committer.GetIntentStatus(connection, intentId));
+        }
+    }
+
 
     private sealed class TestEnvironment : IDisposable
     {
