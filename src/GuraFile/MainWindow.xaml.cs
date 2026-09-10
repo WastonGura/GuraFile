@@ -139,13 +139,7 @@ public sealed partial class MainWindow : Window
 
                 RefreshRoots();
                 _ = RefreshRootsCapabilitiesAsync();
-                foreach (var root in _scanner.ListRoots())
-                {
-                    if (!_fileChanges.CheckAndStartCrashRecovery(root))
-                    {
-                        _fileChanges.Watch(root);
-                    }
-                }
+                _ = StartWatchingRootsAsync();
                 _ = RefreshTagsAsync();
                 _ = RefreshAutomaticTagsAsync();
                 _ = RefreshSavedFilterViewsAsync();
@@ -3004,6 +2998,60 @@ public sealed partial class MainWindow : Window
         }
 
         await _scanner.RefreshCapabilitiesAsync();
+        DispatcherQueue.TryEnqueue(RefreshRoots);
+    }
+
+    private async Task StartWatchingRootsAsync()
+    {
+        if (_scanner is null || _fileChanges is null)
+        {
+            return;
+        }
+
+        var roots = _scanner.ListRoots();
+        if (roots.Count == 0)
+        {
+            return;
+        }
+
+        await Task.Run(() =>
+        {
+            foreach (var root in roots)
+            {
+                try
+                {
+                    if (!_fileChanges.CheckAndStartCrashRecovery(root))
+                    {
+                        _fileChanges.Watch(root);
+                    }
+                }
+                catch (ObjectDisposedException)
+                {
+                    return;
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    DiagnosticLogger.Default.LogError(
+                        DiagnosticCategory.Watcher,
+                        "RootWatchFailed",
+                        status: DiagnosticResultStatus.Failed,
+                        message: $"Failed to establish watcher for root '{root.Path}': {exception.Message}",
+                        errorCode: "ROOT_WATCH_FAILED",
+                        exception: exception);
+                }
+                catch (Exception exception)
+                {
+                    DiagnosticLogger.Default.LogError(
+                        DiagnosticCategory.Watcher,
+                        "RootWatchUnexpectedError",
+                        status: DiagnosticResultStatus.Failed,
+                        message: $"Unexpected error watching root '{root.Path}': {exception.Message}",
+                        errorCode: "ROOT_WATCH_UNEXPECTED_ERROR",
+                        exception: exception);
+                }
+            }
+        });
+
         DispatcherQueue.TryEnqueue(RefreshRoots);
     }
 
