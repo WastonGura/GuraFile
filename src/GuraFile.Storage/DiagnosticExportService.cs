@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.Data.Sqlite;
 
@@ -23,6 +24,12 @@ public sealed class DiagnosticExportService
         WriteIndented = true,
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
+    private static readonly JsonSerializerOptions LogLineJsonOptions = new()
+    {
+        WriteIndented = false,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
     private readonly string _databasePath;
@@ -178,7 +185,33 @@ public sealed class DiagnosticExportService
             var sb = new StringBuilder();
             foreach (var line in lines)
             {
-                sb.AppendLine(DiagnosticLogger.SanitizeText(line));
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    sb.AppendLine(line);
+                    continue;
+                }
+
+                string sanitizedLine;
+                try
+                {
+                    var node = JsonNode.Parse(line);
+                    if (node != null)
+                    {
+                        SanitizeJsonNode(node);
+                        sanitizedLine = node.ToJsonString(LogLineJsonOptions);
+                    }
+                    else
+                    {
+                        sanitizedLine = DiagnosticLogger.SanitizeText(line);
+                    }
+                }
+                catch (JsonException)
+                {
+                    // Fallback to plain text redaction for non-JSON or partial log lines
+                    sanitizedLine = DiagnosticLogger.SanitizeText(line);
+                }
+
+                sb.AppendLine(sanitizedLine);
             }
             return sb.ToString();
         }
@@ -189,12 +222,52 @@ public sealed class DiagnosticExportService
         }
     }
 
+    private static void SanitizeJsonNode(JsonNode? node)
+    {
+        if (node is JsonObject obj)
+        {
+            var updates = new List<(string Key, JsonNode? Value)>();
+            foreach (var kvp in obj)
+            {
+                if (kvp.Value is JsonValue val && val.TryGetValue<string>(out var strVal))
+                {
+                    var sanitized = DiagnosticLogger.SanitizeText(strVal);
+                    updates.Add((kvp.Key, JsonValue.Create(sanitized)));
+                }
+                else if (kvp.Value is JsonObject or JsonArray)
+                {
+                    SanitizeJsonNode(kvp.Value);
+                }
+            }
+
+            foreach (var (key, val) in updates)
+            {
+                obj[key] = val;
+            }
+        }
+        else if (node is JsonArray arr)
+        {
+            for (int i = 0; i < arr.Count; i++)
+            {
+                var item = arr[i];
+                if (item is JsonValue val && val.TryGetValue<string>(out var strVal))
+                {
+                    arr[i] = JsonValue.Create(DiagnosticLogger.SanitizeText(strVal));
+                }
+                else if (item is JsonObject or JsonArray)
+                {
+                    SanitizeJsonNode(item);
+                }
+            }
+        }
+    }
+
     private string CreateEnvironmentJson()
     {
         var assembly = Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly();
         var version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
                       ?? assembly.GetName().Version?.ToString()
-                      ?? "0.5.2";
+                      ?? "0.5.3";
 
         var envData = new Dictionary<string, object?>
         {
