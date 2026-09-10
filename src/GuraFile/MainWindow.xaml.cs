@@ -35,7 +35,9 @@ public sealed partial class MainWindow : Window
         Descending: false,
         TagIds: null,
         TagMatch: TagMatchMode.Any,
-        Limit: DefaultUiFileListLimit);
+        Limit: DefaultUiFileListLimit,
+        Offset: 0);
+    private bool _canLoadMoreFiles;
     private bool _isApplyingSavedView;
     private readonly DatabaseHealthService _healthService = new();
     private readonly DatabaseRecoveryService _recoveryService = new();
@@ -238,9 +240,19 @@ public sealed partial class MainWindow : Window
         DeleteFileButton.IsTabStop = !isGraph;
         CollisionPolicyBox.IsTabStop = !isGraph;
 
+        LoadMoreFilesButton.IsTabStop = !isGraph && _canLoadMoreFiles;
+
         FitViewportButton.IsTabStop = isGraph;
         BroadTagsCheckBox.IsTabStop = isGraph;
         GraphWebView.IsTabStop = isGraph;
+    }
+
+    private void UpdatePagingBarVisibility()
+    {
+        var isGraph = ViewModeBox.SelectedIndex == 1;
+        var showPaging = !isGraph && _canLoadMoreFiles;
+        FilePagingBar.Visibility = showPaging ? Visibility.Visible : Visibility.Collapsed;
+        LoadMoreFilesButton.IsTabStop = showPaging;
     }
 
     private void DisableControlsForUnhealthyDatabase()
@@ -267,6 +279,7 @@ public sealed partial class MainWindow : Window
         MoveToFileButton.IsEnabled = false;
         RenameFileButton.IsEnabled = false;
         DeleteFileButton.IsEnabled = false;
+        LoadMoreFilesButton.IsEnabled = false;
         SaveViewButton.IsEnabled = false;
         UpdateViewButton.IsEnabled = false;
         RenameViewButton.IsEnabled = false;
@@ -285,6 +298,7 @@ public sealed partial class MainWindow : Window
         ImportTagsButton.IsEnabled = true;
         BackupNowButton.IsEnabled = true;
         RollingBackupsButton.IsEnabled = true;
+        LoadMoreFilesButton.IsEnabled = true;
         SaveViewButton.IsEnabled = true;
         UpdateViewButton.IsEnabled = SavedFilterViewsList.SelectedItem is not null;
         RenameViewButton.IsEnabled = SavedFilterViewsList.SelectedItem is not null;
@@ -2498,7 +2512,8 @@ public sealed partial class MainWindow : Window
             Descending: _sortDescending,
             TagIds: tagIds,
             TagMatch: TagMatchBox.SelectedIndex == 1 ? TagMatchMode.All : TagMatchMode.Any,
-            Limit: DefaultUiFileListLimit);
+            Limit: DefaultUiFileListLimit,
+            Offset: 0);
     }
 
     private async Task RefreshFilesAsync(bool debounce = false)
@@ -2524,6 +2539,7 @@ public sealed partial class MainWindow : Window
             FilesLoadingRing.IsActive = true;
             FilesLoadingRing.Visibility = Visibility.Visible;
             FilesStateText.Text = "正在加载文件…";
+            _activeFileQuery = _activeFileQuery with { Offset = 0, Limit = DefaultUiFileListLimit };
             var files = await _fileQuery.QueryAsync(_activeFileQuery, cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
 
@@ -2537,17 +2553,24 @@ public sealed partial class MainWindow : Window
             var currentSelectedView = SavedFilterViewsList.SelectedItem as SavedFilterView;
             if (files.Count == 0)
             {
+                _canLoadMoreFiles = false;
+                UpdatePagingBarVisibility();
                 FilesStateText.Text = currentSelectedView?.HasInvalidTags == true
                     ? "已保存视图条件失效（0 个文件）"
                     : "没有匹配的文件";
             }
-            else if (_activeFileQuery.Limit is not null && files.Count >= _activeFileQuery.Limit.Value)
+            else if (files.Count >= DefaultUiFileListLimit)
             {
-                FilesStateText.Text = $"已显示前 {files.Count:N0} 个文件";
+                _canLoadMoreFiles = true;
+                UpdatePagingBarVisibility();
+                LoadMoreFilesButton.Content = $"加载更多文件（已显示 {files.Count:N0} 条）";
+                FilesStateText.Text = $"已显示前 {files.Count:N0} 个文件（可加载更多）";
             }
             else
             {
-                FilesStateText.Text = $"{files.Count:N0} 个文件";
+                _canLoadMoreFiles = false;
+                UpdatePagingBarVisibility();
+                FilesStateText.Text = $"全部 {files.Count:N0} 个文件";
             }
 
             if (!_initialFileQueryCompleted)
@@ -2570,6 +2593,8 @@ public sealed partial class MainWindow : Window
                 _graphInteractionCoordinator.CommitQuery(generation, []);
                 _currentFiles = [];
                 FilesList.ItemsSource = null;
+                _canLoadMoreFiles = false;
+                UpdatePagingBarVisibility();
                 FilesStateText.Text = $"文件列表加载失败：{exception.Message}";
                 if (ViewModeBox.SelectedIndex == 1)
                 {
@@ -2583,6 +2608,90 @@ public sealed partial class MainWindow : Window
             {
                 FilesLoadingRing.IsActive = false;
                 FilesLoadingRing.Visibility = Visibility.Collapsed;
+                _fileQueryCancellation = null;
+            }
+
+            cancellation.Dispose();
+        }
+    }
+
+    private async void LoadMoreFilesButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isRecoveringDatabase || _currentHealth.Status != DatabaseHealthStatus.Healthy || !_canLoadMoreFiles)
+        {
+            return;
+        }
+
+        await LoadMoreFilesAsync();
+    }
+
+    private async Task LoadMoreFilesAsync()
+    {
+        var generation = _graphInteractionCoordinator.BeginQuery();
+        var cancellation = new CancellationTokenSource();
+        var previous = _fileQueryCancellation;
+        _fileQueryCancellation = cancellation;
+        previous?.Cancel();
+
+        try
+        {
+            LoadMoreFilesButton.IsEnabled = false;
+            FilesLoadingRing.IsActive = true;
+            FilesLoadingRing.Visibility = Visibility.Visible;
+            FilesStateText.Text = $"正在加载更多文件（已显示 {_currentFiles.Count:N0} 条）…";
+
+            var pagingQuery = _activeFileQuery with { Offset = _currentFiles.Count, Limit = DefaultUiFileListLimit };
+            var nextBatch = await _fileQuery.QueryAsync(pagingQuery, cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+
+            if (!_graphInteractionCoordinator.CanCommitQuery(generation) || !ReferenceEquals(_fileQueryCancellation, cancellation))
+            {
+                return;
+            }
+
+            var combinedFiles = new List<IndexedFile>(_currentFiles.Count + nextBatch.Count);
+            combinedFiles.AddRange(_currentFiles);
+            combinedFiles.AddRange(nextBatch);
+
+            if (!_graphInteractionCoordinator.CommitQuery(generation, combinedFiles) || !ReferenceEquals(_fileQueryCancellation, cancellation))
+            {
+                return;
+            }
+
+            _currentFiles = combinedFiles;
+            FilesList.ItemsSource = _currentFiles;
+
+            if (nextBatch.Count < DefaultUiFileListLimit)
+            {
+                _canLoadMoreFiles = false;
+                UpdatePagingBarVisibility();
+                FilesStateText.Text = $"已显示全部 {_currentFiles.Count:N0} 个文件";
+            }
+            else
+            {
+                _canLoadMoreFiles = true;
+                UpdatePagingBarVisibility();
+                LoadMoreFilesButton.Content = $"加载更多文件（已显示 {_currentFiles.Count:N0} 条）";
+                FilesStateText.Text = $"已显示前 {_currentFiles.Count:N0} 个文件（可加载更多）";
+            }
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            if (ReferenceEquals(_fileQueryCancellation, cancellation))
+            {
+                FilesStateText.Text = $"加载更多文件失败：{exception.Message}";
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_fileQueryCancellation, cancellation))
+            {
+                FilesLoadingRing.IsActive = false;
+                FilesLoadingRing.Visibility = Visibility.Collapsed;
+                LoadMoreFilesButton.IsEnabled = _currentHealth.Status == DatabaseHealthStatus.Healthy;
                 _fileQueryCancellation = null;
             }
 
@@ -2678,7 +2787,7 @@ public sealed partial class MainWindow : Window
             FilesLoadingRing.Visibility = Visibility.Visible;
             FilesStateText.Text = "正在加载文件…";
 
-            _activeFileQuery = _savedFilterViews.ToFileQuery(view) with { Limit = DefaultUiFileListLimit };
+            _activeFileQuery = _savedFilterViews.ToFileQuery(view) with { Offset = 0, Limit = DefaultUiFileListLimit };
             var files = await _fileQuery.QueryAsync(_activeFileQuery, cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
 
@@ -2691,17 +2800,24 @@ public sealed partial class MainWindow : Window
             FilesList.ItemsSource = files;
             if (files.Count == 0)
             {
+                _canLoadMoreFiles = false;
+                UpdatePagingBarVisibility();
                 FilesStateText.Text = view.HasInvalidTags
                     ? "已保存视图条件失效（0 个文件）"
                     : "没有匹配的文件";
             }
-            else if (_activeFileQuery.Limit is not null && files.Count >= _activeFileQuery.Limit.Value)
+            else if (files.Count >= DefaultUiFileListLimit)
             {
-                FilesStateText.Text = $"已显示前 {files.Count:N0} 个文件";
+                _canLoadMoreFiles = true;
+                UpdatePagingBarVisibility();
+                LoadMoreFilesButton.Content = $"加载更多文件（已显示 {files.Count:N0} 条）";
+                FilesStateText.Text = $"已显示前 {files.Count:N0} 个文件（可加载更多）";
             }
             else
             {
-                FilesStateText.Text = $"{files.Count:N0} 个文件";
+                _canLoadMoreFiles = false;
+                UpdatePagingBarVisibility();
+                FilesStateText.Text = $"全部 {files.Count:N0} 个文件";
             }
 
             if (ViewModeBox.SelectedIndex == 1)
@@ -2719,6 +2835,8 @@ public sealed partial class MainWindow : Window
                 _graphInteractionCoordinator.CommitQuery(generation, []);
                 _currentFiles = [];
                 FilesList.ItemsSource = null;
+                _canLoadMoreFiles = false;
+                UpdatePagingBarVisibility();
                 FilesStateText.Text = $"文件列表加载失败：{exception.Message}";
                 if (ViewModeBox.SelectedIndex == 1)
                 {
@@ -2972,6 +3090,7 @@ public sealed partial class MainWindow : Window
         FileActionsPanel.Visibility = isGraph ? Visibility.Collapsed : Visibility.Visible;
         FilesList.Visibility = isGraph ? Visibility.Collapsed : Visibility.Visible;
         GraphHostContainer.Visibility = isGraph ? Visibility.Visible : Visibility.Collapsed;
+        UpdatePagingBarVisibility();
         UpdateViewModeFocusability(isGraph);
 
         if (isGraph)

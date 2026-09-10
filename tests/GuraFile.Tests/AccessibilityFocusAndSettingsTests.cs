@@ -197,4 +197,38 @@ public sealed class AccessibilityFocusAndSettingsTests
 
         StringAssert.Contains(code, "RequestedTheme", "MainWindow must update FrameworkElement.RequestedTheme dynamically");
     }
+
+    [TestMethod]
+    public void MainWindow_FilePagingBarAndLoadMoreButton_ExposedWithAccessibilityAndPredictableTabIndex()
+    {
+        var xamlPath = GetMainWindowXamlPath();
+        var doc = XDocument.Load(xamlPath);
+
+        var pagingBar = doc.Descendants().FirstOrDefault(e => e.Attribute(XNs + "Name")?.Value == "FilePagingBar");
+        Assert.IsNotNull(pagingBar, "FilePagingBar Grid must exist in MainWindow.xaml");
+        Assert.AreEqual("4", pagingBar.Attribute("Grid.Row")?.Value, "FilePagingBar must be placed at Grid.Row 4");
+        Assert.AreEqual("Collapsed", pagingBar.Attribute("Visibility")?.Value, "FilePagingBar must be Collapsed by default");
+
+        var loadMoreButton = doc.Descendants().FirstOrDefault(e => e.Attribute(XNs + "Name")?.Value == "LoadMoreFilesButton");
+        Assert.IsNotNull(loadMoreButton, "LoadMoreFilesButton must exist in MainWindow.xaml");
+        Assert.AreEqual("235", loadMoreButton.Attribute("TabIndex")?.Value, "LoadMoreFilesButton TabIndex must be 235");
+        Assert.AreEqual("False", loadMoreButton.Attribute("IsTabStop")?.Value, "LoadMoreFilesButton IsTabStop must be False by default when collapsed");
+        Assert.AreEqual("加载更多文件", loadMoreButton.Attribute("AutomationProperties.Name")?.Value);
+        Assert.AreEqual("加载下一批 1000 个文件", loadMoreButton.Attribute("AutomationProperties.HelpText")?.Value);
+        Assert.AreEqual("LoadMoreFilesButton_Click", loadMoreButton.Attribute("Click")?.Value);
+    }
+
+    [TestMethod]
+    public void MainWindow_CodeBehind_ImplementsPagingAndFocusManagement()
+    {
+        var csPath = GetMainWindowCsPath();
+        var code = File.ReadAllText(csPath);
+
+        StringAssert.Contains(code, "LoadMoreFilesButton_Click", "MainWindow.xaml.cs must implement LoadMoreFilesButton_Click");
+        StringAssert.Contains(code, "LoadMoreFilesAsync", "MainWindow.xaml.cs must implement LoadMoreFilesAsync");
+        StringAssert.Contains(code, "LoadMoreFilesButton.IsTabStop", "MainWindow.xaml.cs must toggle LoadMoreFilesButton.IsTabStop");
+        StringAssert.Contains(code, "FilePagingBar.Visibility", "MainWindow.xaml.cs must toggle FilePagingBar.Visibility");
+        StringAssert.Contains(code, "Offset = _currentFiles.Count", "MainWindow.xaml.cs must query next batch using Offset = _currentFiles.Count");
+        StringAssert.Contains(code, "Offset = 0", "MainWindow.xaml.cs must reset Offset = 0 on refresh");
+    }
 }

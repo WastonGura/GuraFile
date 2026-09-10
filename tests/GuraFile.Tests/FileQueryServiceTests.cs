@@ -178,6 +178,53 @@ public sealed class FileQueryServiceTests
     }
 
     [TestMethod]
+    public async Task PagingQuery_2500Files_IteratesBatchesWithoutIntersectionAndPreservesSortOrder()
+    {
+        using var database = TestDatabase.Create();
+        database.SeedFiles(2_500);
+        var service = new FileQueryService(database.Path);
+
+        var allFiles = await service.QueryAsync(new(SortBy: FileSortColumn.Name));
+        Assert.HasCount(2_500, allFiles);
+
+        // Batch 1: Offset 0, Limit 1000 -> IDs 1..1000
+        var batch1 = await service.QueryAsync(new(SortBy: FileSortColumn.Name, Limit: 1000, Offset: 0));
+        Assert.HasCount(1000, batch1);
+        Assert.AreEqual(1L, batch1[0].Id);
+        Assert.AreEqual(1000L, batch1[^1].Id);
+
+        // Batch 2: Offset 1000, Limit 1000 -> IDs 1001..2000
+        var batch2 = await service.QueryAsync(new(SortBy: FileSortColumn.Name, Limit: 1000, Offset: 1000));
+        Assert.HasCount(1000, batch2);
+        Assert.AreEqual(1001L, batch2[0].Id);
+        Assert.AreEqual(2000L, batch2[^1].Id);
+
+        // Batch 3: Offset 2000, Limit 1000 -> IDs 2001..2500
+        var batch3 = await service.QueryAsync(new(SortBy: FileSortColumn.Name, Limit: 1000, Offset: 2000));
+        Assert.HasCount(500, batch3);
+        Assert.AreEqual(2001L, batch3[0].Id);
+        Assert.AreEqual(2500L, batch3[^1].Id);
+
+        // Ensure disjoint sets
+        var ids1 = batch1.Select(f => f.Id).ToHashSet();
+        var ids2 = batch2.Select(f => f.Id).ToHashSet();
+        var ids3 = batch3.Select(f => f.Id).ToHashSet();
+
+        Assert.IsFalse(ids1.Overlaps(ids2), "Batch 1 and Batch 2 must not overlap");
+        Assert.IsFalse(ids2.Overlaps(ids3), "Batch 2 and Batch 3 must not overlap");
+        Assert.IsFalse(ids1.Overlaps(ids3), "Batch 1 and Batch 3 must not overlap");
+
+        // Concatenated batches match full dataset order exactly
+        var combined = batch1.Concat(batch2).Concat(batch3).ToList();
+        Assert.HasCount(2_500, combined);
+        for (var i = 0; i < 2_500; i++)
+        {
+            Assert.AreEqual(allFiles[i].Id, combined[i].Id, $"File ID mismatch at index {i}");
+            Assert.AreEqual(allFiles[i].Name, combined[i].Name, $"File Name mismatch at index {i}");
+        }
+    }
+
+    [TestMethod]
     public async Task TenThousandRowsAreReturnedAndTimed()
     {
         using var database = TestDatabase.Create();
