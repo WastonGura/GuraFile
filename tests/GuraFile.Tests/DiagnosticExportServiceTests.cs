@@ -280,4 +280,138 @@ public sealed class DiagnosticExportServiceTests
         Assert.AreEqual("• 配置摘要信息（config_summary.json）：脱敏的管理根目录、数据库架构版本、备份元数据；\n", anonymizedNote);
         Assert.AreEqual("• 配置摘要信息（config_summary.json）：管理根目录（未开启脱敏）、数据库架构版本、备份元数据；\n", rawNote);
     }
+
+    [TestMethod]
+    public void Export_WhenLogContainsEscapedQuotesOrPasswordSecret_ExportedLogRemainsValidJson()
+    {
+        var testLogsDir = Path.Combine(_tempDir, "escaped_quote_logs");
+        Directory.CreateDirectory(testLogsDir);
+
+        var logger = new DiagnosticLogger(testLogsDir);
+        logger.LogInfo(
+            DiagnosticCategory.App,
+            "AuthEvent",
+            message: "token=\"synthetic_secret\" and password: \"secret_123\"");
+
+        var testZip = Path.Combine(_tempDir, "escaped_quote_export.zip");
+        var service = new DiagnosticExportService(
+            databasePath: _dbPath,
+            logsDirectory: testLogsDir,
+            backupDirectory: _backupDir,
+            anonymizePaths: true);
+
+        var result = service.Export(testZip);
+        Assert.IsTrue(result.Succeeded, $"Export failed: {result.ErrorMessage}");
+
+        using var archive = ZipFile.OpenRead(testZip);
+        var logEntry = archive.Entries.FirstOrDefault(e => e.FullName.StartsWith("logs/") && e.FullName.EndsWith(".log"));
+        Assert.IsNotNull(logEntry, "Exported zip should contain the log file");
+
+        using var reader = new StreamReader(logEntry.Open());
+        var content = reader.ReadToEnd();
+        Assert.DoesNotContain("synthetic_secret", content);
+        Assert.DoesNotContain("secret_123", content);
+
+        var lines = content.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        Assert.IsGreaterThan(0, lines.Length);
+        foreach (var line in lines)
+        {
+            using var doc = JsonDocument.Parse(line);
+            var root = doc.RootElement;
+            var message = root.GetProperty("message").GetString();
+            Assert.IsNotNull(message);
+            Assert.Contains("token=\"***\"", message);
+            Assert.Contains("password: \"***\"", message);
+        }
+    }
+
+    [TestMethod]
+    public void Export_WhenLogContainsTrailingUserPath_ExportedLogRemainsValidJson()
+    {
+        var testLogsDir = Path.Combine(_tempDir, "trailing_path_logs");
+        Directory.CreateDirectory(testLogsDir);
+
+        var logger = new DiagnosticLogger(testLogsDir);
+        logger.LogInfo(
+            DiagnosticCategory.App,
+            "RootCheck",
+            message: "Root C:/Users/SyntheticUser");
+
+        var testZip = Path.Combine(_tempDir, "trailing_path_export.zip");
+        var service = new DiagnosticExportService(
+            databasePath: _dbPath,
+            logsDirectory: testLogsDir,
+            backupDirectory: _backupDir,
+            anonymizePaths: true);
+
+        var result = service.Export(testZip);
+        Assert.IsTrue(result.Succeeded, $"Export failed: {result.ErrorMessage}");
+
+        using var archive = ZipFile.OpenRead(testZip);
+        var logEntry = archive.Entries.FirstOrDefault(e => e.FullName.StartsWith("logs/") && e.FullName.EndsWith(".log"));
+        Assert.IsNotNull(logEntry, "Exported zip should contain the log file");
+
+        using var reader = new StreamReader(logEntry.Open());
+        var content = reader.ReadToEnd();
+        Assert.DoesNotContain("SyntheticUser", content);
+
+        var lines = content.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        Assert.IsGreaterThan(0, lines.Length);
+        foreach (var line in lines)
+        {
+            using var doc = JsonDocument.Parse(line);
+            var root = doc.RootElement;
+            var message = root.GetProperty("message").GetString();
+            Assert.IsNotNull(message);
+            Assert.Contains("<user>", message);
+            Assert.AreEqual("Root C:/Users/<user>", message);
+        }
+    }
+
+    [TestMethod]
+    public async Task ExportAsync_EndToEndRealLoggerLogs_AllExportedLinesParseSuccessfully()
+    {
+        var testLogsDir = Path.Combine(_tempDir, "e2e_logs");
+        Directory.CreateDirectory(testLogsDir);
+
+        var logger = new DiagnosticLogger(testLogsDir);
+        logger.LogInfo(DiagnosticCategory.App, "Startup", message: "token=\"synthetic_secret\"");
+        logger.LogWarning(DiagnosticCategory.Scanner, "ScanWarning", message: "Encountered password: \"secret_123\" in config");
+        logger.LogError(DiagnosticCategory.Database, "DbError", message: "Failed accessing Root C:/Users/SyntheticUser", errorCode: "ERR_PATH_USER");
+        logger.LogInfo(DiagnosticCategory.Watcher, "WatcherOnline", properties: new Dictionary<string, object?>
+        {
+            ["path"] = @"C:\Users\SyntheticUser\Documents\SecretFolder",
+            ["secretKey"] = "apikey: \"secret_key_val\""
+        });
+
+        var testZip = Path.Combine(_tempDir, "e2e_export.zip");
+        var service = new DiagnosticExportService(
+            databasePath: _dbPath,
+            logsDirectory: testLogsDir,
+            backupDirectory: _backupDir,
+            anonymizePaths: true);
+
+        var result = await service.ExportAsync(testZip);
+        Assert.IsTrue(result.Succeeded, $"Export failed: {result.ErrorMessage}");
+
+        using var archive = ZipFile.OpenRead(testZip);
+        var logEntries = archive.Entries.Where(e => e.FullName.StartsWith("logs/") && e.FullName.EndsWith(".log")).ToList();
+        Assert.IsGreaterThan(0, logEntries.Count);
+
+        int totalParsedLines = 0;
+        foreach (var entry in logEntries)
+        {
+            using var reader = new StreamReader(entry.Open());
+            var content = await reader.ReadToEndAsync();
+            var lines = content.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+            foreach (var line in lines)
+            {
+                using var doc = JsonDocument.Parse(line);
+                Assert.AreNotEqual(JsonValueKind.Undefined, doc.RootElement.ValueKind);
+                totalParsedLines++;
+            }
+        }
+
+        Assert.AreEqual(4, totalParsedLines);
+    }
 }

@@ -1,3 +1,39 @@
+# v0.5.3 发布验收
+
+验收日期：2026-09-10
+
+支持平台：Windows 10 1809 及以上，x64
+
+## 前置与 Issue 交付验证
+
+- [x] #112 修复跨卷替换移动标签覆盖并优先核对磁盘物理稳定文件身份已合并并通过 CI。
+- [x] #113 实现大结果集增量式分页流式加载已合并并通过 CI。
+- [x] #114 管理根目录监听器改为后台异步启动防止慢速网络驱动器阻塞 UI 已合并并通过 CI。
+- [x] #115 重构基于结构化 JSON 的导出脱敏并完成全工程发布元数据升级与验收。
+
+## 结构化 JSON 日志脱敏与发布元数据验证
+
+- [x] 结构化 JSON 导出脱敏：`DiagnosticExportService.ReadAndSanitizeLogFile` 使用 `JsonNode` 逐层反序列化并脱敏属性字符串，写回标准单行有效 JSON，彻底修复转义引号及末尾用户路径损坏问题。
+- [x] 优雅降级脱敏：非 JSON 格式行或截断文本安全降级至文本脱敏 `DiagnosticLogger.SanitizeText`。
+- [x] 正则边界防御：`DiagnosticLogger.UserProfileRegex` 正确排除引号、空白及结构边界字符，避免匹配路径时贪婪吞噬后续闭合引号或 JSON 结构。
+- [x] 自动化测试验证：端到端真实 logger 写入并经 `ExportAsync` 打包导出，解压逐行断言 `JsonDocument.Parse` 均能正常解析。
+
+## 本地构建、测试与候选包
+
+- [x] 产品版本 `0.5.3`、程序集版本和文件版本 `0.5.3.0`、打包默认值及文档当前版本一致。
+- [x] Release x64 自包含构建成功，0 警告、0 错误。
+- [x] Release 自动化测试全部 100% 通过（无失败、无跳过）。
+- [x] Release 构建输出可见窗口启动冒烟通过（`tests\LaunchSmoke.ps1`）。
+- [x] `PackageRelease.ps1 -Version 0.5.3` 成功生成本地候选 ZIP 与 checksum。
+- [x] ZIP 包含 `App.xbf`、`MainWindow.xbf`、`GuraFile.pri`、四项离线图谱资产、`README.md`、`CHANGELOG.md`、`THIRD_PARTY_NOTICES.md` 及许可证。
+- [x] 包内 `GuraFile.exe` 文件版本为 `0.5.3.0`。
+- [x] 从 ZIP 解压后的包内 `GuraFile.exe` 可见窗口启动且响应正常，退出后无残留进程。
+- [x] `git diff --check` 通过。
+
+## 主 Agent 后续发布步骤
+
+本实现提交不创建 PR、不发布 Release。独立审查、Issue #115 PR 与 CI、合并后从干净 remote-main 重建、最终资产上传与回下载复验及 Milestone 关闭由主 Agent 后续完成；最终发布 ZIP 的 SHA-256 应以合并后干净构建结果为准。
+
 # v0.5.2 发布验收
 
 验收日期：2026-09-09

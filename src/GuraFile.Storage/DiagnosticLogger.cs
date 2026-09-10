@@ -57,7 +57,7 @@ public class DiagnosticLogger
     public const int DefaultFloodThresholdPerSecond = 10;
 
     private static readonly Regex UserProfileRegex = new(
-        @"(?i)([a-zA-Z]:[\\/]Users[\\/])[^\\/\r\n]+",
+        @"(?i)([a-zA-Z]:[\\/]Users[\\/])[^\\/""\s,;}{\])\r\n]+",
         RegexOptions.Compiled);
 
     private static readonly Regex SecretTokenRegex = new(
