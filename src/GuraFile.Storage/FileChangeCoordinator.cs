@@ -142,12 +142,34 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
     public bool Watch(ManagedRoot root)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        bool watched;
         lock (_watchers)
         {
             ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
             _knownRoots[root.Id] = root;
-            return WatchCore(root);
+            watched = WatchCore(root);
         }
+
+        if (!watched && _scanner is not null && root.Status != ManagedRootStatus.Offline)
+        {
+            if (Volatile.Read(ref _disposed) == 0)
+            {
+                try
+                {
+                    _scanner.SetRootStatus(
+                        root.Id,
+                        ManagedRootStatus.Offline,
+                        "Managed root watcher could not be started.");
+                    NotifyRootChanged();
+                }
+                catch (Exception ex)
+                {
+                    ReportError(ex);
+                }
+            }
+        }
+
+        return watched;
     }
 
     private bool WatchCore(ManagedRoot root)
@@ -160,18 +182,41 @@ public sealed class FileChangeCoordinator : IAsyncDisposable
 
         if (!Directory.Exists(root.Path))
         {
+            _logger.LogWarning(
+                DiagnosticCategory.Watcher,
+                "RootOffline",
+                status: DiagnosticResultStatus.Failed,
+                message: $"Managed root '{root.Path}' is inaccessible or does not exist.",
+                errorCode: "ROOT_DIRECTORY_NOT_FOUND");
             return false;
         }
 
-        var watcher = new FileSystemWatcher(root.Path)
+        FileSystemWatcher watcher;
+        try
         {
-            IncludeSubdirectories = true,
-            NotifyFilter = NotifyFilters.FileName |
-                NotifyFilters.DirectoryName |
-                NotifyFilters.LastWrite |
-                NotifyFilters.Size |
-                NotifyFilters.CreationTime
-        };
+            watcher = new FileSystemWatcher(root.Path)
+            {
+                IncludeSubdirectories = true,
+                NotifyFilter = NotifyFilters.FileName |
+                    NotifyFilters.DirectoryName |
+                    NotifyFilters.LastWrite |
+                    NotifyFilters.Size |
+                    NotifyFilters.CreationTime
+            };
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            _logger.LogError(
+                DiagnosticCategory.Watcher,
+                "WatcherStartFailed",
+                status: DiagnosticResultStatus.Failed,
+                message: $"Failed to initialize watcher for '{root.Path}': {exception.Message}",
+                errorCode: "WATCHER_START_FAILED",
+                exception: exception);
+            ReportError(exception);
+            return false;
+        }
+
         watcher.Created += (_, eventArgs) => Notify(root.Id, eventArgs.FullPath);
         watcher.Changed += (_, eventArgs) => Notify(root.Id, eventArgs.FullPath);
         watcher.Deleted += (_, eventArgs) => Notify(root.Id, eventArgs.FullPath);
