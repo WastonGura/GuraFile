@@ -166,6 +166,71 @@ public sealed class FileOperationCrashRecoveryService
                                     continue;
                                 }
 
+                                // 检查跨卷移动或身份不一致场景下目标是否已被外部替换或已存在用户标签
+                                var isSameIdentity = sourceOriginalIdentity != null && sourceOriginalIdentity.IsStable && targetDiskId.IsStable &&
+                                                     string.Equals(targetDiskId.VolumeId, sourceOriginalIdentity.VolumeId, StringComparison.OrdinalIgnoreCase) &&
+                                                     string.Equals(targetDiskId.FileId, sourceOriginalIdentity.FileId, StringComparison.OrdinalIgnoreCase);
+
+                                if (!isSameIdentity)
+                                {
+                                    long? targetNodeId = null;
+                                    if (targetDiskId.IsStable)
+                                    {
+                                        targetNodeId = GetIndexedFileId(connection, normalizedTarget, targetDiskId);
+                                        if (!targetNodeId.HasValue)
+                                        {
+                                            using var findIdCmd = connection.CreateCommand();
+                                            findIdCmd.CommandText =
+                                                """
+                                                SELECT id FROM files
+                                                WHERE volume_id = $vol AND file_id = $fid AND is_online = 1
+                                                ORDER BY id DESC LIMIT 1;
+                                                """;
+                                            findIdCmd.Parameters.AddWithValue("$vol", targetDiskId.VolumeId);
+                                            findIdCmd.Parameters.AddWithValue("$fid", targetDiskId.FileId);
+                                            var foundId = findIdCmd.ExecuteScalar();
+                                            if (foundId is long id)
+                                            {
+                                                targetNodeId = id;
+                                            }
+                                        }
+                                    }
+
+                                    if (!targetNodeId.HasValue)
+                                    {
+                                        using var findTargetCmd = connection.CreateCommand();
+                                        findTargetCmd.CommandText =
+                                            """
+                                            SELECT id FROM files
+                                            WHERE normalized_path = $path COLLATE NOCASE AND is_online = 1
+                                            ORDER BY id DESC LIMIT 1;
+                                            """;
+                                        findTargetCmd.Parameters.AddWithValue("$path", normalizedTarget);
+                                        var found = findTargetCmd.ExecuteScalar();
+                                        if (found is long idVal)
+                                        {
+                                            targetNodeId = idVal;
+                                        }
+                                    }
+
+                                    var existingTargetUserTags = targetNodeId.HasValue
+                                        ? LoadUserTagsForFile(connection, targetNodeId.Value)
+                                        : Array.Empty<string>();
+
+                                    if (existingTargetUserTags.Count > 0)
+                                    {
+                                        var targetTagSet = new HashSet<string>(existingTargetUserTags, StringComparer.OrdinalIgnoreCase);
+                                        var sourceTagSet = new HashSet<string>(snapshot.UserTags, StringComparer.OrdinalIgnoreCase);
+                                        if (!targetTagSet.SetEquals(sourceTagSet))
+                                        {
+                                            intentHasIndeterminate = true;
+                                            itemUpdates.Add((source, "indeterminate", "目标路径已被具有用户标签的文件占用，未执行覆盖，请人工核实。"));
+                                            indeterminateDetails.Add($"[{intent.OperationType}/target_occupied_with_tags] {source} -> {target}");
+                                            continue;
+                                        }
+                                    }
+                                }
+
                                 // Shell move succeeded before crash, reconcile index without writing to disk
                                 var commitResult = _committer.CommitSingleItem(connection, roots, source, target, isMove: true, snapshot);
                                 if (commitResult.Succeeded)

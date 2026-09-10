@@ -952,9 +952,15 @@ public sealed class FileOperationIndexCommitter
 
         if (isCrossVolumeOrCopy)
         {
-            // 防抹除保护：当源快照为空（无用户标签且源文件未在数据库中找到记录）时，严禁清空目标节点已有的用户标签
             var isSourceSnapshotEmpty = snapshot.DbFileId == null && snapshot.UserTags.Count == 0;
-            if (!isSourceSnapshotEmpty)
+            var existingTargetTags = LoadUserTagsForFile(connection, persistedFileId, transaction);
+
+            // 防抹除与防覆盖保护：
+            // 1. 当源快照为空（无用户标签且源文件未在数据库中找到记录）时，严禁清空目标节点已有的用户标签；
+            // 2. 在移动场景下（isMove 为真），若目标节点在数据库中已存在且已具有用户标签，无法证明目标是源移动产生的新空节点，严禁清空或覆盖既有标签；
+            // 3. 仅当目标节点无既有用户标签（例如移动产生的新空节点或被扫描器刚录入的无标签节点），或为明确的覆盖复制时，允许继承源标签。
+            bool shouldProtectExistingTags = isMove && existingTargetTags.Count > 0;
+            if (!isSourceSnapshotEmpty && !shouldProtectExistingTags)
             {
                 using (var clearUserTags = connection.CreateCommand())
                 {
@@ -963,7 +969,6 @@ public sealed class FileOperationIndexCommitter
                     clearUserTags.Parameters.AddWithValue("$fileId", persistedFileId);
                     clearUserTags.ExecuteNonQuery();
                 }
-
                 if (snapshot.UserTags.Count > 0)
                 {
                     foreach (var userTagName in snapshot.UserTags)
@@ -1247,59 +1252,8 @@ public sealed class FileOperationIndexCommitter
         FileIdentity? dbIdentity = null;
         var userTags = new List<string>();
 
-        // 1. 若源路径在磁盘存在且具有稳定身份，优先查找具有该稳定身份的在线记录
+        // 1. 若源路径在磁盘存在且具有稳定身份，稳定身份查询拥有最高优先级（合并在线与离线，在线优先）
         if (sourceExists && diskIdentity.IsStable)
-        {
-            using var command = connection.CreateCommand();
-            command.CommandText =
-                """
-                SELECT f.id, f.volume_id, f.file_id, f.identity_kind, f.identity_diagnostic
-                FROM files f
-                WHERE f.volume_id = $volumeId AND f.file_id = $fileId AND f.is_online = 1
-                ORDER BY f.id DESC
-                LIMIT 1;
-                """;
-            command.Parameters.AddWithValue("$volumeId", diskIdentity.VolumeId);
-            command.Parameters.AddWithValue("$fileId", diskIdentity.FileId);
-            using var reader = command.ExecuteReader();
-            if (reader.Read())
-            {
-                dbFileId = reader.GetInt64(0);
-                var vol = reader.GetString(1);
-                var fid = reader.GetString(2);
-                var kind = reader.GetString(3);
-                var diag = reader.IsDBNull(4) ? null : reader.GetString(4);
-                dbIdentity = new FileIdentity(vol, fid, kind == "stable", diag);
-            }
-        }
-
-        // 2. 查找匹配路径的在线记录
-        if (dbFileId is null)
-        {
-            using var command = connection.CreateCommand();
-            command.CommandText =
-                """
-                SELECT f.id, f.volume_id, f.file_id, f.identity_kind, f.identity_diagnostic
-                FROM files f
-                WHERE f.normalized_path = $normalizedPath COLLATE NOCASE AND f.is_online = 1
-                ORDER BY f.id DESC
-                LIMIT 1;
-                """;
-            command.Parameters.AddWithValue("$normalizedPath", normalizedSource);
-            using var reader = command.ExecuteReader();
-            if (reader.Read())
-            {
-                dbFileId = reader.GetInt64(0);
-                var vol = reader.GetString(1);
-                var fid = reader.GetString(2);
-                var kind = reader.GetString(3);
-                var diag = reader.IsDBNull(4) ? null : reader.GetString(4);
-                dbIdentity = new FileIdentity(vol, fid, kind == "stable", diag);
-            }
-        }
-
-        // 3. 若源文件在磁盘存在且有稳定身份，但在数据库中暂时未在线，查找具有该稳定身份的历史记录
-        if (dbFileId is null && sourceExists && diskIdentity.IsStable)
         {
             using var command = connection.CreateCommand();
             command.CommandText =
@@ -1324,7 +1278,46 @@ public sealed class FileOperationIndexCommitter
             }
         }
 
-        // 4. 只有在源路径物理不存在且完全没有在线记录匹配时，才允许将离线路径作为最后的保底回退
+        // 2. 只有在物理磁盘完全无法读取稳定身份（非稳定降级），或者数据库完全无该稳定身份记录时，才回退到按路径查找
+        if (dbFileId is null)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                """
+                SELECT f.id, f.volume_id, f.file_id, f.identity_kind, f.identity_diagnostic
+                FROM files f
+                WHERE f.normalized_path = $normalizedPath COLLATE NOCASE AND f.is_online = 1
+                ORDER BY f.id DESC
+                LIMIT 1;
+                """;
+            command.Parameters.AddWithValue("$normalizedPath", normalizedSource);
+            using var reader = command.ExecuteReader();
+            if (reader.Read())
+            {
+                var id = reader.GetInt64(0);
+                var vol = reader.GetString(1);
+                var fid = reader.GetString(2);
+                var kind = reader.GetString(3);
+                var diag = reader.IsDBNull(4) ? null : reader.GetString(4);
+
+                var isDbRecordStable = (kind == "stable") || (!string.IsNullOrEmpty(vol) && !string.IsNullOrEmpty(fid) && !string.Equals(vol, "path-fallback", StringComparison.OrdinalIgnoreCase));
+                if (sourceExists && diskIdentity.IsStable && isDbRecordStable &&
+                    (!string.Equals(vol, diskIdentity.VolumeId, StringComparison.OrdinalIgnoreCase) ||
+                     !string.Equals(fid, diskIdentity.FileId, StringComparison.OrdinalIgnoreCase)))
+                {
+                    // 拒绝匹配：该记录具有与磁盘矛盾的稳定身份，属于曾经存在于该路径的另一历史文件
+                    dbFileId = null;
+                    dbIdentity = null;
+                }
+                else
+                {
+                    dbFileId = id;
+                    dbIdentity = new FileIdentity(vol, fid, kind == "stable", diag);
+                }
+            }
+        }
+
+        // 3. 只有在源路径物理不存在且完全没有在线记录匹配时，才允许将离线路径作为最后的保底回退
         if (dbFileId is null && !sourceExists)
         {
             using var command = connection.CreateCommand();
@@ -1363,9 +1356,10 @@ public sealed class FileOperationIndexCommitter
             isDirectory);
     }
 
-    private static IReadOnlyList<string> LoadUserTagsForFile(SqliteConnection connection, long fileId)
+    private static IReadOnlyList<string> LoadUserTagsForFile(SqliteConnection connection, long fileId, SqliteTransaction? transaction = null)
     {
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText =
             """
             SELECT t.name
