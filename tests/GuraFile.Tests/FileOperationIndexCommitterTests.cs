@@ -217,6 +217,14 @@ public sealed class FileOperationIndexCommitterTests
         // Target created on disk, BUT source file STILL exists on disk
         File.WriteAllText(targetPath, "locked cross volume content");
 
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "UPDATE files SET volume_id = 'VOL1', file_id = 'SRC_LOCKED_ID' WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$id", initialFiles[0].Id);
+            cmd.ExecuteNonQuery();
+        }
+
         var committer = new FileOperationIndexCommitter(
             env.DatabasePath,
             env.Scanner,

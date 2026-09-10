@@ -872,6 +872,281 @@ public sealed class FileOperationCrashRecoveryTests
     }
 
     [TestMethod]
+    public async Task CrossVolumeMoveRecovery_WhenTargetReplacedWithTaggedFile_PreservesTargetTagsAndMarksIndeterminate()
+    {
+        using var env = TestEnvironment.Create();
+        var sourceFile = env.CreateFile("source_cross.txt", "content of source");
+        var destDir = env.CreateDirectory("CrossDest");
+        var targetFile = Path.Combine(destDir, "target_cross.txt");
+
+        var root = env.Scanner.AddRoot(env.RootPath);
+        await env.Scanner.ScanAsync(root.Id);
+
+        var queryService = new FileQueryService(env.DatabasePath);
+        var initialFiles = await queryService.QueryAsync(new());
+        var sourceDb = initialFiles.Single(f => f.Path == sourceFile);
+
+        var tagService = new TagService(env.DatabasePath);
+        var sourceTag = tagService.CreateTag("SourceTag");
+        var targetExistingTag = tagService.CreateTag("TargetExistingTag");
+        tagService.AddTagToFiles(sourceTag.Id, [sourceDb.Id]);
+
+        // Shell move completed on disk: source deleted, but target was replaced by an external file
+        File.Delete(sourceFile);
+        File.WriteAllText(targetFile, "content of external replacement");
+
+        // Identity setup: source is VOL1 / SRC_FILE_ID, target is VOL2 / REPLACED_FILE_ID
+        FileIdentity ReadIdentity(string path)
+        {
+            var norm = SafeFileOperationExecutor.Normalize(path);
+            var normSrc = SafeFileOperationExecutor.Normalize(sourceFile);
+            var normDst = SafeFileOperationExecutor.Normalize(targetFile);
+            if (string.Equals(norm, normSrc, StringComparison.OrdinalIgnoreCase))
+            {
+                return new FileIdentity("VOL1", "SRC_FILE_ID", true, null);
+            }
+            if (string.Equals(norm, normDst, StringComparison.OrdinalIgnoreCase))
+            {
+                return new FileIdentity("VOL2", "REPLACED_FILE_ID", true, null);
+            }
+            return FileIdentityReader.Read(path);
+        }
+
+        // Set source file record in DB to VOL1 / SRC_FILE_ID
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "UPDATE files SET volume_id = 'VOL1', file_id = 'SRC_FILE_ID' WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$id", sourceDb.Id);
+            cmd.ExecuteNonQuery();
+        }
+
+        // Target was already indexed in DB (e.g. by scanner) and tagged with TargetExistingTag!
+        long targetDbId;
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            using var insertTargetCmd = connection.CreateCommand();
+            insertTargetCmd.CommandText =
+                """
+                INSERT INTO files (root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, is_online, scan_token)
+                VALUES ($rootId, 'VOL2', 'REPLACED_FILE_ID', $path, $normalizedPath, 'target_cross.txt', '.txt', 30, '2026-09-09T00:00:00Z', 'stable', 1, 'tok-rep')
+                RETURNING id;
+                """;
+            insertTargetCmd.Parameters.AddWithValue("$rootId", root.Id);
+            insertTargetCmd.Parameters.AddWithValue("$path", targetFile);
+            insertTargetCmd.Parameters.AddWithValue("$normalizedPath", SafeFileOperationExecutor.Normalize(targetFile));
+            targetDbId = (long)insertTargetCmd.ExecuteScalar()!;
+        }
+        tagService.AddTagToFiles(targetExistingTag.Id, [targetDbId]);
+
+        var committer = new FileOperationIndexCommitter(
+            env.DatabasePath,
+            env.Scanner,
+            executor: null,
+            readIdentity: ReadIdentity,
+            classify: new FileTypeClassifier().Classify,
+            getAttributes: File.GetAttributes,
+            fileExists: File.Exists,
+            directoryExists: Directory.Exists);
+
+        long intentId;
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            intentId = committer.InsertIntent(
+                connection,
+                correlationId: "test-cross-volume-replaced-tag-protection",
+                operationType: "move",
+                collisionPolicy: "auto_rename",
+                items: [(sourceFile, destDir, "target_cross.txt", targetFile)]);
+
+            committer.UpdateIntentShellCompleted(
+                connection,
+                intentId,
+                [(sourceFile, targetFile, "completed", null)]);
+        }
+
+        // Run recovery
+        var recoveryService = new FileOperationCrashRecoveryService(
+            env.DatabasePath,
+            env.Scanner,
+            committer,
+            diagnosticLogger: null,
+            readIdentity: ReadIdentity);
+
+        var report = await recoveryService.RecoverAsync();
+
+        Assert.AreEqual(0, report.RecoveredIntentsCount, "Should not be recovered as committed.");
+        Assert.AreEqual(1, report.IndeterminateIntentsCount, "Should be marked indeterminate.");
+        Assert.IsTrue(report.HasIndeterminateOperations);
+
+        // Verify target tags in DB: TargetExistingTag must be preserved intact! Must NOT have SourceTag!
+        var targetTags = tagService.ListTagsForFile(targetDbId);
+        Assert.HasCount(1, targetTags);
+        Assert.AreEqual("TargetExistingTag", targetTags[0].Name, "Existing tag on replaced target must be preserved.");
+
+        // Verify intent status in DB is indeterminate
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            Assert.AreEqual("indeterminate", committer.GetIntentStatus(connection, intentId));
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT commit_status, error FROM file_operation_intent_items WHERE intent_id = $id;";
+            cmd.Parameters.AddWithValue("$id", intentId);
+            using var reader = cmd.ExecuteReader();
+            Assert.IsTrue(reader.Read());
+            Assert.AreEqual("indeterminate", reader.GetString(0));
+            var error = reader.GetString(1);
+            StringAssert.Contains(error, "目标路径已被具有用户标签的文件占用，未执行覆盖，请人工核实。");
+        }
+    }
+
+    [TestMethod]
+    public void QuerySourceSnapshot_WhenSourceHasStableIdentityInDbAsOffline_PrioritizesStableIdentityOverOldOnlinePathRecord()
+    {
+        using var env = TestEnvironment.Create();
+        var pathP = Path.Combine(env.RootPath, "fileP.txt");
+        var otherPath = Path.Combine(env.RootPath, "old_fileB.txt");
+        var root = env.Scanner.AddRoot(env.RootPath);
+
+        var tagService = new TagService(env.DatabasePath);
+        var tagOld = tagService.CreateTag("TAG_A_OLD");
+        var tagOffline = tagService.CreateTag("TAG_B_OFFLINE");
+
+        long recordAId;
+        long recordBId;
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            // Record A: at pathP, is_online = 1, stable identity (VOL1, FILE_A)
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText =
+                    """
+                    INSERT INTO files (root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, is_online, scan_token)
+                    VALUES ($rootId, 'VOL1', 'FILE_A', $path, $normPath, 'fileP.txt', '.txt', 100, '2026-09-01T00:00:00Z', 'stable', 1, 'tok1')
+                    RETURNING id;
+                    """;
+                cmd.Parameters.AddWithValue("$rootId", root.Id);
+                cmd.Parameters.AddWithValue("$path", pathP);
+                cmd.Parameters.AddWithValue("$normPath", SafeFileOperationExecutor.Normalize(pathP));
+                recordAId = (long)cmd.ExecuteScalar()!;
+            }
+
+            // Record B: identity (VOL1, FILE_B), is_online = 0 (offline stable identity)
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText =
+                    """
+                    INSERT INTO files (root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, is_online, scan_token)
+                    VALUES ($rootId, 'VOL1', 'FILE_B', $path, $normPath, 'old_fileB.txt', '.txt', 200, '2026-09-02T00:00:00Z', 'stable', 0, 'tok2')
+                    RETURNING id;
+                    """;
+                cmd.Parameters.AddWithValue("$rootId", root.Id);
+                cmd.Parameters.AddWithValue("$path", otherPath);
+                cmd.Parameters.AddWithValue("$normPath", SafeFileOperationExecutor.Normalize(otherPath));
+                recordBId = (long)cmd.ExecuteScalar()!;
+            }
+        }
+
+        tagService.AddTagToFiles(tagOld.Id, [recordAId]);
+        tagService.AddTagToFiles(tagOffline.Id, [recordBId]);
+
+        // On disk: file at pathP physically exists with stable identity (VOL1, FILE_B)
+        File.WriteAllText(pathP, "physical content of file B");
+
+        FileIdentity ReadIdentity(string path)
+        {
+            var norm = SafeFileOperationExecutor.Normalize(path);
+            var normP = SafeFileOperationExecutor.Normalize(pathP);
+            if (string.Equals(norm, normP, StringComparison.OrdinalIgnoreCase))
+            {
+                return new FileIdentity("VOL1", "FILE_B", true, null);
+            }
+            return FileIdentityReader.Read(path);
+        }
+
+        var committer = new FileOperationIndexCommitter(
+            env.DatabasePath,
+            env.Scanner,
+            executor: null,
+            readIdentity: ReadIdentity,
+            classify: new FileTypeClassifier().Classify,
+            getAttributes: File.GetAttributes,
+            fileExists: File.Exists,
+            directoryExists: Directory.Exists);
+
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            var snapshot = committer.QuerySourceSnapshot(connection, SafeFileOperationExecutor.Normalize(pathP));
+
+            Assert.AreEqual(recordBId, snapshot.DbFileId, "Snapshot must match offline record B by stable identity.");
+            Assert.IsTrue(snapshot.UserTags.Contains("TAG_B_OFFLINE"), "Snapshot must inherit TAG_B_OFFLINE from stable identity record.");
+            Assert.IsFalse(snapshot.UserTags.Contains("TAG_A_OLD"), "Snapshot must not be preempted by old online record A.");
+        }
+    }
+
+    [TestMethod]
+    public void QuerySourceSnapshot_WhenPathRecordHasConflictingStableIdentity_RejectsMatchAndReturnsEmptySnapshot()
+    {
+        using var env = TestEnvironment.Create();
+        var pathP = Path.Combine(env.RootPath, "fileP.txt");
+        var root = env.Scanner.AddRoot(env.RootPath);
+
+        var tagService = new TagService(env.DatabasePath);
+        var tagOld = tagService.CreateTag("TAG_A_OLD");
+
+        long recordAId;
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            // Record A in DB at pathP has stable identity (VOL1, FILE_A) and is_online = 1
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText =
+                """
+                INSERT INTO files (root_id, volume_id, file_id, path, normalized_path, name, extension, size, modified_utc, identity_kind, is_online, scan_token)
+                VALUES ($rootId, 'VOL1', 'FILE_A', $path, $normPath, 'fileP.txt', '.txt', 100, '2026-09-01T00:00:00Z', 'stable', 1, 'tok1')
+                RETURNING id;
+                """;
+            cmd.Parameters.AddWithValue("$rootId", root.Id);
+            cmd.Parameters.AddWithValue("$path", pathP);
+            cmd.Parameters.AddWithValue("$normPath", SafeFileOperationExecutor.Normalize(pathP));
+            recordAId = (long)cmd.ExecuteScalar()!;
+        }
+
+        tagService.AddTagToFiles(tagOld.Id, [recordAId]);
+
+        // On disk: file at pathP physically exists with stable identity (VOL1, FILE_B)
+        // (DB has no record for FILE_B)
+        File.WriteAllText(pathP, "physical content of new file B");
+
+        FileIdentity ReadIdentity(string path)
+        {
+            var norm = SafeFileOperationExecutor.Normalize(path);
+            var normP = SafeFileOperationExecutor.Normalize(pathP);
+            if (string.Equals(norm, normP, StringComparison.OrdinalIgnoreCase))
+            {
+                return new FileIdentity("VOL1", "FILE_B", true, null);
+            }
+            return FileIdentityReader.Read(path);
+        }
+
+        var committer = new FileOperationIndexCommitter(
+            env.DatabasePath,
+            env.Scanner,
+            executor: null,
+            readIdentity: ReadIdentity,
+            classify: new FileTypeClassifier().Classify,
+            getAttributes: File.GetAttributes,
+            fileExists: File.Exists,
+            directoryExists: Directory.Exists);
+
+        using (var connection = SqliteDatabase.Open(env.DatabasePath))
+        {
+            var snapshot = committer.QuerySourceSnapshot(connection, SafeFileOperationExecutor.Normalize(pathP));
+
+            Assert.IsNull(snapshot.DbFileId, "Snapshot DbFileId must be null when path record has conflicting stable identity.");
+            Assert.IsEmpty(snapshot.UserTags, "Snapshot user tags must be empty.");
+        }
+    }
+
+    [TestMethod]
     public async Task PendingCopy_WhenTargetExistsOnDisk_RemainsIndeterminateAcrossRestarts()
     {
         using var env = TestEnvironment.Create();
