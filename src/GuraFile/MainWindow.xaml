@@ -98,6 +98,7 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
             <StackPanel Grid.Row="0" Spacing="8">
                 <InfoBar x:Name="DatabaseNoticeBar" AutomationProperties.Name="数据库状态提示" AutomationProperties.LiveSetting="Assertive" IsOpen="False" IsClosable="False">
@@ -241,6 +242,16 @@
                         <TextBlock x:Name="GraphStateText" AutomationProperties.Name="图谱状态提示" AutomationProperties.LiveSetting="Polite" FontSize="14" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     </StackPanel>
                 </Grid>
+            </Grid>
+            <Grid x:Name="FilePagingBar" Grid.Row="4" Visibility="Collapsed" Margin="0,4,0,0">
+                <Button x:Name="LoadMoreFilesButton"
+                        HorizontalAlignment="Stretch"
+                        Content="加载更多文件…"
+                        Click="LoadMoreFilesButton_Click"
+                        TabIndex="235"
+                        IsTabStop="False"
+                        AutomationProperties.Name="加载更多文件"
+                        AutomationProperties.HelpText="加载下一批 1000 个文件" />
             </Grid>
         </Grid>
 

@@ -66,7 +66,7 @@ public sealed class MainWindowSmokeTests
             .Where(name => name is not null)
             .ToHashSet();
         CollectionAssert.IsSubsetOf(
-            new[] { "SearchBox", "FilesStateText", "DetailsText", "SortNameButton", "SortPathButton", "SortExtensionButton", "SortSizeButton", "SortModifiedButton" },
+            new[] { "SearchBox", "FilesStateText", "DetailsText", "SortNameButton", "SortPathButton", "SortExtensionButton", "SortSizeButton", "SortModifiedButton", "FilePagingBar", "LoadMoreFilesButton" },
             names.ToArray());
     }
 
